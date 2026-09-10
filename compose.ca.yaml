@@ -1,0 +1,9 @@
+services:
+  app:
+    build:
+      secrets:
+        - npm_ca
+
+secrets:
+  npm_ca:
+    file: ./certs/npm-ca.pem
