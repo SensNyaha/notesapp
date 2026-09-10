@@ -7,12 +7,18 @@
     "node": ">=24 <25"
   },
   "scripts": {
-    "build": "node scripts/build-client.mjs && node scripts/build-sw.mjs",
+    "typecheck": "tsc --noEmit",
+    "build": "npm run typecheck && vite build && node scripts/build-sw.mjs",
     "start": "node server/index.mjs",
     "check": "node --test tests/server.test.mjs tests/sw.test.mjs"
   },
   "dependencies": {
     "fastify": "5.12.3",
     "preact": "10.29.8"
+  },
+  "devDependencies": {
+    "@types/node": "24.13.4",
+    "typescript": "7.0.2",
+    "vite": "8.3.0"
   }
 }

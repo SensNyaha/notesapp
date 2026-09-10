@@ -8,6 +8,7 @@ test('offline shell works; API and non-public paths bypass the Service Worker ca
   const handlers = {};
   const stores = new Map([['other-app', new Map()], ['tasks-shell-old', new Map()]]);
   let publicAssets = [];
+  let activationRequests = 0;
   const cacheApi = {
     async open(key) {
       if (!stores.has(key)) stores.set(key, new Map());
@@ -27,14 +28,23 @@ test('offline shell works; API and non-public paths bypass the Service Worker ca
     URL, caches: cacheApi,
     fetch: async () => { throw new Error('offline'); },
     self: { location: { origin: 'http://localhost:3100' }, clients: { claim: async () => {} },
-      addEventListener: (name, fn) => { handlers[name] = fn; }, skipWaiting: async () => {} },
+      addEventListener: (name, fn) => { handlers[name] = fn; }, skipWaiting: async () => { activationRequests++; } },
   });
   let pending;
   handlers.install({ waitUntil(promise) { pending = promise; } });
   await pending;
   assert(publicAssets.includes('/index.html'));
   assert(publicAssets.some(path => path.endsWith('.js')));
+  assert(publicAssets.some(path => /^\/assets\/.+\.css$/.test(path)));
+  assert(publicAssets.includes('/manifest.webmanifest'));
+  assert(!publicAssets.some(path => /\.(?:ts|map)$/.test(path) || path.startsWith('/src/')));
   assert(!publicAssets.some(path => path.startsWith('/api/') || path.includes('sqlite')));
+  assert.equal(activationRequests, 0, 'installation must wait for user action');
+  handlers.message({ data: { type: 'IGNORED' }, waitUntil(promise) { pending = promise; } });
+  assert.equal(activationRequests, 0);
+  handlers.message({ data: { type: 'SKIP_WAITING' }, waitUntil(promise) { pending = promise; } });
+  await pending;
+  assert.equal(activationRequests, 1);
   handlers.activate({ waitUntil(promise) { pending = promise; } });
   await pending;
   assert(stores.has('other-app'));
@@ -47,6 +57,7 @@ test('offline shell works; API and non-public paths bypass the Service Worker ca
     return { handled, result };
   }
   assert.equal(await request('/', 'navigate').result, 'cached:/index.html');
+  for (const path of publicAssets) assert.equal(await request(path).result, 'cached:' + path);
   for (const path of ['/api/health', '/api/notes', '/data/tasks.sqlite', '/private.txt']) {
     assert.equal(request(path).handled, false);
   }
