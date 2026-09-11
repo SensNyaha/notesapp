@@ -1,7 +1,10 @@
 import { h, render } from 'preact';
-import { useEffect, useState } from 'preact/hooks';
+import { useEffect, useRef, useState } from 'preact/hooks';
 import { isHealthResponse, type HealthResponse } from './types/api';
 import './style.css';
+import { Login } from './components/Login';
+import { session, signOut, authMessage } from './auth';
+import type { User } from './types/auth';
 
 const e = h;
 
@@ -17,6 +20,11 @@ function DefinitionList({ rows }: { rows: DefinitionRow[] }) {
 }
 
 function App() {
+  const [user, setUser] = useState<User | null>(null);
+  const [authLoading, setAuthLoading] = useState(true);
+  const [authError, setAuthError] = useState('');
+  const [loggingOut, setLoggingOut] = useState(false);
+  const authGeneration = useRef(0);
   const [health, setHealth] = useState<HealthResponse | null>(null);
   const [busy, setBusy] = useState(false);
   const [error, setError] = useState('');
@@ -25,6 +33,30 @@ function App() {
   const [waiting, setWaiting] = useState<ServiceWorker | null>(null);
   const secure = window.isSecureContext;
   const cryptoAvailable = secure && Boolean(window.crypto?.subtle);
+
+  async function checkSession() {
+    const generation = ++authGeneration.current;
+    try {
+      const result = await session();
+      if (generation === authGeneration.current) { setUser(result); setAuthError(''); }
+    } catch (caught) {
+      if (generation === authGeneration.current) setAuthError(authMessage(caught));
+    } finally { if (generation === authGeneration.current) setAuthLoading(false); }
+  }
+  useEffect(() => {
+    void checkSession();
+    const wake = () => { if (document.visibilityState === 'visible') void checkSession(); };
+    document.addEventListener('visibilitychange', wake);
+    window.addEventListener('online', wake);
+    return () => { authGeneration.current++; document.removeEventListener('visibilitychange', wake); window.removeEventListener('online', wake); };
+  }, []);
+
+  async function logout() {
+    setLoggingOut(true); authGeneration.current++;
+    try { await signOut(); authGeneration.current++; setUser(null); setAuthError(''); }
+    catch (caught) { setAuthError(authMessage(caught)); }
+    finally { setLoggingOut(false); }
+  }
 
   async function checkServer() {
     setBusy(true);
@@ -94,18 +126,28 @@ function App() {
     ['Часовой пояс', Intl.DateTimeFormat().resolvedOptions().timeZone],
   ];
 
+  const updateNotice = waiting && e('div', { class: 'update', role: 'status' },
+    'Доступна новая версия оболочки.', e('button', { onClick: applyUpdate }, 'Обновить приложение'));
+  if (authLoading) return e('main', { class: 'auth-screen', role: 'status' }, 'Проверяем вход…');
+  if (!user) return e('div', null,
+    updateNotice && e('div', { class: 'auth-status' }, updateNotice),
+    authError && e('div', { class: 'auth-status' }, e('p', { class: 'error', role: 'alert' }, authError),
+      e('button', { onClick: () => void checkSession() }, 'Повторить проверку входа')),
+    e(Login, { onLogin: (result) => { authGeneration.current++; setUser(result); setAuthError(''); } }));
+
   return e('main', null,
     e('header', null,
       e('a', { class: 'brand', href: '/', 'aria-label': 'Tasks, главная' },
         e('img', { src: '/icon.svg', width: 40, height: 40, alt: '' }), 'Tasks'),
-      e('span', { class: 'stage' }, 'Этап 01')),
+      e('span', { class: 'stage' }, 'Этап 03')),
+    e('div', { class: 'account-bar' }, e('p', null, user.login, ' · ', user.role === 'admin' ? 'Администратор' : 'Пользователь'),
+      e('button', { disabled: loggingOut, onClick: logout }, loggingOut ? 'Выходим…' : 'Выйти')),
+    authError && e('p', { class: 'error', role: 'alert' }, authError),
     e('section', { class: 'intro' },
       e('p', { class: 'eyebrow' }, 'ПЕРВЫЙ ЗАПУСК'),
       e('h1', null, 'Основа приложения'),
       e('p', null, 'Проверим подключение и сохранность данных перед созданием вашего хранилища.')),
-    waiting && e('div', { class: 'update', role: 'status' },
-      'Доступна новая версия оболочки.',
-      e('button', { onClick: applyUpdate }, 'Обновить приложение')),
+    updateNotice,
     e('section', { class: 'card', 'aria-labelledby': 'server-heading' },
       e('div', { class: 'card-heading' },
         e('h2', { id: 'server-heading' }, 'Сервер и база данных'),
@@ -123,8 +165,8 @@ function App() {
       swError && e('p', { class: 'error' }, swError),
       e('p', { class: 'hint' }, 'Когда оболочка готова, остановите сервер и перезагрузите страницу. Она должна открыться с сообщением об отсутствии связи.')),
     e('footer', null,
-      e('strong', null, 'Дальше — аккаунты и зашифрованные заметки.'),
-      e('p', null, 'В этой версии проверяем запуск, API и офлайн-оболочку. Создание заметок и уведомления появятся на следующих шагах.')),
+      e('strong', null, 'Первый администратор и вход готовы к проверке.'),
+      e('p', null, 'Создание других пользователей, заметок и уведомлений появится на следующих этапах.')),
   );
 }
 

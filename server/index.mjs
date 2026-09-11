@@ -1,9 +1,10 @@
 import { resolve } from 'node:path';
 import { createApp } from './app.mjs';
+import { authConfiguration } from './auth/config.mjs';
 
 const port = Number(process.env.PORT ?? 3100);
 if (!Number.isInteger(port) || port < 1 || port > 65535) throw new Error('Invalid PORT');
-const app = await createApp({ dataDir: resolve(process.env.DATA_DIR ?? 'data') });
+const app = await createApp({ dataDir: resolve(process.env.DATA_DIR ?? 'data'), auth: authConfiguration() });
 let stopping = false;
 for (const signal of ['SIGINT', 'SIGTERM']) {
   process.on(signal, async () => {

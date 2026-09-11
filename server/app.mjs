@@ -3,6 +3,7 @@ import { resolve } from 'node:path';
 import { extname, relative, sep } from 'node:path';
 import { readFileSync, readdirSync } from 'node:fs';
 import { openDatabase } from './db.mjs';
+import { registerAuth } from './routes/auth.mjs';
 
 const version = JSON.parse(readFileSync(new URL('../package.json', import.meta.url))).version;
 const contentTypes = new Map([
@@ -22,10 +23,19 @@ function listPublicFiles(root, directory = root) {
   });
 }
 
-export async function createApp({ dataDir = resolve('data'), staticDir = resolve('dist'), logger = true } = {}) {
+export async function createApp({ dataDir = resolve('data'), staticDir = resolve('dist'), logger = true,
+  auth = { origin: 'http://localhost:3100', secure: false }, clock = Date.now } = {}) {
   const db = openDatabase(dataDir);
-  const app = Fastify({ logger, logController: new LogController({ disableRequestLogging: true }) });
+  const app = Fastify({ logger, bodyLimit: 4096, ajv: { customOptions: { coerceTypes: false, removeAdditional: false } },
+    logController: new LogController({ disableRequestLogging: true }) });
   app.addHook('onClose', async () => db.close());
+  app.setErrorHandler((error, request, reply) => {
+    const status = error.validation ? 400
+      : Number.isInteger(error.statusCode) && error.statusCode >= 400 && error.statusCode < 500 ? error.statusCode : 500;
+    // Never log payloads, cookies, configuration values or raw error messages.
+    if (status === 500) app.log.error({ requestId: request.id }, 'Request failed');
+    reply.code(status).send({ error: status === 500 ? 'server_error' : 'invalid_request' });
+  });
   app.addHook('onSend', async (_request, reply, payload) => {
     reply.header('X-Content-Type-Options', 'nosniff');
     reply.header('Referrer-Policy', 'no-referrer');
@@ -44,6 +54,8 @@ export async function createApp({ dataDir = resolve('data'), staticDir = resolve
       serverTime: new Date().toISOString(),
     };
   });
+  try { await registerAuth(app, db, auth, clock); }
+  catch (error) { await app.close(); throw error; }
   for (const file of listPublicFiles(staticDir)) {
     const body = readFileSync(file.path);
     const urls = file.name === 'index.html' ? ['/', '/index.html'] : [`/${file.name}`];

@@ -3,7 +3,12 @@ services:
   app:
     build:
       context: .
-    image: tasks:0.1.1
+    image: tasks:0.3.0
+    environment:
+      APP_ORIGIN: ${APP_ORIGIN:-http://localhost:3100}
+      AUTH_COOKIE_MODE: ${AUTH_COOKIE_MODE:-localhost}
+      BOOTSTRAP_ADMIN_LOGIN: ${BOOTSTRAP_ADMIN_LOGIN:-}
+      BOOTSTRAP_ADMIN_PASSWORD: ${BOOTSTRAP_ADMIN_PASSWORD:-}
     ports:
       - "127.0.0.1:3100:3100"
     volumes:

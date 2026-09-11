@@ -1,7 +1,10 @@
 {
   "name": "tasks",
-  "version": "0.1.1",
+  "version": "0.3.0",
   "private": true,
+  "allowScripts": {
+    "argon2@0.45.1": true
+  },
   "type": "module",
   "engines": {
     "node": ">=24 <25"
@@ -10,9 +13,12 @@
     "typecheck": "tsc --noEmit",
     "build": "npm run typecheck && vite build && node scripts/build-sw.mjs",
     "start": "node server/index.mjs",
-    "check": "node --test tests/server.test.mjs tests/sw.test.mjs"
+    "check": "node --test tests/*.test.mjs",
+    "db:backup": "node server/cli/backup.mjs"
   },
   "dependencies": {
+    "@fastify/cookie": "11.1.2",
+    "argon2": "0.45.1",
     "fastify": "5.12.3",
     "preact": "10.29.8"
   },
