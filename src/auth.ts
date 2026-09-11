@@ -65,10 +65,23 @@ export async function signIn(login: string, password: string, repeatPassword?: s
 }
 export async function signOut(): Promise<void> { await request('logout', {}); }
 
+export async function accountRequest(path: string, body?: Record<string, unknown>): Promise<Record<string, unknown>> {
+  if (!await session()) throw new AuthError('unauthorized');
+  // Never automatically repeat mutations after a possibly lost response.
+  return request(path, body);
+}
+
 export function authMessage(error: unknown): string {
   const code = error instanceof AuthError ? error.code : 'network';
   return ({ invalid_credentials: 'Проверьте логин и пароль. Для нового пароля нужны 6–128 символов, цифра, заглавная и строчная буквы.',
     invalid_request: 'Проверьте заполненные поля.', setup_complete: 'Администратор уже создан. Войдите с существующими данными.',
+    unauthorized: 'Сеанс завершён. Войдите снова.', admin_required: 'Доступно только администратору.',
+    password_change_required: 'Сначала смените временный пароль.',
+    temporary_expired: '48 часов истекли. Обратитесь к администратору за новым временным паролем.',
+    login_exists: 'Этот логин уже занят. Если предыдущий ответ потерялся, проверьте список пользователей.',
+    account_not_found: 'Пользователь не найден.', account_changed: 'Пароль аккаунта уже изменился. Вернитесь к списку и обновите его перед новым действием.',
+    invalid_new_password: 'Новый пароль и повтор должны совпадать: 6–128 символов, цифра, заглавная и строчная буквы.',
+    wrong_password: 'Текущий пароль неверен.', same_password: 'Новый пароль должен отличаться от текущего.',
     setup_required: 'Сначала подтвердите создание администратора.', rate_limited: 'Слишком много попыток. Повторите позже (до 15 минут).',
     forbidden: 'Адрес приложения не совпадает с настройкой сервера. Проверьте APP_ORIGIN.',
     csrf: 'Проверка запроса не прошла. Повторите действие.',

@@ -69,5 +69,5 @@ export function Login({ onLogin }: { onLogin: (user: User) => void }) {
         requestAnimationFrame(() => loginField.current?.focus());
       } }, 'Отмена')),
     !confirming && e('button', { class: 'text-button', type: 'button', 'aria-expanded': help, onClick: () => setHelp(!help) }, 'Восстановить доступ'),
-    help && !confirming && e('p', { class: 'auth-notice' }, 'Восстановление доступа пока не реализовано. Обратитесь к администратору сервера.'));
+    help && !confirming && e('p', { class: 'auth-notice' }, 'Обратитесь к администратору за новым временным паролем. Он действует 48 часов; после входа задайте свой пароль. Для восстановления учётной записи администратора потребуется доступ к серверу. Сброс пароля аккаунта не восстанавливает доступ к зашифрованному хранилищу.'));
 }

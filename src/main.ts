@@ -3,6 +3,8 @@ import { useEffect, useRef, useState } from 'preact/hooks';
 import { isHealthResponse, type HealthResponse } from './types/api';
 import './style.css';
 import { Login } from './components/Login';
+import { PasswordScreen, UsersScreen } from './components/Accounts';
+import { CryptoCheck } from './components/CryptoCheck';
 import { session, signOut, authMessage } from './auth';
 import type { User } from './types/auth';
 
@@ -21,6 +23,9 @@ function DefinitionList({ rows }: { rows: DefinitionRow[] }) {
 
 function App() {
   const [user, setUser] = useState<User | null>(null);
+  const [page, setPage] = useState<'home' | 'password' | 'users'>('home');
+  const [notice, setNotice] = useState('');
+  useEffect(() => { setPage('home'); setNotice(''); }, [user?.id]);
   const [authLoading, setAuthLoading] = useState(true);
   const [authError, setAuthError] = useState('');
   const [loggingOut, setLoggingOut] = useState(false);
@@ -135,14 +140,27 @@ function App() {
       e('button', { onClick: () => void checkSession() }, 'Повторить проверку входа')),
     e(Login, { onLogin: (result) => { authGeneration.current++; setUser(result); setAuthError(''); } }));
 
+  if (user.mustChangePassword || page === 'password') return e('div', null,
+    updateNotice && e('div', { class: 'auth-status' }, updateNotice),
+    authError && e('p', { class: 'auth-status error', role: 'alert' }, authError),
+    e(PasswordScreen, { key: user.id, user, onBack: () => setPage('home'), onLogout: logout, onRefresh: checkSession,
+      onDone: (result) => { authGeneration.current++; setUser(result); setPage('home'); setAuthError(''); setNotice('Пароль изменён.'); } }));
+  if (page === 'users' && user.role === 'admin') return e('div', null,
+    authError && e('p', { class: 'auth-status error', role: 'alert' }, authError),
+    e(UsersScreen, { key: user.id, onBack: () => setPage('home'), onRefresh: checkSession }));
+
   return e('main', null,
     e('header', null,
       e('a', { class: 'brand', href: '/', 'aria-label': 'Tasks, главная' },
         e('img', { src: '/icon.svg', width: 40, height: 40, alt: '' }), 'Tasks'),
-      e('span', { class: 'stage' }, 'Этап 03')),
+      e('span', { class: 'stage' }, 'Этап 05')),
     e('div', { class: 'account-bar' }, e('p', null, user.login, ' · ', user.role === 'admin' ? 'Администратор' : 'Пользователь'),
       e('button', { disabled: loggingOut, onClick: logout }, loggingOut ? 'Выходим…' : 'Выйти')),
     authError && e('p', { class: 'error', role: 'alert' }, authError),
+    notice && e('p', { class: 'auth-notice', role: 'status' }, notice),
+    e('nav', { class: 'actions', 'aria-label': 'Управление аккаунтом' },
+      e('button', { onClick: () => setPage('password') }, 'Изменить пароль'),
+      user.role === 'admin' && e('button', { onClick: () => setPage('users') }, 'Пользователи')),
     e('section', { class: 'intro' },
       e('p', { class: 'eyebrow' }, 'ПЕРВЫЙ ЗАПУСК'),
       e('h1', null, 'Основа приложения'),
@@ -164,9 +182,10 @@ function App() {
       e(DefinitionList, { rows: deviceRows }),
       swError && e('p', { class: 'error' }, swError),
       e('p', { class: 'hint' }, 'Когда оболочка готова, остановите сервер и перезагрузите страницу. Она должна открыться с сообщением об отсутствии связи.')),
+    e(CryptoCheck, { key: user.id }),
     e('footer', null,
-      e('strong', null, 'Первый администратор и вход готовы к проверке.'),
-      e('p', null, 'Создание других пользователей, заметок и уведомлений появится на следующих этапах.')),
+      e('strong', null, 'Криптографический модуль готов к проверке на тестовых данных.'),
+      e('p', null, 'Хранилища, заметки и уведомления появятся на следующих этапах.')),
   );
 }
 

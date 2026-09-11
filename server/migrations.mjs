@@ -1,6 +1,6 @@
 import { randomUUID } from 'node:crypto';
 
-export const SCHEMA_VERSION = 2;
+export const SCHEMA_VERSION = 3;
 
 export function migrate(db) {
   db.exec('BEGIN IMMEDIATE');
@@ -38,6 +38,11 @@ export function migrate(db) {
         ) STRICT;
         CREATE INDEX used_refresh_session ON used_refresh_tokens(session_id);
       `);
+    }
+    if (version < 3) {
+      db.exec(`ALTER TABLE users ADD COLUMN must_change_password INTEGER NOT NULL DEFAULT 0 CHECK (must_change_password IN (0, 1));
+        ALTER TABLE users ADD COLUMN temporary_expires INTEGER;
+        ALTER TABLE users ADD COLUMN credential_version INTEGER NOT NULL DEFAULT 0;`);
     }
     db.exec(`PRAGMA user_version = ${SCHEMA_VERSION}`);
     db.exec('COMMIT');

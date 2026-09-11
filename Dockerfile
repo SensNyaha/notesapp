@@ -9,10 +9,9 @@ RUN --mount=type=secret,id=npm_ca,required=false \
       npm ci; \
     fi
 COPY . .
-RUN npm run build
+RUN npm run build && npm run check
 
 FROM build AS verify
-RUN npm run check
 
 FROM build AS production-deps
 RUN npm prune --omit=dev --ignore-scripts --offline

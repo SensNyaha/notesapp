@@ -3,7 +3,7 @@ services:
   app:
     build:
       context: .
-    image: tasks:0.3.0
+    image: tasks:0.5.0
     environment:
       APP_ORIGIN: ${APP_ORIGIN:-http://localhost:3100}
       AUTH_COOKIE_MODE: ${AUTH_COOKIE_MODE:-localhost}

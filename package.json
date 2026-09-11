@@ -1,6 +1,6 @@
 {
   "name": "tasks",
-  "version": "0.3.0",
+  "version": "0.5.0",
   "private": true,
   "allowScripts": {
     "argon2@0.45.1": true
@@ -14,7 +14,10 @@
     "build": "npm run typecheck && vite build && node scripts/build-sw.mjs",
     "start": "node server/index.mjs",
     "check": "node --test tests/*.test.mjs",
-    "db:backup": "node server/cli/backup.mjs"
+    "db:backup": "node server/cli/backup.mjs",
+    "user:create": "node server/cli/user.mjs create",
+    "user:reset": "node server/cli/user.mjs reset",
+    "admin:recover": "node server/cli/user.mjs recover-admin"
   },
   "dependencies": {
     "@fastify/cookie": "11.1.2",

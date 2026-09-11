@@ -1,6 +1,0 @@
-# Use only after preparing /data/restored-before-stage03 from the schema-1 backup.
-services:
-  app:
-    image: tasks:before-stage03
-    environment:
-      DATA_DIR: /data/restored-before-stage03

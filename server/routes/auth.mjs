@@ -3,6 +3,7 @@ import { randomBytes, timingSafeEqual } from 'node:crypto';
 import { hashPassword, verifyPassword, normalizeLogin, validPassword } from '../auth/password.mjs';
 import { bootstrapFromEnvironment, insertFirstAdmin, needsSetup } from '../auth/users.mjs';
 import { createSession, currentUser, rotateSession, revokeSession, token, validToken } from '../auth/sessions.mjs';
+import { AccountError, publicUser, accountRow, requireUser, createAccount, resetAccount, changePassword } from '../auth/accounts.mjs';
 
 export async function registerAuth(app, db, config, clock = Date.now) {
   await bootstrapFromEnvironment(db, config.bootstrap, clock());
@@ -84,7 +85,7 @@ export async function registerAuth(app, db, config, clock = Date.now) {
       }
       hashesInFlight++;
       try {
-        let user;
+        let user, verifiedVersion = 0;
         if (bootstrap) {
           user = insertFirstAdmin(db, normalized, await hashPassword(password), clock());
           if (!user) return reply.code(409).send({ error: 'setup_complete' });
@@ -92,15 +93,69 @@ export async function registerAuth(app, db, config, clock = Date.now) {
           const row = normalized && db.prepare('SELECT * FROM users WHERE login = ?').get(normalized);
           const valid = await verifyPassword(row ? row.password_hash : dummyHash, password);
           if (!row || !valid) return reply.code(401).send({ error: 'invalid_credentials' });
-          user = { id: row.id, login: row.login, role: row.role };
+          // A reset/change may have committed while Argon2 was running.
+          const latest = db.prepare('SELECT * FROM users WHERE id=?').get(row.id);
+          if (!latest || latest.credential_version !== row.credential_version) return reply.code(401).send({ error: 'invalid_credentials' });
+          if (latest.must_change_password && !(latest.temporary_expires > clock())) return reply.code(401).send({ error: 'temporary_expired' });
+          user = publicUser(latest);
+          verifiedVersion = latest.credential_version;
         }
-        // Re-login on the same browser replaces that browser's previous family.
-        revokeSession(db, request.cookies[names.access], request.cookies[names.refresh]);
-        writeCookies(reply, createSession(db, user.id, clock()));
+        // Lock the final credential check and session insertion together: CLI is a separate process.
+        db.exec('BEGIN IMMEDIATE');
+        let pair;
+        try {
+          const finalRow = db.prepare('SELECT * FROM users WHERE id=?').get(user.id);
+          if (!finalRow || finalRow.credential_version !== verifiedVersion) {
+            db.exec('ROLLBACK'); return reply.code(401).send({ error: 'invalid_credentials' });
+          }
+          const now = clock();
+          if (finalRow.must_change_password && !(finalRow.temporary_expires > now)) {
+            db.exec('ROLLBACK'); return reply.code(401).send({ error: 'temporary_expired' });
+          }
+          user = publicUser(finalRow);
+          revokeSession(db, request.cookies[names.access], request.cookies[names.refresh]);
+          pair = createSession(db, user.id, now);
+          db.exec('COMMIT');
+        } catch (error) { db.exec('ROLLBACK'); throw error; }
+        writeCookies(reply, pair);
         return { user };
       } finally { hashesInFlight--; }
     });
   }
+  const passwordField = { type: 'string', maxLength: 256 };
+  const objectBody = (properties, required = Object.keys(properties)) => ({ type: 'object', additionalProperties: false, properties, required });
+  function accessOf(request) { return request.cookies[names.access]; }
+  function accountAction(action, { hash = true, passwordChange = false } = {}) {
+    return async (request, reply) => {
+      try {
+        // Check authorization before spending hash capacity or disclosing account existence.
+        const actor = requireUser(db, accessOf(request), clock(), { admin: !passwordChange, allowTemporary: passwordChange });
+        if (hash && (hashesInFlight >= 2 || limited('account:' + request.ip, 20, 60_000))) return rateError(reply);
+        if (passwordChange && limited('password:' + actor.id, 10, 15 * 60_000)) return rateError(reply);
+        if (hash) hashesInFlight++;
+        try { return await action(request, reply); }
+        finally { if (hash) hashesInFlight--; }
+      } catch (error) {
+        if (error instanceof AccountError) return reply.code(error.status).send({ error: error.code });
+        throw error;
+      }
+    };
+  }
+  const authorizeAdmin = request => () => requireUser(db, accessOf(request), clock(), { admin: true });
+  app.get('/api/auth/users', accountAction(async () => ({ users: db.prepare('SELECT * FROM users ORDER BY login').all().map(accountRow) }), { hash: false }));
+  app.post('/api/auth/users/create', { preHandler: guard, schema: { body: loginSchema } }, accountAction(async request =>
+    ({ user: await createAccount(db, request.body, authorizeAdmin(request), clock) })));
+  app.post('/api/auth/users/reset', { preHandler: guard, schema: { body: objectBody({
+    id: { type: 'string', maxLength: 64 }, password: passwordField,
+    expectedVersion: { type: 'integer', minimum: 0 }, confirmed: { const: true },
+  }) } }, accountAction(async request => ({ user: await resetAccount(db, request.body, authorizeAdmin(request), clock) })));
+  app.post('/api/auth/change-password', { preHandler: guard, schema: { body: objectBody({
+    currentPassword: passwordField, password: passwordField, repeatPassword: passwordField, revokeOthers: { type: 'boolean' },
+  }) } }, accountAction(async (request, reply) => {
+    const result = await changePassword(db, accessOf(request), request.body, clock);
+    writeCookies(reply, result.pair);
+    return { user: result.user };
+  }, { passwordChange: true }));
   app.post('/api/auth/refresh', { preHandler: guard, schema: { body: { type: 'object', additionalProperties: false } } }, async (request, reply) => {
     const pair = rotateSession(db, request.cookies[names.refresh], clock());
     if (pair.error) {

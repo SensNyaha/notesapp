@@ -25,9 +25,13 @@ export function createSession(db, userId, now) {
 
 export function currentUser(db, access, now) {
   if (!validToken(access)) return null;
-  return db.prepare(`SELECT u.id, u.login, u.role FROM sessions s JOIN users u ON u.id = s.user_id
-    WHERE s.access_hash = ? AND s.revoked = 0 AND s.access_expires > ? AND s.absolute_expires > ? AND s.refresh_expires > ?`)
-    .get(digest(access), now, now, now) ?? null;
+  const row = db.prepare(`SELECT u.id, u.login, u.role, u.must_change_password, u.temporary_expires
+    FROM sessions s JOIN users u ON u.id = s.user_id
+    WHERE s.access_hash = ? AND s.revoked = 0 AND s.access_expires > ? AND s.absolute_expires > ? AND s.refresh_expires > ?
+    AND (u.must_change_password=0 OR u.temporary_expires>?)`)
+    .get(digest(access), now, now, now, now);
+  return row ? { id: row.id, login: row.login, role: row.role,
+    mustChangePassword: Boolean(row.must_change_password), temporaryExpires: row.temporary_expires } : null;
 }
 
 export function rotateSession(db, refresh, now) {
@@ -36,6 +40,16 @@ export function rotateSession(db, refresh, now) {
   try {
     const hash = digest(refresh);
     let s = db.prepare('SELECT * FROM sessions WHERE refresh_hash = ?').get(hash);
+    const ownerSession = s ?? db.prepare(`SELECT s.* FROM sessions s JOIN used_refresh_tokens t ON t.session_id=s.id
+      WHERE t.token_hash=?`).get(hash);
+    if (ownerSession) {
+      const owner = db.prepare('SELECT must_change_password,temporary_expires FROM users WHERE id=?').get(ownerSession.user_id);
+      if (!owner || (owner.must_change_password && !(owner.temporary_expires > now))) {
+        db.prepare('UPDATE sessions SET revoked=1 WHERE user_id=?').run(ownerSession.user_id);
+        db.exec('COMMIT');
+        return { error: 'unauthorized' };
+      }
+    }
     let result;
     if (alive(s, now)) {
       const nonce = token();
