@@ -16,25 +16,64 @@ jobs:
     runs-on: [self-hosted, linux, x64]
 
     steps:
-      - name: Checkout repository
+      - name: Checkout
         uses: actions/checkout@v6
 
-      - name: Show deployed commit
+      - name: Create .env
+        shell: bash
+        env:
+          ALL_SECRETS: ${{ toJson(secrets) }}
         run: |
-          git log -1 --oneline
+          set -euo pipefail
+          umask 077
 
-      - name: Build containers
-        run: |
-          docker compose build --pull
+          : > .env
 
-      - name: Deploy containers
-        run: |
-          docker compose up -d --remove-orphans
+          while IFS= read -r line || [ -n "$line" ]; do
 
-      - name: Show container status
-        run: |
-          docker compose ps
+            if [[ -z "$line" || "$line" =~ ^[[:space:]]*# ]]; then
+              printf '%s\n' "$line" >> .env
+              continue
+            fi
 
-      - name: Remove unused Docker images
-        run: |
-          docker image prune -f
+            if [[ "$line" != *"="* ]]; then
+              printf '%s\n' "$line" >> .env
+              continue
+            fi
+
+            key="${line%%=*}"
+            default_value="${line#*=}"
+            key="$(printf '%s' "$key" | xargs)"
+
+            secret_value="$(
+              jq -r --arg key "$key" '
+                if has($key) then .[$key] else empty end
+              ' <<< "$ALL_SECRETS"
+            )"
+
+            if [[ -n "$secret_value" ]]; then
+              printf '%s=%s\n' "$key" "$secret_value" >> .env
+            else
+              printf '%s=%s\n' "$key" "$default_value" >> .env
+            fi
+
+          done < .env.example
+
+          chmod 600 .env
+
+      - name: Build
+        run: docker compose build --pull
+
+      - name: Deploy
+        run: docker compose up -d --remove-orphans
+
+      - name: Status
+        run: docker compose ps
+
+      - name: Remove .env
+        if: always()
+        run: rm -f .env
+
+      - name: Cleanup
+        if: success()
+        run: docker image prune -f
