@@ -1,9 +1,5 @@
 name: tasks-local
 services:
-  tasks:
-    build:
-      context: .
-      network: host
   app:
     build:
       context: .
