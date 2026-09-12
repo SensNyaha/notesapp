@@ -1,7 +1,8 @@
-import { isUser, type User } from './types/auth';
+import { isUser, type User } from './types/auth.ts';
 
 export class AuthError extends Error {
-  constructor(public code: string) { super(code); }
+  code: string;
+  constructor(code: string) { super(code); this.code = code; }
 }
 
 async function request(path: string, body?: object): Promise<Record<string, unknown>> {

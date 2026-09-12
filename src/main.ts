@@ -5,6 +5,9 @@ import './style.css';
 import { Login } from './components/Login';
 import { PasswordScreen, UsersScreen } from './components/Accounts';
 import { CryptoCheck } from './components/CryptoCheck';
+import { Planner } from './components/Planner';
+import { profiles, readState, eraseState, exclusive, announce, changes } from './storage';
+import { flushDraft, hasUnsaved, synchronize } from './planner';
 import { session, signOut, authMessage } from './auth';
 import type { User } from './types/auth';
 
@@ -23,7 +26,10 @@ function DefinitionList({ rows }: { rows: DefinitionRow[] }) {
 
 function App() {
   const [user, setUser] = useState<User | null>(null);
-  const [page, setPage] = useState<'home' | 'password' | 'users'>('home');
+  const userRef = useRef<User | null>(null); userRef.current = user;
+  const [page, setPage] = useState<'home' | 'password' | 'users' | 'diagnostics'>('home');
+  const [localProfiles, setLocalProfiles] = useState<User[]>([]);
+  const localMode = useRef(false);
   const [notice, setNotice] = useState('');
   useEffect(() => { setPage('home'); setNotice(''); }, [user?.id]);
   const [authLoading, setAuthLoading] = useState(true);
@@ -43,9 +49,19 @@ function App() {
     const generation = ++authGeneration.current;
     try {
       const result = await session();
-      if (generation === authGeneration.current) { setUser(result); setAuthError(''); }
+      if (generation === authGeneration.current) {
+        const active = userRef.current;
+        if (result) {
+          if (!active || result.id === active.id) {
+            if (result.mustChangePassword && active && !active.mustChangePassword) await flushDraft();
+            localMode.current = false; setUser(result);
+          }
+        }
+        setAuthError(active && (!result || result.id !== active.id) ? 'Для синхронизации войдите в этот аккаунт. Локальные данные доступны.' : '');
+        setLocalProfiles(await profiles());
+      }
     } catch (caught) {
-      if (generation === authGeneration.current) setAuthError(authMessage(caught));
+      if (generation === authGeneration.current) { setAuthError(authMessage(caught)); setLocalProfiles(await profiles().catch(() => [])); }
     } finally { if (generation === authGeneration.current) setAuthLoading(false); }
   }
   useEffect(() => {
@@ -55,10 +71,34 @@ function App() {
     window.addEventListener('online', wake);
     return () => { authGeneration.current++; document.removeEventListener('visibilitychange', wake); window.removeEventListener('online', wake); };
   }, []);
+  useEffect(() => {
+    const receive = (event: Event) => {
+      const message = event instanceof MessageEvent ? event.data : (event as CustomEvent).detail;
+      if (userRef.current && message === 'logout:' + userRef.current.id) {
+        authGeneration.current++; setUser(null); void profiles().then(setLocalProfiles);
+      }
+    };
+    changes?.addEventListener('message', receive); window.addEventListener('tasks-data', receive);
+    return () => { changes?.removeEventListener('message', receive); window.removeEventListener('tasks-data', receive); };
+  }, []);
 
   async function logout() {
     setLoggingOut(true); authGeneration.current++;
-    try { await signOut(); authGeneration.current++; setUser(null); setAuthError(''); }
+    try {
+      await flushDraft();
+      if (user) {
+        try { await synchronize(user); } catch { /* Ask explicitly before discarding local-only data. */ }
+      }
+      const completed = await exclusive(async () => {
+        const s = user && await readState(user.id);
+        if (s && hasUnsaved(s) && !confirm('Есть заметки или стеш, не сохранённые на сервере. Выйти и удалить их вместе с ключами с этого устройства?')) return false;
+        await signOut();
+        if (user) { await eraseState(user.id); announce('logout:' + user.id); }
+        return true;
+      });
+      if (!completed) return;
+      authGeneration.current++; localMode.current = false; setUser(null); setLocalProfiles(await profiles()); setAuthError('');
+    }
     catch (caught) { setAuthError(authMessage(caught)); }
     finally { setLoggingOut(false); }
   }
@@ -112,8 +152,9 @@ function App() {
     return () => { alive = false; };
   }, []);
 
-  function applyUpdate() {
+  async function applyUpdate() {
     if (!waiting) return;
+    try { await flushDraft(); } catch { setAuthError('Сначала сохраните черновик. Обновление отложено.'); return; }
     navigator.serviceWorker.addEventListener('controllerchange', () => location.reload(), { once: true });
     waiting.postMessage({ type: 'SKIP_WAITING' });
   }
@@ -138,7 +179,9 @@ function App() {
     updateNotice && e('div', { class: 'auth-status' }, updateNotice),
     authError && e('div', { class: 'auth-status' }, e('p', { class: 'error', role: 'alert' }, authError),
       e('button', { onClick: () => void checkSession() }, 'Повторить проверку входа')),
-    e(Login, { onLogin: (result) => { authGeneration.current++; setUser(result); setAuthError(''); } }));
+    localProfiles.length > 0 && e('section', { class: 'auth-status card' }, e('h2', null, 'Данные на этом устройстве'),
+      localProfiles.map(profile => e('button', { onClick: () => { localMode.current = true; setUser(profile); } }, 'Открыть локально · ' + profile.login))),
+    e(Login, { onLogin: (result) => { authGeneration.current++; localMode.current = false; setUser(result); setAuthError(''); } }));
 
   if (user.mustChangePassword || page === 'password') return e('div', null,
     updateNotice && e('div', { class: 'auth-status' }, updateNotice),
@@ -153,19 +196,24 @@ function App() {
     e('header', null,
       e('a', { class: 'brand', href: '/', 'aria-label': 'Tasks, главная' },
         e('img', { src: '/icon.svg', width: 40, height: 40, alt: '' }), 'Tasks'),
-      e('span', { class: 'stage' }, 'Этап 05')),
+      e('span', { class: 'stage' }, 'Этап 06')),
     e('div', { class: 'account-bar' }, e('p', null, user.login, ' · ', user.role === 'admin' ? 'Администратор' : 'Пользователь'),
       e('button', { disabled: loggingOut, onClick: logout }, loggingOut ? 'Выходим…' : 'Выйти')),
     authError && e('p', { class: 'error', role: 'alert' }, authError),
     notice && e('p', { class: 'auth-notice', role: 'status' }, notice),
     e('nav', { class: 'actions', 'aria-label': 'Управление аккаунтом' },
-      e('button', { onClick: () => setPage('password') }, 'Изменить пароль'),
-      user.role === 'admin' && e('button', { onClick: () => setPage('users') }, 'Пользователи')),
+      e('button', { onClick: () => void flushDraft().then(() => setPage('home')).catch(() => setAuthError('Сохраните черновик')) }, 'Заметки'),
+      e('button', { onClick: () => void flushDraft().then(() => setPage('diagnostics')).catch(() => setAuthError('Сохраните черновик')) }, 'Диагностика'),
+      e('button', { onClick: () => void flushDraft().then(() => setPage('password')).catch(() => setAuthError('Сохраните черновик')) }, 'Изменить пароль'),
+      user.role === 'admin' && e('button', { onClick: () => void flushDraft().then(() => setPage('users')).catch(() => setAuthError('Сохраните черновик')) }, 'Пользователи'),
+      e('button', { onClick: () => void flushDraft().then(() => { setUser(null); void profiles().then(setLocalProfiles); }).catch(() => setAuthError('Сохраните черновик')) }, 'Войти снова / другой аккаунт')),
+    page === 'home' && e(Planner, { user, key: user.id }),
+    updateNotice,
+    page === 'diagnostics' && e('div', null,
     e('section', { class: 'intro' },
       e('p', { class: 'eyebrow' }, 'ПЕРВЫЙ ЗАПУСК'),
       e('h1', null, 'Основа приложения'),
       e('p', null, 'Проверим подключение и сохранность данных перед созданием вашего хранилища.')),
-    updateNotice,
     e('section', { class: 'card', 'aria-labelledby': 'server-heading' },
       e('div', { class: 'card-heading' },
         e('h2', { id: 'server-heading' }, 'Сервер и база данных'),
@@ -185,8 +233,8 @@ function App() {
     e(CryptoCheck, { key: user.id }),
     e('footer', null,
       e('strong', null, 'Криптографический модуль готов к проверке на тестовых данных.'),
-      e('p', null, 'Хранилища, заметки и уведомления появятся на следующих этапах.')),
-  );
+      e('p', null, 'Хранилища и заметки доступны в разделе «Заметки». Уведомления — следующий этап.')),
+    ));
 }
 
 const root = document.getElementById('app');

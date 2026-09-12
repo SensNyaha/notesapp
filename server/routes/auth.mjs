@@ -1,4 +1,5 @@
 import cookie from '@fastify/cookie';
+import { registerVaults } from './vaults.mjs';
 import { randomBytes, timingSafeEqual } from 'node:crypto';
 import { hashPassword, verifyPassword, normalizeLogin, validPassword } from '../auth/password.mjs';
 import { bootstrapFromEnvironment, insertFirstAdmin, needsSetup } from '../auth/users.mjs';
@@ -125,6 +126,7 @@ export async function registerAuth(app, db, config, clock = Date.now) {
   const passwordField = { type: 'string', maxLength: 256 };
   const objectBody = (properties, required = Object.keys(properties)) => ({ type: 'object', additionalProperties: false, properties, required });
   function accessOf(request) { return request.cookies[names.access]; }
+  registerVaults(app, db, { guard, accessOf, clock });
   function accountAction(action, { hash = true, passwordChange = false } = {}) {
     return async (request, reply) => {
       try {

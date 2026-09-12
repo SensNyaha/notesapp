@@ -1,5 +1,6 @@
 import { h } from 'preact';
 import { useEffect, useRef, useState } from 'preact/hooks';
+import * as api from '../crypto/vault';
 
 const e = h;
 interface Result { protect: number; recover: number; encrypt: number; decrypt: number }
@@ -13,7 +14,6 @@ export function CryptoCheck() {
     running.current = true; setBusy(true); setError(''); setResult(null);
     let plain: Uint8Array | undefined, restored: Uint8Array | undefined;
     try {
-      const api = await import('../crypto/vault');
       const key = await api.generateVaultKey();
       const keyId = crypto.randomUUID();
       const context = { accountId: crypto.randomUUID(), vaultId: crypto.randomUUID(), keyId,

@@ -145,16 +145,16 @@ test('concurrent create/reset commits once; revoked actor is rechecked after has
   assert.equal(f.db.prepare("SELECT 1 FROM users WHERE login='revokedactor'").get(), undefined);
 });
 
-test('schema 2 backup migrates to 3 preserving admin, installation and access; restored copy remains schema 2', async t => {
+test('schema 2 backup migrates to current schema preserving admin, installation and access; restored copy remains schema 2', async t => {
   const f = await fixture(t);
   const owner = f.db.prepare("SELECT * FROM users WHERE role='admin'").get();
   const pair = createSession(f.db, owner.id, f.now());
   const before = f.db.prepare('SELECT * FROM installation').get();
-  f.db.exec('ALTER TABLE users DROP COLUMN must_change_password; ALTER TABLE users DROP COLUMN temporary_expires; ALTER TABLE users DROP COLUMN credential_version; PRAGMA user_version=2;');
+  f.db.exec('DROP TABLE records; DROP TABLE vaults; ALTER TABLE users DROP COLUMN must_change_password; ALTER TABLE users DROP COLUMN temporary_expires; ALTER TABLE users DROP COLUMN credential_version; PRAGMA user_version=2;');
   const source = join(f.dir, 'tasks.sqlite'), backup = join(f.dir, 'schema2.sqlite');
   assert.equal((await createBackup(source, backup)).schemaVersion, 2);
   migrate(f.db);
-  assert.equal(f.db.prepare('PRAGMA user_version').get().user_version, 3);
+  assert.equal(f.db.prepare('PRAGMA user_version').get().user_version, 4);
   assert.deepEqual(f.db.prepare('SELECT * FROM installation').get(), before);
   assert.equal(currentUser(f.db, pair.access, f.now()).mustChangePassword, false);
   assert.equal(f.db.prepare('SELECT password_hash FROM users WHERE id=?').get(owner.id).password_hash, owner.password_hash);

@@ -9,6 +9,20 @@ import { createBackup } from '../server/cli/backup.mjs';
 import { prepareRestore } from '../server/cli/restore.mjs';
 import { migrate } from '../server/migrations.mjs';
 
+test('schema 3 upgrades atomically to 4 without changing installation or account credentials', () => {
+  const db = new DatabaseSync(':memory:');
+  try {
+    migrate(db);
+    db.exec("DROP TABLE records; DROP TABLE vaults; PRAGMA user_version=3; INSERT INTO users(id,login,password_hash,role,created_at) VALUES('owner','owner','stored-hash','admin',123);");
+    const installation = db.prepare('SELECT * FROM installation').get(), user = db.prepare('SELECT * FROM users').get();
+    migrate(db); migrate(db);
+    assert.equal(db.prepare('PRAGMA user_version').get().user_version,4);
+    assert.deepEqual(db.prepare('SELECT * FROM installation').get(),installation);
+    assert.deepEqual(db.prepare('SELECT * FROM users').get(),user);
+    assert.equal(db.prepare('SELECT count(*) n FROM vaults').get().n,0);
+  } finally { db.close(); }
+});
+
 test('WAL backup preserves schema 1; migration preserves installation and administrative opens do not count boots', async () => {
   const dir = await mkdtemp(join(tmpdir(), 'tasks-migration-'));
   let db;
@@ -32,7 +46,7 @@ test('WAL backup preserves schema 1; migration preserves installation and admini
     restoredDb.close();
     db.close();
     db = openDatabase(dir, { countBoot: false });
-    assert.equal(db.prepare('PRAGMA user_version').get().user_version, 3);
+    assert.equal(db.prepare('PRAGMA user_version').get().user_version, 4);
     assert.equal(db.prepare('SELECT boot_count FROM installation').get().boot_count, 7);
     assert.equal(db.prepare('SELECT installation_id FROM installation').get().installation_id, 'preserved-id');
     migrate(db);
