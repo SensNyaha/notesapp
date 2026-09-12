@@ -7,6 +7,7 @@ services:
   app:
     build:
       context: .
+      network: host
     image: tasks:0.7.1
     environment:
       APP_ORIGIN: ${APP_ORIGIN:-http://localhost:3100}
