@@ -1,23 +1,40 @@
-name: Deploy
+name: Deploy NotesApp
 
 on:
   push:
     branches:
       - main
 
+  workflow_dispatch:
+
+concurrency:
+  group: notesapp-production
+  cancel-in-progress: true
+
 jobs:
   deploy:
-    runs-on: self-hosted
+    runs-on: [self-hosted, linux, x64]
 
     steps:
       - name: Checkout repository
         uses: actions/checkout@v6
 
+      - name: Show deployed commit
+        run: |
+          git log -1 --oneline
+
       - name: Build containers
-        run: docker compose build
+        run: |
+          docker compose build --pull
 
-      - name: Start containers
-        run: docker compose up -d
+      - name: Deploy containers
+        run: |
+          docker compose up -d --remove-orphans
 
-      - name: Cleanup old images
-        run: docker image prune -f
+      - name: Show container status
+        run: |
+          docker compose ps
+
+      - name: Remove unused Docker images
+        run: |
+          docker image prune -f
