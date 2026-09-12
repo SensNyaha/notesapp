@@ -9,6 +9,7 @@ test('offline shell works; API and non-public paths bypass the Service Worker ca
   const stores = new Map([['other-app', new Map()], ['tasks-shell-old', new Map()]]);
   let publicAssets = [];
   let activationRequests = 0;
+  let windows = [{ id: 'current' }, { id: 'draft-tab' }];
   const cacheApi = {
     async open(key) {
       if (!stores.has(key)) stores.set(key, new Map());
@@ -27,7 +28,7 @@ test('offline shell works; API and non-public paths bypass the Service Worker ca
   vm.runInNewContext(code, {
     URL, caches: cacheApi,
     fetch: async () => { throw new Error('offline'); },
-    self: { location: { origin: 'http://localhost:3100' }, clients: { claim: async () => {} },
+    self: { location: { origin: 'http://localhost:3100' }, clients: { claim: async () => {}, matchAll: async () => windows },
       addEventListener: (name, fn) => { handlers[name] = fn; }, skipWaiting: async () => { activationRequests++; } },
   });
   let pending;
@@ -42,8 +43,17 @@ test('offline shell works; API and non-public paths bypass the Service Worker ca
   assert.equal(activationRequests, 0, 'installation must wait for user action');
   handlers.message({ data: { type: 'IGNORED' }, waitUntil(promise) { pending = promise; } });
   assert.equal(activationRequests, 0);
-  handlers.message({ data: { type: 'SKIP_WAITING' }, waitUntil(promise) { pending = promise; } });
+  let reply;
+  const update = { data: { type: 'SKIP_WAITING' }, source: { id: 'current' },
+    ports: [{ postMessage(value) { reply = value; } }], waitUntil(promise) { pending = promise; } };
+  handlers.message(update);
   await pending;
+  assert.equal(activationRequests, 0, 'other tabs may contain unsaved drafts');
+  assert.equal(reply.ok, false);
+  windows = [{ id: 'current' }];
+  handlers.message(update);
+  await pending;
+  assert.equal(reply.ok, true);
   assert.equal(activationRequests, 1);
   handlers.activate({ waitUntil(promise) { pending = promise; } });
   await pending;

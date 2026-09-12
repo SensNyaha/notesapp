@@ -12,7 +12,17 @@ self.addEventListener('activate', event => {
   })());
 });
 self.addEventListener('message', event => {
-  if (event.data?.type === 'SKIP_WAITING') event.waitUntil(self.skipWaiting());
+  if (event.data?.type !== 'SKIP_WAITING') return;
+  event.waitUntil((async () => {
+    const clients = await self.clients.matchAll({ type: 'window', includeUncontrolled: true });
+    // Older tabs cannot reliably acknowledge saving their drafts. Defer activation.
+    if (clients.length !== 1 || clients[0].id !== event.source?.id) {
+      event.ports?.[0]?.postMessage({ ok: false });
+      return;
+    }
+    await self.skipWaiting();
+    event.ports?.[0]?.postMessage({ ok: true });
+  })());
 });
 self.addEventListener('fetch', event => {
   const url = new URL(event.request.url);

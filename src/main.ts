@@ -155,8 +155,22 @@ function App() {
   async function applyUpdate() {
     if (!waiting) return;
     try { await flushDraft(); } catch { setAuthError('Сначала сохраните черновик. Обновление отложено.'); return; }
-    navigator.serviceWorker.addEventListener('controllerchange', () => location.reload(), { once: true });
-    waiting.postMessage({ type: 'SKIP_WAITING' });
+    const reload = async () => {
+      const element = document.getElementById('app');
+      if (element) element.inert = true;
+      try { await flushDraft(); location.reload(); }
+      catch { if (element) element.inert = false; setAuthError('Не удалось сохранить черновик. Перезагрузка отложена.'); }
+    };
+    navigator.serviceWorker.addEventListener('controllerchange', reload, { once: true });
+    const channel = new MessageChannel();
+    channel.port1.onmessage = ({ data }) => {
+      channel.port1.close();
+      if (!data.ok) {
+        navigator.serviceWorker.removeEventListener('controllerchange', reload);
+        setAuthError('Закройте другие вкладки приложения и повторите обновление. Их черновики должны сохраниться перед закрытием.');
+      }
+    };
+    waiting.postMessage({ type: 'SKIP_WAITING' }, [channel.port2]);
   }
 
   const serverRows: DefinitionRow[] = health ? [
@@ -196,7 +210,7 @@ function App() {
     e('header', null,
       e('a', { class: 'brand', href: '/', 'aria-label': 'Tasks, главная' },
         e('img', { src: '/icon.svg', width: 40, height: 40, alt: '' }), 'Tasks'),
-      e('span', { class: 'stage' }, 'Этап 06')),
+      e('span', { class: 'stage' }, 'Этап 07')),
     e('div', { class: 'account-bar' }, e('p', null, user.login, ' · ', user.role === 'admin' ? 'Администратор' : 'Пользователь'),
       e('button', { disabled: loggingOut, onClick: logout }, loggingOut ? 'Выходим…' : 'Выйти')),
     authError && e('p', { class: 'error', role: 'alert' }, authError),

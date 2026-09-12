@@ -1,6 +1,6 @@
 import { randomUUID } from 'node:crypto';
 
-export const SCHEMA_VERSION = 4;
+export const SCHEMA_VERSION = 5;
 
 export function migrate(db) {
   db.exec('BEGIN IMMEDIATE');
@@ -51,6 +51,16 @@ export function migrate(db) {
       CREATE TABLE records (id TEXT PRIMARY KEY NOT NULL, vault_id TEXT NOT NULL REFERENCES vaults(id),
         object_id TEXT NOT NULL, parent_id TEXT, payload TEXT NOT NULL) STRICT;
       CREATE INDEX records_vault ON records(vault_id);
+    `);
+    if (version < 5) db.exec(`
+      ALTER TABLE vaults ADD COLUMN lock_epoch INTEGER NOT NULL DEFAULT 0;
+      ALTER TABLE vaults ADD COLUMN access_pack TEXT;
+      CREATE TABLE vault_challenges (id TEXT PRIMARY KEY NOT NULL, vault_id TEXT NOT NULL REFERENCES vaults(id),
+        device_id TEXT NOT NULL, epoch INTEGER NOT NULL, nonce TEXT NOT NULL, expires INTEGER NOT NULL) STRICT;
+      CREATE TABLE vault_grants (token_hash TEXT PRIMARY KEY NOT NULL, vault_id TEXT NOT NULL REFERENCES vaults(id),
+        device_id TEXT NOT NULL, epoch INTEGER NOT NULL) STRICT;
+      CREATE INDEX vault_grants_vault ON vault_grants(vault_id);
+      CREATE TABLE vault_closures (id TEXT PRIMARY KEY NOT NULL, vault_id TEXT NOT NULL REFERENCES vaults(id), epoch INTEGER NOT NULL) STRICT;
     `);
     db.exec(`PRAGMA user_version = ${SCHEMA_VERSION}`);
     db.exec('COMMIT');

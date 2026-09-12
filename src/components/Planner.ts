@@ -3,7 +3,7 @@ import { useEffect, useRef, useState } from 'preact/hooks';
 import type { User } from '../types/auth';
 import { readState, changes, type State } from '../storage';
 import { createVault, openVault, closeVault, saveNote, readNote, vaultName, heads, synchronize, transferVault,
-  readStash, moveStash, discardStash, registerDraftFlush, edit, hasUnsaved, type Note } from '../planner';
+  readStash, moveStash, discardStash, registerDraftFlush, edit, hasUnsaved, closeAllVault, resolveConflict, renameDevice, type Note } from '../planner';
 
 interface Draft extends Note { vault: string; object: string; revision: string | null; dirty: boolean; key: CryptoKey }
 export function Planner({ user }: { user: User }) {
@@ -11,8 +11,18 @@ export function Planner({ user }: { user: User }) {
   const [names, setNames] = useState<Record<string, string>>({});
   const [notes, setNotes] = useState<Record<string, Note>>({});
   const [stash, setStash] = useState<Record<string, Note>>({});
-  const [selected, select] = useState('');
-  const [screen, setScreen] = useState<'list' | 'create' | 'open' | 'transfer' | 'stash'>('list');
+  const [selected, setSelected] = useState('');
+  const selectionInitialized = useRef(false);
+  function select(vid: string) {
+    selectionInitialized.current = true;
+    setSelected(vid);
+    if (vid) void edit(user, async s => {
+      if (s.vaults.some(v => v.header.id === vid && !v.deleted)) s.lastVaultId = vid;
+    }).catch(() => setError('Не удалось запомнить выбранное хранилище'));
+  }
+  const [screen, setScreen] = useState<'list' | 'create' | 'open' | 'transfer' | 'stash' | 'close-all' | 'conflict' | 'device'>('list');
+  const [password,setPassword]=useState('');
+  const [comparison,setComparison]=useState<{objectId:string;versions:string[];chosen:string}>();
   const [name, setName] = useState(''); const [phrase, setPhrase] = useState(''); const [repeat, setRepeat] = useState('');
   const [confirmed, setConfirmed] = useState(false);
   const [target, setTarget] = useState('');
@@ -31,6 +41,10 @@ export function Planner({ user }: { user: User }) {
     }
     for (const item of s.stash) st[item.id] = await readStash(s, item.id);
     if (!alive.current || g !== generation.current) return;
+    if (!selectionInitialized.current) {
+      selectionInitialized.current = true;
+      if (s.vaults.some(v => v.header.id === s.lastVaultId && !v.deleted)) setSelected(s.lastVaultId!);
+    }
     setState(s); setNames(ns); setNotes(texts); setStash(st);
     const d = draftRef.current;
     if (d && !s.vaults.some(v => v.header.id === d.vault && v.key && !v.deleted)) {
@@ -74,7 +88,7 @@ export function Planner({ user }: { user: User }) {
     const changed = () => { void load().catch(() => { if (alive.current) setError('Не удалось прочитать данные. Возможно, запись повреждена.'); }); };
     const wake = () => { if (document.visibilityState === 'visible') void sync(); else void flush().catch(() => setError('Не удалось сохранить черновик')); };
     const leave = (event: BeforeUnloadEvent) => { if (draftRef.current?.dirty || saving.current) { event.preventDefault(); event.returnValue = ''; } };
-    changed(); void sync(); registerDraftFlush(flush);
+    changed(); void edit(user,async()=>{}).then(()=>sync()).catch(error=>setError(error instanceof Error?error.message:'Не удалось открыть локальные данные')); registerDraftFlush(flush);
     changes?.addEventListener('message', changed); window.addEventListener('tasks-data', changed);
     window.addEventListener('online', wake); document.addEventListener('visibilitychange', wake); window.addEventListener('beforeunload', leave);
     const interval = setInterval(() => { if (!draftRef.current?.dirty) void sync(); }, 30000);
@@ -85,7 +99,7 @@ export function Planner({ user }: { user: User }) {
   const v = state?.vaults.find(v => v.header.id === selected);
   const active = state?.vaults.filter(v => !v.deleted) ?? [];
   const opened = active.filter(v => v.key && !v.transfer);
-  function form(next: typeof screen, vid = '') { select(vid); setName(''); setPhrase(''); setRepeat(''); setConfirmed(false); setError(''); setScreen(next); }
+  function form(next: typeof screen, vid = '') { select(vid); setName(''); setPhrase(''); setRepeat(''); setPassword(''); setConfirmed(false); setError(''); setScreen(next); }
   async function submit(event: Event) {
     event.preventDefault(); await run(async () => {
       if (screen === 'open') await openVault(user, selected, phrase);
@@ -105,6 +119,32 @@ export function Planner({ user }: { user: User }) {
   }
   const feedback = e('div', { 'aria-live': 'polite' }, error && e('p', { class: 'error', role: 'alert' }, error),
     status && e('p', { class: 'hint' }, status));
+  if(screen==='device')return e('section',{class:'card'},e('button',{onClick:()=>setScreen('list')},'Назад'),e('h2',null,'Название этого устройства'),
+    e('form',{onSubmit:(ev:Event)=>{ev.preventDefault();void run(async()=>{await renameDevice(user,name);setScreen('list');});}},
+      e('label',null,'Название',e('input',{value:name,maxLength:80,required:true,onInput:(ev:Event)=>setName((ev.target as HTMLInputElement).value)})),
+      e('p',{class:'hint'},'Название и время изменения будут видны в новых версиях заметок после расшифровки.'),feedback,
+      e('button',{class:'primary',disabled:busy},'Сохранить')));
+  if(screen==='close-all')return e('section',{class:'card'},e('button',{disabled:busy,onClick:()=>{setPassword('');setScreen('list');}},'Назад'),
+    e('h2',null,'Закрыть хранилище на всех устройствах'),e('p',null,'Будет закрыто только выбранное хранилище, включая это устройство. Сервер сразу остановит синхронизацию. Устройства без сети удалят сохранённый ключ при подключении. Заметки и очередь не удаляются.'),
+    e('form',{onSubmit:(ev:Event)=>{ev.preventDefault();const secret=password;setPassword('');void run(async()=>{
+      if(!confirmed)throw Error('Подтвердите закрытие');await closeAllVault(user,selected,secret);setScreen('list');setStatus('Хранилище закрыто на всех устройствах.');});}},
+      e('label',null,'Пароль аккаунта',e('input',{type:'password',autoComplete:'current-password',value:password,required:true,onInput:(ev:Event)=>setPassword((ev.target as HTMLInputElement).value)})),
+      e('label',{class:'check-row'},e('input',{type:'checkbox',checked:confirmed,required:true,onChange:(ev:Event)=>setConfirmed((ev.target as HTMLInputElement).checked)}),
+        'Фраза хранилища мне известна. Если она забыта, после закрытия всех сохранённых ключей содержимое может стать недоступно.'),feedback,
+      e('button',{class:'primary',disabled:busy},busy?'Закрываем…':'Закрыть на всех устройствах')));
+  if(screen==='conflict'&&comparison&&v?.key){
+    const alternatives=v.records.filter(r=>comparison.versions.includes(r.id));
+    const finish=(keep:boolean)=>void run(async()=>{await resolveConflict(user,selected,comparison.objectId,comparison.versions,comparison.chosen,keep);setScreen('list');void sync();});
+    return e('section',{class:'card'},e('button',{onClick:()=>setScreen('list')},'Назад'),e('h2',null,'Версии заметки'),
+      e('p',null,'Заметку изменили независимо. Выберите актуальную версию или сохраните все как отдельные заметки. Исходные версии останутся в истории.'),
+      e('div',{class:'conflict-grid'},alternatives.map(r=>e('article',{class:'note-row',key:r.id},
+        e('label',{class:'check-row'},e('input',{type:'radio',name:'chosen-version',checked:comparison.chosen===r.id,onChange:()=>setComparison({...comparison,chosen:r.id})}),
+          e('strong',null,notes[r.id]?.author?.name??'Источник неизвестен')),
+        e('small',null,notes[r.id]?.author?new Date(notes[r.id].author!.time).toLocaleString():'Время неизвестно'),
+        e('h3',null,notes[r.id]?.title||'Без заголовка'),e('p',{class:'note-preview'},notes[r.id]?.text)))),feedback,
+      e('div',{class:'actions'},e('button',{class:'primary',disabled:busy,onClick:()=>finish(true)},alternatives.length===2?'Сохранить обе':'Сохранить все'),
+        e('button',{disabled:busy,onClick:()=>finish(false)},'Выбрать версию')));
+  }
   if (draft) return e('section', { class: 'card note-editor' },
     e('div', { class: 'actions' }, e('button', { disabled: busy, onClick: () => void run(async () => { await flush(); showDraft(null); void sync(); }) }, 'Назад'),
       e('button', { class: 'primary', disabled: busy, onClick: () => void run(async () => { await flush(); showDraft(null); void sync(); }) }, 'Готово')),
@@ -139,7 +179,11 @@ export function Planner({ user }: { user: User }) {
     e('label', null, 'Хранилище', e('select', { value: selected, onChange: (ev: Event) => select((ev.target as HTMLSelectElement).value) },
       e('option', { value: '' }, 'Выберите хранилище'), active.map(v => e('option', { value: v.header.id, key: v.header.id }, names[v.header.id] || 'Хранилище')))),
     e('div', { class: 'actions' }, e('button', { disabled: busy, onClick: () => form('create') }, '+ Хранилище'),
-      e('button', { onClick: () => setScreen('stash') }, 'Отложенные заметки (' + (state?.stash.length ?? 0) + ')')),
+      e('button', { onClick: () => setScreen('stash') }, 'Отложенные заметки (' + (state?.stash.length ?? 0) + ')'),
+      e('button',{onClick:()=>{setName(state?.deviceName??'Устройство');setScreen('device');}},'Это устройство: '+(state?.deviceName??'Устройство'))),
+    v&&!v.deleted&&e('div',null,
+      e('button',{disabled:busy||Boolean(v.transfer)||!v.access,onClick:()=>form('close-all',selected)},'Закрыть на всех устройствах'),
+      v.syncError&&e('p',{class:'error',role:'status'},v.syncError)),
     state?.stash.length ? e('p', { class: 'auth-notice', role: 'status' }, 'Есть заметки, не попавшие в конечное хранилище. Откройте «Отложенные заметки».') : null,
     state?.vaults.filter(v => v.deleted && v.records.some(r => r.pending)).map(v => e('div', { class: 'auth-notice' },
       e('p', null, 'Удалённое хранилище содержит локальные изменения. Чтобы перенести их в стеш, откройте его прежней фразой.'),
@@ -153,6 +197,9 @@ export function Planner({ user }: { user: User }) {
         e('button', { disabled: busy || Boolean(v.transfer), onClick: () => form('transfer', selected) }, 'Забыл фразу · перенести')),
       v.transfer && e('p', { class: 'auth-notice' }, 'Перенос подготовлен. Подключитесь к сети и завершите синхронизацию. Исходник сохранён до подтверждения.'),
       !heads(v).length && e('div', { class: 'empty-state' }, e('h2', null, 'Пока нет заметок'), e('p', null, 'Создайте первую заметку')),
+      [...new Set(heads(v).map(r=>r.objectId))].filter(objectId=>heads(v).filter(r=>r.objectId===objectId).length>1).map(objectId=>
+        e('button',{disabled:busy||Boolean(v.transfer),onClick:()=>{const versions=heads(v).filter(r=>r.objectId===objectId).map(r=>r.id);
+          setComparison({objectId,versions,chosen:versions[0]});setScreen('conflict');}},'Сравнить версии: '+(notes[heads(v).find(r=>r.objectId===objectId)!.id]?.title||'Без заголовка'))),
       heads(v).map(r => e('button', { class: 'note-row', disabled: Boolean(v.transfer), key: r.id, onClick: () => {
         const text = notes[r.id]; if (text && v.key) showDraft({ ...text, vault: selected, object: r.objectId, revision: r.id, dirty: false, key: v.key });
       } }, e('strong', null, notes[r.id]?.title || 'Без заголовка'), e('span', { class: 'note-preview' }, notes[r.id]?.text.slice(0, 140)),

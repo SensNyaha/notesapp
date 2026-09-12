@@ -9,17 +9,39 @@ import { createBackup } from '../server/cli/backup.mjs';
 import { prepareRestore } from '../server/cli/restore.mjs';
 import { migrate } from '../server/migrations.mjs';
 
-test('schema 3 upgrades atomically to 4 without changing installation or account credentials', () => {
+test('schema 3 upgrades atomically to current version without changing installation or account credentials', () => {
   const db = new DatabaseSync(':memory:');
   try {
     migrate(db);
-    db.exec("DROP TABLE records; DROP TABLE vaults; PRAGMA user_version=3; INSERT INTO users(id,login,password_hash,role,created_at) VALUES('owner','owner','stored-hash','admin',123);");
+    db.exec("DROP TABLE vault_grants; DROP TABLE vault_challenges; DROP TABLE vault_closures; DROP TABLE records; DROP TABLE vaults; PRAGMA user_version=3; INSERT INTO users(id,login,password_hash,role,created_at) VALUES('owner','owner','stored-hash','admin',123);");
     const installation = db.prepare('SELECT * FROM installation').get(), user = db.prepare('SELECT * FROM users').get();
     migrate(db); migrate(db);
-    assert.equal(db.prepare('PRAGMA user_version').get().user_version,4);
+    assert.equal(db.prepare('PRAGMA user_version').get().user_version,5);
     assert.deepEqual(db.prepare('SELECT * FROM installation').get(),installation);
     assert.deepEqual(db.prepare('SELECT * FROM users').get(),user);
     assert.equal(db.prepare('SELECT count(*) n FROM vaults').get().n,0);
+  } finally { db.close(); }
+});
+
+test('schema 4 vault headers and immutable ciphertext survive the access migration', () => {
+  const db = new DatabaseSync(':memory:');
+  try {
+    migrate(db);
+    db.exec(`DROP TABLE vault_grants; DROP TABLE vault_challenges; DROP TABLE vault_closures;
+      ALTER TABLE vaults DROP COLUMN access_pack; ALTER TABLE vaults DROP COLUMN lock_epoch;
+      PRAGMA user_version=4;
+      INSERT INTO users(id,login,password_hash,role,created_at) VALUES('owner','owner','stored-hash','admin',123);
+      INSERT INTO vaults VALUES('vault','owner','opaque-header',0,NULL);
+      INSERT INTO records VALUES('revision','vault','object',NULL,'opaque-ciphertext');`);
+    const installation=db.prepare('SELECT * FROM installation').get(),users=db.prepare('SELECT * FROM users').all();
+    const records=db.prepare('SELECT * FROM records').all();
+    migrate(db);migrate(db);
+    assert.equal(db.prepare('PRAGMA user_version').get().user_version,5);
+    assert.deepEqual(db.prepare('SELECT * FROM installation').get(),installation);
+    assert.deepEqual(db.prepare('SELECT * FROM users').all(),users);
+    assert.deepEqual(db.prepare('SELECT * FROM records').all(),records);
+    const v=db.prepare('SELECT * FROM vaults').get();
+    assert.equal(v.header,'opaque-header');assert.equal(v.lock_epoch,0);assert.equal(v.access_pack,null);
   } finally { db.close(); }
 });
 
@@ -46,7 +68,7 @@ test('WAL backup preserves schema 1; migration preserves installation and admini
     restoredDb.close();
     db.close();
     db = openDatabase(dir, { countBoot: false });
-    assert.equal(db.prepare('PRAGMA user_version').get().user_version, 4);
+    assert.equal(db.prepare('PRAGMA user_version').get().user_version, 5);
     assert.equal(db.prepare('SELECT boot_count FROM installation').get().boot_count, 7);
     assert.equal(db.prepare('SELECT installation_id FROM installation').get().installation_id, 'preserved-id');
     migrate(db);

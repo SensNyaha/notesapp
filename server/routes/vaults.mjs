@@ -1,4 +1,5 @@
 import { requireUser, AccountError, fail } from '../auth/accounts.mjs';
+import { registerVaultAccess } from './vault-access.mjs';
 const uuid = { type: 'string', pattern: '^[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}$' };
 const obj = properties => ({ type: 'object', additionalProperties: false, properties, required: Object.keys(properties) });
 const b64 = (min, max = min) => ({ type: 'string', pattern: '^[A-Za-z0-9_-]+$', minLength: min, maxLength: max });
@@ -8,6 +9,7 @@ const wrapper = obj({ v: { const: 1 }, alg: { const: 'A256GCM' }, purpose: { con
     iterations: { type: 'integer', minimum: 600000, maximum: 2000000 }, salt: b64(22) }) });
 const header = obj({ id: uuid, keyId: uuid, revisionId: uuid, wrapper, name: sealed });
 const record = obj({ id: uuid, objectId: uuid, parent: { anyOf: [uuid, { type: 'null' }] }, sealed });
+record.properties.resolves = { type:'array',minItems:1,maxItems:100,uniqueItems:true,items:uuid };
 
 export function registerVaults(app, db, { guard, accessOf, clock }) {
   function own(user, id, active = true) {
@@ -27,17 +29,19 @@ export function registerVaults(app, db, { guard, accessOf, clock }) {
   }; }
   const post = (path, schema, fn) => app.post('/api/vaults/' + path,
     { bodyLimit: 1450000, preHandler: guard, schema: { body: schema } }, action(fn));
+  const permit=registerVaultAccess(app,db,{own,action,post,obj,uuid,b64,sealed,guard,accessOf,clock});
   app.get('/api/vaults', action((_req, user) => ({ vaults: db.prepare('SELECT * FROM vaults WHERE user_id=? ORDER BY id').all(user.id)
-    .map(v => ({ id: v.id, deleted: Boolean(v.deleted), replacement: v.replacement, header: v.header ? JSON.parse(v.header) : null })) })));
+    .map(v => ({ id: v.id, deleted: Boolean(v.deleted), replacement: v.replacement, header: v.header ? JSON.parse(v.header) : null,
+      epoch:v.lock_epoch,access:v.access_pack?JSON.parse(v.access_pack):null })) })));
   app.get('/api/vaults/:id', { schema: { params: obj({ id: uuid }), querystring: { type: 'object', additionalProperties: false,
     properties: { after: { type: 'string', pattern: '^[0-9]{1,15}$' } } } } }, action((req, user) => {
-    own(user, req.params.id);
+    permit(req,own(user, req.params.id));
     const rows = db.prepare('SELECT rowid,payload FROM records WHERE vault_id=? AND rowid>? ORDER BY rowid LIMIT 5').all(req.params.id, Number(req.query.after ?? 0));
     return { records: rows.map(r => JSON.parse(r.payload)), next: rows.length === 5 ? rows.at(-1).rowid : null };
   }));
   post('create', { ...header, properties: { ...header.properties, transferSource: uuid } }, (req, user) => {
     const { transferSource, ...value } = req.body;
-    if (transferSource) own(user, transferSource);
+    if (transferSource) permit(req,own(user, transferSource));
     const text = JSON.stringify(value), old = db.prepare('SELECT * FROM vaults WHERE id=?').get(req.body.id);
     if (old) {
       if (old.user_id !== user.id) fail('id_conflict', 409);
@@ -51,7 +55,7 @@ export function registerVaults(app, db, { guard, accessOf, clock }) {
     return { ok: true };
   });
   post('record', obj({ vaultId: uuid, record }), (req, user) => {
-    const { vaultId, record: r } = req.body; own(user, vaultId);
+    const { vaultId, record: r } = req.body; permit(req,own(user, vaultId));
     const text = JSON.stringify(r), old = db.prepare('SELECT * FROM records WHERE id=?').get(r.id);
     if (old) {
       if (old.vault_id !== vaultId || old.payload !== text) fail('id_conflict', 409);
@@ -61,6 +65,10 @@ export function registerVaults(app, db, { guard, accessOf, clock }) {
       const parent = db.prepare('SELECT * FROM records WHERE id=? AND vault_id=? AND object_id=?').get(r.parent, vaultId, r.objectId);
       if (!parent) fail('missing_parent', 409);
     }
+    if(r.resolves){
+      if(!r.parent||r.resolves.includes(r.parent)||r.resolves.includes(r.id))fail('invalid_request',400);
+      for(const parent of r.resolves)if(!db.prepare('SELECT 1 FROM records WHERE id=? AND vault_id=? AND object_id=?').get(parent,vaultId,r.objectId))fail('missing_parent',409);
+    }
     if (db.prepare('SELECT count(*) n FROM records WHERE vault_id=?').get(vaultId).n >= 10000) fail('record_limit', 409);
     if (db.prepare('SELECT coalesce(sum(length(payload)),0) n FROM records WHERE vault_id=?').get(vaultId).n + text.length > 64 * 1024 * 1024) fail('record_limit', 409);
     db.prepare('INSERT INTO records(id,vault_id,object_id,parent_id,payload) VALUES(?,?,?,?,?)').run(r.id, vaultId, r.objectId, r.parent, text);
@@ -69,14 +77,17 @@ export function registerVaults(app, db, { guard, accessOf, clock }) {
   post('transfer', obj({ source: uuid, target: uuid, revisions: { type: 'array', maxItems: 10000, uniqueItems: true, items: uuid }, confirmed: { const: true } }), (req, user) => {
     const { source, target, revisions } = req.body;
     if (source === target) fail('invalid_request', 400);
-    const from = own(user, source, false); own(user, target);
+    const from = own(user, source, false); permit(req,own(user, target));
     if (from.deleted) {
       if (from.replacement !== target) fail('id_conflict', 409);
       return { ok: true };
     }
+    permit(req,from);
     for (const id of revisions) if (!db.prepare('SELECT 1 FROM records WHERE id=? AND vault_id=?').get(id, target)) fail('transfer_incomplete', 409);
     db.prepare('DELETE FROM records WHERE vault_id=?').run(source);
-    db.prepare('UPDATE vaults SET deleted=1,header=NULL,replacement=? WHERE id=?').run(target, source);
+    db.prepare('UPDATE vaults SET deleted=1,header=NULL,access_pack=NULL,replacement=? WHERE id=?').run(target, source);
+    db.prepare('DELETE FROM vault_grants WHERE vault_id=?').run(source);
+    db.prepare('DELETE FROM vault_challenges WHERE vault_id=?').run(source);
     return { ok: true };
   });
 }

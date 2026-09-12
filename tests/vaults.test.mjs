@@ -10,8 +10,9 @@ import { IDBObjectStore } from 'fake-indexeddb';
 import { createApp } from '../server/app.mjs';
 import { generateVaultKey } from '../src/crypto/vault.ts';
 import { seal, unseal } from '../src/crypto/records.ts';
+import { signAccess } from '../src/crypto/access.ts';
 import { createVault, openVault, closeVault, saveNote, readNote, heads, synchronize, transferVault,
-  readStash, moveStash, discardStash, edit } from '../src/planner.ts';
+  readStash, moveStash, discardStash, edit, closeAllVault, resolveConflict, renameDevice, context } from '../src/planner.ts';
 import { readState, writeState, changes } from '../src/storage.ts';
 
 test('record v2 interoperates with OpenSSL AES-KW/GCM and authenticates context, parent and payload', async () => {
@@ -44,9 +45,10 @@ test('vault persistence, offline queue, conflicts, deletion and encrypted stash 
   } } });
   const dir = await mkdtemp(join(tmpdir(),'tasks-vaults-'));
   const credentials = { login: 'VaultAdmin', password: 'Secret9Admin' };
-  const app = await createApp({ dataDir:dir, logger:false, auth:{ origin:'http://localhost:3100',secure:false,bootstrap:credentials } });
+  let now=Date.now();
+  const app = await createApp({ dataDir:dir, logger:false, clock:()=>now, auth:{ origin:'http://localhost:3100',secure:false,bootstrap:credentials } });
   const jar = new Map(), originalFetch = globalThis.fetch;
-  let lose = '', offline = false;
+  let lose = '', offline = false, gate, failPath='';
   const send = async (path, options={}) => {
     const cookie = [...jar].map(([k,v])=>`${k}=${v}`).join('; ');
     const account = path.startsWith('/api/vaults') ? (await app.inject({url:'/api/auth/session',headers:{cookie}})).json().user?.id : undefined;
@@ -57,6 +59,8 @@ test('vault persistence, offline queue, conflicts, deletion and encrypted stash 
   };
   globalThis.fetch = async (path, options={}) => {
     if(offline)throw Error('offline');
+    if(gate&&path.split('?')[0]===gate.path){const current=gate;gate=undefined;current.arrived();await current.wait;}
+    if(failPath&&path.split('?')[0]===failPath)return new Response(JSON.stringify({error:'server_error'}),{status:500});
     const response = await send(path,options);
     if(lose===path){lose='';throw Error('lost response');}
     return new Response(response.body,{status:response.statusCode,headers:{'content-type':'application/json'}});
@@ -74,7 +78,7 @@ test('vault persistence, offline queue, conflicts, deletion and encrypted stash 
     target=await createVault(user,'Другое','123456');
     await assert.rejects(createVault(user,'x','12345'));
     const objectId=randomUUID();base=await saveNote(user,source,objectId,null,secret);
-    let s=await readState(user.id),v=s.vaults[0];assert.deepEqual(await readNote(user.id,v,heads(v)[0]),secret);
+    let s=await readState(user.id),v=s.vaults[0];const {author,...plain}=await readNote(user.id,v,heads(v)[0]);assert.deepEqual(plain,secret);assert.equal(author.name,'Устройство');
     assert.ok(v.key instanceof CryptoKey);
     assert.equal(v.key.extractable,false);
     await assert.rejects(crypto.subtle.exportKey('raw',v.key));
@@ -137,7 +141,7 @@ test('vault persistence, offline queue, conflicts, deletion and encrypted stash 
     await saveNote(user,source,r.objectId,r.id,{title:'Forgotten offline edit',text:'Never sent'});
     await synchronize(user);let s=await readState(user.id);
     assert.equal(s.stash.length,1);assert.equal(s.vaults[0].key,undefined);
-    assert.deepEqual(await readStash(s,s.stash[0].id),{title:'Forgotten offline edit',text:'Never sent'});
+    const {author,...plain}=await readStash(s,s.stash[0].id);assert.deepEqual(plain,{title:'Forgotten offline edit',text:'Never sent'});assert.equal(author.name,'Устройство');
     assert.ok(!JSON.stringify(s).includes('Never sent'));
     await closeVault(user,target);await assert.rejects(moveStash(user,s.stash[0].id,target));
     assert.equal((await readState(user.id)).stash.length,1);
@@ -182,9 +186,95 @@ test('vault persistence, offline queue, conflicts, deletion and encrypted stash 
     const wire=JSON.stringify(db.prepare('SELECT * FROM vaults').all())+JSON.stringify(db.prepare('SELECT * FROM records').all());
     for(const plain of [secret.title,secret.text,'PRIVATE VAULT 87654','Forgotten offline edit'])assert.ok(!wire.includes(plain));
     const before=db.prepare('SELECT * FROM installation').get();
-    assert.equal(db.prepare('PRAGMA user_version').get().user_version,4);db.close();
+    assert.equal(db.prepare('PRAGMA user_version').get().user_version,5);db.close();
     const {createBackup}=await import('../server/cli/backup.mjs');const file=join(dir,'copy.sqlite');
     await createBackup(join(dir,'tasks.sqlite'),file);const bytes=await readFile(file);assert.ok(!bytes.includes(Buffer.from(secret.text)));
     assert.ok(before.installation_id);
+  });
+  await t.test('global close revokes grants immediately, needs account password, is idempotent and reopens devices independently',async()=>{
+    const vid=await createVault(user,'Global lock test','abcdef');await synchronize(user);
+    let a=await readState(user.id),b=structuredClone(a);b.deviceId=randomUUID();
+    const challenge=(await post('/api/vaults/access/challenge',{vaultId:vid,deviceId:a.deviceId})).json().challenge;
+    await assert.rejects(closeAllVault(user,vid,'Wrong9Password'),/пароль/);
+    assert.equal((await send('/api/vaults')).json().vaults.find(v=>v.id===vid).epoch,0);
+    const operation=(await readState(user.id)).vaults.find(v=>v.header.id===vid).closeOperation;
+    lose='/api/vaults/close-all';await assert.rejects(closeAllVault(user,vid,credentials.password));
+    assert.equal((await send('/api/vaults/'+vid)).statusCode,423);
+    assert.equal((await post('/api/vaults/access/grant',{vaultId:vid,deviceId:a.deviceId,challengeId:challenge[6],signature:Buffer.alloc(64).toString('base64url')})).statusCode,403);
+    await closeAllVault(user,vid,credentials.password);
+    assert.equal((await send('/api/vaults')).json().vaults.find(v=>v.id===vid).epoch,1);
+    assert.ok(operation);assert.equal((await readState(user.id)).vaults.find(v=>v.header.id===vid).key,undefined);
+    await openVault(user,vid,'abcdef');await synchronize(user);a=await readState(user.id);
+    const tokenA=a.vaults.find(v=>v.header.id===vid).grant;
+    assert.equal((await send('/api/vaults/'+vid,{headers:{'x-tasks-device':a.deviceId,'x-vault-grants':JSON.stringify({[vid]:tokenA})}})).statusCode,200);
+    await writeState(b);await assert.rejects(synchronize(user),/закрыто/);
+    b=await readState(user.id);assert.equal(b.vaults.find(v=>v.header.id===vid).key,undefined);
+    assert.ok(b.vaults.find(v=>v.header.id===target).key);
+    await openVault(user,vid,'abcdef');await synchronize(user);b=await readState(user.id);
+    const tokenB=b.vaults.find(v=>v.header.id===vid).grant;assert.ok(tokenB&&tokenB!==tokenA);
+    assert.equal((await send('/api/vaults/'+vid,{headers:{'x-tasks-device':a.deviceId,'x-vault-grants':JSON.stringify({[vid]:tokenA})}})).statusCode,200);
+    await closeAllVault(user,vid,credentials.password);
+    assert.equal((await send('/api/vaults/'+vid,{headers:{'x-tasks-device':a.deviceId,'x-vault-grants':JSON.stringify({[vid]:tokenA})}})).statusCode,423);
+    const invalid=(await post('/api/vaults/access/challenge',{vaultId:vid,deviceId:b.deviceId})).json().challenge;
+    assert.equal((await post('/api/vaults/access/grant',{vaultId:vid,deviceId:b.deviceId,challengeId:invalid[6],signature:Buffer.alloc(64).toString('base64url')})).statusCode,403);
+    await openVault(user,vid,'abcdef');await synchronize(user);
+  });
+  await t.test('proofs expire, are single-use, and revocation during upload preserves the pending edit',async()=>{
+    const vid=await createVault(user,'Race','abcdef');await synchronize(user);
+    await closeAllVault(user,vid,credentials.password);await openVault(user,vid,'abcdef');await synchronize(user);
+    const state=await readState(user.id),v=state.vaults.find(v=>v.header.id===vid);
+    const proofDevice=randomUUID();
+    const proof=async()=>{
+      const challenge=(await post('/api/vaults/access/challenge',{vaultId:vid,deviceId:proofDevice})).json().challenge;
+      const signature=await signAccess(v.key,context(user.id,v.header,v.header.keyId,v.header.keyId),v.access,challenge);
+      return{vaultId:vid,deviceId:proofDevice,challengeId:challenge[6],signature};
+    };
+    const valid=await proof();assert.equal((await post('/api/vaults/access/grant',valid)).statusCode,200);
+    assert.equal((await post('/api/vaults/access/grant',valid)).statusCode,403);
+    const expired=await proof();now+=60001;
+    assert.equal((await post('/api/vaults/access/grant',expired)).statusCode,403);
+    await openVault(user,vid,'abcdef');await synchronize(user);
+    const revision=await saveNote(user,vid,randomUUID(),null,{title:'Pending',text:'Keep after revocation'});
+    let arrived,release;const seen=new Promise(resolve=>{arrived=resolve;});const wait=new Promise(resolve=>{release=resolve;});
+    gate={path:'/api/vaults/record',arrived,wait};const running=synchronize(user);await seen;
+    try{await closeAllVault(user,vid,credentials.password);}finally{release();}
+    await assert.rejects(running,/закрыто/);
+    const locked=(await readState(user.id)).vaults.find(v=>v.header.id===vid);
+    assert.equal(locked.key,undefined);assert.equal(locked.records.find(r=>r.id===revision.id).pending,true);
+    await openVault(user,vid,'abcdef');await synchronize(user);
+    assert.equal((await readState(user.id)).vaults.find(v=>v.header.id===vid).records.find(r=>r.id===revision.id).pending,false);
+  });
+  await t.test('network waits do not block local encrypted writes; a failing vault does not stop another outbox',async()=>{
+    const slow=await createVault(user,'Slow','abcdef'),healthy=await createVault(user,'Healthy','abcdef');await synchronize(user);
+    let arrived,release;
+    const seen=new Promise(resolve=>{arrived=resolve;});const wait=new Promise(resolve=>{release=resolve;});
+    gate={path:'/api/vaults/'+slow,arrived,wait};const running=synchronize(user);await seen;
+    let timer;try{await Promise.race([saveNote(user,healthy,randomUUID(),null,{title:'During network wait',text:'Saved locally'}),
+      new Promise((_,reject)=>{timer=setTimeout(()=>reject(Error('data lock held during network wait')),1000);})]);}
+    finally{clearTimeout(timer);release();}await running;
+    const fresh=await saveNote(user,healthy,randomUUID(),null,{title:'Healthy queue',text:'Independent'});
+    failPath='/api/vaults/'+slow;try{await assert.rejects(synchronize(user),/server_error/);}finally{failPath='';}
+    const s=await readState(user.id);assert.equal(s.vaults.find(v=>v.header.id===healthy).records.find(r=>r.id===fresh.id).pending,false);
+    assert.ok(s.vaults.find(v=>v.header.id===slow).syncError);await synchronize(user);
+  });
+  await t.test('conflict choice and keeping both preserve history, authenticate links and retain concurrent resolutions',async()=>{
+    const vid=await createVault(user,'Conflicts','abcdef'),oid=randomUUID();await renameDevice(user,'Phone');
+    const base=await saveNote(user,vid,oid,null,{title:'Base',text:'Base'});
+    await saveNote(user,vid,oid,base.id,{title:'First',text:'One'});await renameDevice(user,'Computer');
+    await saveNote(user,vid,oid,base.id,{title:'Second',text:'Two'});await synchronize(user);
+    const before=await readState(user.id),v=before.vaults.find(v=>v.header.id===vid),versions=heads(v).map(r=>r.id);
+    assert.equal(versions.length,2);
+    assert.equal((await readNote(user.id,v,heads(v)[0])).author.name,'Phone');
+    assert.equal((await readNote(user.id,v,heads(v)[1])).author.name,'Computer');
+    await resolveConflict(user,vid,oid,versions,versions[0],false);await synchronize(user);
+    let after=await readState(user.id),resolved=after.vaults.find(v=>v.header.id===vid);assert.equal(heads(resolved).length,1);assert.equal(resolved.records.length,4);
+    const r=heads(resolved)[0];await assert.rejects(readNote(user.id,resolved,{...r,resolves:[]}));
+    await assert.rejects(resolveConflict(user,vid,oid,versions,versions[0],true),/изменился/);
+    await writeState(before);await resolveConflict(user,vid,oid,versions,versions[1],false);await synchronize(user);
+    after=await readState(user.id);resolved=after.vaults.find(v=>v.header.id===vid);assert.equal(heads(resolved).length,2);
+    const headsBefore=heads(resolved).map(r=>r.id),history=resolved.records.length;
+    await resolveConflict(user,vid,oid,headsBefore,headsBefore[0],true);lose='/api/vaults/record';await assert.rejects(synchronize(user));await synchronize(user);
+    after=await readState(user.id);resolved=after.vaults.find(v=>v.header.id===vid);assert.equal(heads(resolved).length,2);
+    assert.equal(new Set(heads(resolved).map(r=>r.objectId)).size,2);assert.equal(resolved.records.length,history+2);
   });
 });
