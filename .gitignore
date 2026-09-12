@@ -8,3 +8,5 @@ backups/
 .sites-runtime/
 certs/*.pem
 certs/*.cer
+docs/
+TODO.md
