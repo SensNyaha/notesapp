@@ -6,6 +6,8 @@ import { Login } from './components/Login';
 import { PasswordScreen, UsersScreen } from './components/Accounts';
 import { CryptoCheck } from './components/CryptoCheck';
 import { Planner } from './components/Planner';
+import { Notifications } from './components/Notifications';
+import { detachPush, browserUnsubscribe } from './push';
 import { profiles, readState, eraseState, exclusive, announce, changes } from './storage';
 import { flushDraft, hasUnsaved, synchronize } from './planner';
 import { session, signOut, authMessage } from './auth';
@@ -27,7 +29,7 @@ function DefinitionList({ rows }: { rows: DefinitionRow[] }) {
 function App() {
   const [user, setUser] = useState<User | null>(null);
   const userRef = useRef<User | null>(null); userRef.current = user;
-  const [page, setPage] = useState<'home' | 'password' | 'users' | 'diagnostics'>('home');
+  const [page, setPage] = useState<'home' | 'password' | 'users' | 'diagnostics' | 'notifications'>('home');
   const [localProfiles, setLocalProfiles] = useState<User[]>([]);
   const localMode = useRef(false);
   const [notice, setNotice] = useState('');
@@ -93,6 +95,7 @@ function App() {
         const s = user && await readState(user.id);
         if (s && hasUnsaved(s) && !confirm('Есть заметки или стеш, не сохранённые на сервере. Выйти и удалить их вместе с ключами с этого устройства?')) return false;
         await signOut();
+        await browserUnsubscribe().catch(() => {}); // Server session revocation already cancels its subscriptions.
         if (user) { await eraseState(user.id); announce('logout:' + user.id); }
         return true;
       });
@@ -210,7 +213,7 @@ function App() {
     e('header', null,
       e('a', { class: 'brand', href: '/', 'aria-label': 'Tasks, главная' },
         e('img', { src: '/icon.svg', width: 40, height: 40, alt: '' }), 'Tasks'),
-      e('span', { class: 'stage' }, 'Этап 07')),
+      e('span', { class: 'stage' }, 'Этап 08')),
     e('div', { class: 'account-bar' }, e('p', null, user.login, ' · ', user.role === 'admin' ? 'Администратор' : 'Пользователь'),
       e('button', { disabled: loggingOut, onClick: logout }, loggingOut ? 'Выходим…' : 'Выйти')),
     authError && e('p', { class: 'error', role: 'alert' }, authError),
@@ -218,10 +221,12 @@ function App() {
     e('nav', { class: 'actions', 'aria-label': 'Управление аккаунтом' },
       e('button', { onClick: () => void flushDraft().then(() => setPage('home')).catch(() => setAuthError('Сохраните черновик')) }, 'Заметки'),
       e('button', { onClick: () => void flushDraft().then(() => setPage('diagnostics')).catch(() => setAuthError('Сохраните черновик')) }, 'Диагностика'),
+      e('button', { onClick: () => void flushDraft().then(() => setPage('notifications')).catch(() => setAuthError('Сохраните черновик')) }, 'Уведомления'),
       e('button', { onClick: () => void flushDraft().then(() => setPage('password')).catch(() => setAuthError('Сохраните черновик')) }, 'Изменить пароль'),
       user.role === 'admin' && e('button', { onClick: () => void flushDraft().then(() => setPage('users')).catch(() => setAuthError('Сохраните черновик')) }, 'Пользователи'),
-      e('button', { onClick: () => void flushDraft().then(() => { setUser(null); void profiles().then(setLocalProfiles); }).catch(() => setAuthError('Сохраните черновик')) }, 'Войти снова / другой аккаунт')),
+      e('button', { onClick: () => void flushDraft().then(detachPush).then(() => { setUser(null); void profiles().then(setLocalProfiles); }).catch(error => setAuthError(error instanceof Error?error.message:'Сохраните черновик и проверьте сеть')) }, 'Войти снова / другой аккаунт')),
     page === 'home' && e(Planner, { user, key: user.id }),
+    page === 'notifications' && e(Notifications, { user, key: user.id }),
     updateNotice,
     page === 'diagnostics' && e('div', null,
     e('section', { class: 'intro' },
@@ -247,7 +252,7 @@ function App() {
     e(CryptoCheck, { key: user.id }),
     e('footer', null,
       e('strong', null, 'Криптографический модуль готов к проверке на тестовых данных.'),
-      e('p', null, 'Хранилища и заметки доступны в разделе «Заметки». Уведомления — следующий этап.')),
+      e('p', null, 'Хранилища доступны в разделе «Заметки», тестовый push — в разделе «Уведомления».')),
     ));
 }
 

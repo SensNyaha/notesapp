@@ -10,6 +10,7 @@ test('offline shell works; API and non-public paths bypass the Service Worker ca
   let publicAssets = [];
   let activationRequests = 0;
   let windows = [{ id: 'current' }, { id: 'draft-tab' }];
+  const notifications=[];let opened,focused=0,closed=0;
   const cacheApi = {
     async open(key) {
       if (!stores.has(key)) stores.set(key, new Map());
@@ -28,7 +29,8 @@ test('offline shell works; API and non-public paths bypass the Service Worker ca
   vm.runInNewContext(code, {
     URL, caches: cacheApi,
     fetch: async () => { throw new Error('offline'); },
-    self: { location: { origin: 'http://localhost:3100' }, clients: { claim: async () => {}, matchAll: async () => windows },
+    self: { location: { origin: 'http://localhost:3100' }, registration:{showNotification:async(...args)=>notifications.push(args)},
+      clients: { claim: async () => {}, matchAll: async () => windows,openWindow:async path=>{opened=path;} },
       addEventListener: (name, fn) => { handlers[name] = fn; }, skipWaiting: async () => { activationRequests++; } },
   });
   let pending;
@@ -72,4 +74,10 @@ test('offline shell works; API and non-public paths bypass the Service Worker ca
     assert.equal(request(path).handled, false);
   }
   assert.equal(request('/index.html', 'cors', 'POST').handled, false);
+  handlers.push({data:{json:()=>({type:'tasks-test',id:'a'.repeat(36),body:'private text',url:'https://evil.test'})},waitUntil(promise){pending=promise;}});
+  await pending;assert.equal(notifications.length,1);assert.ok(!JSON.stringify(notifications).includes('private text'));assert.ok(!JSON.stringify(notifications).includes('evil.test'));
+  windows=[{url:'http://localhost:3100/',focus:async()=>{focused++;}}];
+  const click={notification:{close(){closed++;},data:{url:'https://evil.test'}},waitUntil(promise){pending=promise;}};
+  handlers.notificationclick(click);await pending;assert.equal(focused,1);assert.equal(opened,undefined);
+  windows=[];handlers.notificationclick(click);await pending;assert.equal(opened,'/');assert.equal(closed,2);
 });

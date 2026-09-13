@@ -35,3 +35,22 @@ self.addEventListener('fetch', event => {
     return await cache.match(path) || fetch(event.request);
   })());
 });
+self.addEventListener('push', event => {
+  // Never render arbitrary payload text or URLs. Even malformed/late pushes remain neutral.
+  let id = 'test';
+  try { const data=event.data?.json();if(data?.type==='tasks-test'&&/^[0-9a-f-]{36}$/.test(data.id))id=data.id; } catch {}
+  event.waitUntil(self.registration.showNotification('Tasks', {
+    body:'Тестовое уведомление. Уведомления на этом устройстве работают.',
+    icon:'/icons/icon-192.png',badge:'/icons/icon-192.png',tag:'tasks-test-'+id,
+    data:{type:'tasks-test'},
+  }));
+});
+self.addEventListener('notificationclick', event => {
+  event.notification.close();
+  event.waitUntil((async()=>{
+    const windows=await self.clients.matchAll({type:'window',includeUncontrolled:true});
+    const existing=windows.find(client=>new URL(client.url).origin===self.location.origin&&new URL(client.url).pathname==='/');
+    if(existing)return existing.focus();
+    return self.clients.openWindow('/');
+  })());
+});

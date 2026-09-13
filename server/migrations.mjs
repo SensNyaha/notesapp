@@ -1,6 +1,6 @@
 import { randomUUID } from 'node:crypto';
 
-export const SCHEMA_VERSION = 5;
+export const SCHEMA_VERSION = 6;
 
 export function migrate(db) {
   db.exec('BEGIN IMMEDIATE');
@@ -61,6 +61,20 @@ export function migrate(db) {
         device_id TEXT NOT NULL, epoch INTEGER NOT NULL) STRICT;
       CREATE INDEX vault_grants_vault ON vault_grants(vault_id);
       CREATE TABLE vault_closures (id TEXT PRIMARY KEY NOT NULL, vault_id TEXT NOT NULL REFERENCES vaults(id), epoch INTEGER NOT NULL) STRICT;
+    `);
+    if (version < 6) db.exec(`
+      CREATE TABLE push_config (id INTEGER PRIMARY KEY CHECK(id=1), public_key TEXT NOT NULL, private_key TEXT NOT NULL) STRICT;
+      CREATE TABLE push_subscriptions (id TEXT PRIMARY KEY NOT NULL, user_id TEXT NOT NULL REFERENCES users(id),
+        session_id TEXT NOT NULL REFERENCES sessions(id) ON DELETE CASCADE, device_id TEXT NOT NULL,
+        endpoint TEXT NOT NULL UNIQUE, p256dh TEXT NOT NULL, auth TEXT NOT NULL,
+        UNIQUE(session_id,device_id)) STRICT;
+      CREATE TABLE push_tests (id TEXT PRIMARY KEY NOT NULL, subscription_id TEXT NOT NULL REFERENCES push_subscriptions(id) ON DELETE CASCADE,
+        due_at INTEGER NOT NULL, expires_at INTEGER NOT NULL, status TEXT NOT NULL,
+        attempts INTEGER NOT NULL DEFAULT 0, lease_until INTEGER NOT NULL DEFAULT 0) STRICT;
+      CREATE INDEX push_tests_due ON push_tests(status,due_at);
+      CREATE TABLE push_test_limits (user_id TEXT PRIMARY KEY NOT NULL REFERENCES users(id), last_test INTEGER NOT NULL) STRICT;
+      CREATE TRIGGER push_revoke_session AFTER UPDATE OF revoked ON sessions WHEN NEW.revoked=1
+        BEGIN DELETE FROM push_subscriptions WHERE session_id=NEW.id; END;
     `);
     db.exec(`PRAGMA user_version = ${SCHEMA_VERSION}`);
     db.exec('COMMIT');

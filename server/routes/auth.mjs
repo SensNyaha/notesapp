@@ -1,12 +1,13 @@
 import cookie from '@fastify/cookie';
 import { registerVaults } from './vaults.mjs';
+import { registerPush } from './push.mjs';
 import { randomBytes, timingSafeEqual } from 'node:crypto';
 import { hashPassword, verifyPassword, normalizeLogin, validPassword } from '../auth/password.mjs';
 import { bootstrapFromEnvironment, insertFirstAdmin, needsSetup } from '../auth/users.mjs';
 import { createSession, currentUser, rotateSession, revokeSession, token, validToken } from '../auth/sessions.mjs';
 import { AccountError, publicUser, accountRow, requireUser, createAccount, resetAccount, changePassword } from '../auth/accounts.mjs';
 
-export async function registerAuth(app, db, config, clock = Date.now) {
+export async function registerAuth(app, db, config, clock = Date.now, push = {}) {
   await bootstrapFromEnvironment(db, config.bootstrap, clock());
   const dummyHash = await hashPassword('Aa1' + randomBytes(32).toString('base64url'));
   await app.register(cookie);
@@ -127,6 +128,7 @@ export async function registerAuth(app, db, config, clock = Date.now) {
   const objectBody = (properties, required = Object.keys(properties)) => ({ type: 'object', additionalProperties: false, properties, required });
   function accessOf(request) { return request.cookies[names.access]; }
   registerVaults(app, db, { guard, accessOf, clock });
+  registerPush(app, db, { guard, accessOf, clock, config, ...push });
   function accountAction(action, { hash = true, passwordChange = false } = {}) {
     return async (request, reply) => {
       try {
