@@ -12,7 +12,7 @@ import { generateVaultKey } from '../src/crypto/vault.ts';
 import { seal, unseal } from '../src/crypto/records.ts';
 import { signAccess } from '../src/crypto/access.ts';
 import { createVault, openVault, closeVault, saveNote, readNote, heads, synchronize, transferVault,
-  readStash, moveStash, discardStash, edit, closeAllVault, resolveConflict, renameDevice, context } from '../src/planner.ts';
+  readStash, moveStash, discardStash, edit, closeAllVault, resolveConflict, renameDevice, acknowledgeReminder, context } from '../src/planner.ts';
 import { readState, writeState, changes } from '../src/storage.ts';
 
 test('record v2 interoperates with OpenSSL AES-KW/GCM and authenticates context, parent and payload', async () => {
@@ -186,7 +186,7 @@ test('vault persistence, offline queue, conflicts, deletion and encrypted stash 
     const wire=JSON.stringify(db.prepare('SELECT * FROM vaults').all())+JSON.stringify(db.prepare('SELECT * FROM records').all());
     for(const plain of [secret.title,secret.text,'PRIVATE VAULT 87654','Forgotten offline edit'])assert.ok(!wire.includes(plain));
     const before=db.prepare('SELECT * FROM installation').get();
-    assert.equal(db.prepare('PRAGMA user_version').get().user_version,6);db.close();
+    assert.equal(db.prepare('PRAGMA user_version').get().user_version,7);db.close();
     const {createBackup}=await import('../server/cli/backup.mjs');const file=join(dir,'copy.sqlite');
     await createBackup(join(dir,'tasks.sqlite'),file);const bytes=await readFile(file);assert.ok(!bytes.includes(Buffer.from(secret.text)));
     assert.ok(before.installation_id);
@@ -276,5 +276,25 @@ test('vault persistence, offline queue, conflicts, deletion and encrypted stash 
     await resolveConflict(user,vid,oid,headsBefore,headsBefore[0],true);lose='/api/vaults/record';await assert.rejects(synchronize(user));await synchronize(user);
     after=await readState(user.id);resolved=after.vaults.find(v=>v.header.id===vid);assert.equal(heads(resolved).length,2);
     assert.equal(new Set(heads(resolved).map(r=>r.objectId)).size,2);assert.equal(resolved.records.length,history+2);
+  });
+  await t.test('encrypted reminder metadata survives sync; transfer keeps it disabled and deletes the source schedule',async()=>{
+    const vid=await createVault(user,'Reminder source','abcdef'),oid=randomUUID();
+    const reminder={id:randomUUID(),state:'active',local:'2026-12-20T09:30',mode:'custom',text:'EXPLICIT PUSH 4812'};
+    await saveNote(user,vid,oid,null,{title:'PRIVATE REMINDER NOTE',text:'encrypted body',reminder});lose='/api/reminders/set';await assert.rejects(synchronize(user));
+    assert.equal((await readState(user.id)).vaults.find(v=>v.header.id===vid).records.some(r=>r.reminderPending),true);await synchronize(user);
+    let s=await readState(user.id),v=s.vaults.find(v=>v.header.id===vid),value=await readNote(user.id,v,heads(v)[0]);
+    assert.deepEqual(value.reminder,reminder);assert.equal(v.records.some(r=>r.reminderPending),false);
+    offline=true;await acknowledgeReminder(user,{vaultId:vid,objectId:oid,configId:reminder.id});
+    assert.equal((await readState(user.id)).reminderSeen.length,1);offline=false;await synchronize(user);
+    assert.equal((await readState(user.id)).reminderSeen.length,0);
+    let probe=new DatabaseSync(join(dir,'tasks.sqlite'),{readOnly:true});
+    assert.equal(probe.prepare('SELECT body FROM reminders WHERE vault_id=?').get(vid).body,reminder.text);
+    assert.ok(!probe.prepare('SELECT payload FROM records WHERE vault_id=?').get(vid).payload.includes('PRIVATE REMINDER NOTE'));probe.close();
+    const destination=await transferVault(user,vid,'Reminder destination','ghijkl');await synchronize(user);
+    s=await readState(user.id);v=s.vaults.find(v=>v.header.id===destination);value=await readNote(user.id,v,heads(v)[0]);
+    assert.equal(value.reminder.state,'off');assert.notEqual(value.reminder.id,reminder.id);
+    probe=new DatabaseSync(join(dir,'tasks.sqlite'),{readOnly:true});
+    assert.equal(probe.prepare('SELECT 1 FROM reminders WHERE vault_id=?').get(vid),undefined);
+    assert.equal(probe.prepare('SELECT plan_state FROM reminders WHERE vault_id=?').get(destination).plan_state,'off');probe.close();
   });
 });

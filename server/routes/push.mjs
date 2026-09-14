@@ -2,6 +2,7 @@ import webpush from 'web-push';
 import { randomUUID, ECDH } from 'node:crypto';
 import { digest } from '../auth/sessions.mjs';
 import { requireUser, AccountError, fail } from '../auth/accounts.mjs';
+import { createReminderWorker } from './reminders.mjs';
 
 const uuid = { type:'string', pattern:'^[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}$' };
 const object = properties => ({type:'object',additionalProperties:false,required:Object.keys(properties),properties});
@@ -76,6 +77,7 @@ export function registerPush(app, db, { guard, accessOf, clock, config, send = (
     db.prepare("INSERT INTO push_tests(id,subscription_id,due_at,expires_at,status) VALUES(?,?,?,?,'scheduled')").run(req.body.operationId,sub.id,now+10000,now+60000);
     return{dueAt:now+10000};
   });
+  const runReminders=createReminderWorker(db,{clock,send,keys,config,validEndpoint});
   let running=null,stopping=false;
   async function tick() {
     if(!enabled||stopping)return;
@@ -84,6 +86,7 @@ export function registerPush(app, db, { guard, accessOf, clock, config, send = (
     db.prepare('DELETE FROM push_tests WHERE expires_at<?').run(now-7*86400000);
     db.prepare("UPDATE push_tests SET status='unknown' WHERE status='sending' AND lease_until<=?").run(now);
     db.prepare("UPDATE push_tests SET status='expired' WHERE status='scheduled' AND expires_at<=?").run(now);
+    await runReminders();
     for(let i=0;i<4&&!stopping;i++){
       let job;
       db.exec('BEGIN IMMEDIATE');

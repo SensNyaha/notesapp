@@ -13,10 +13,10 @@ test('schema 3 upgrades atomically to current version without changing installat
   const db = new DatabaseSync(':memory:');
   try {
     migrate(db);
-    db.exec("DROP TRIGGER push_revoke_session; DROP TABLE push_tests; DROP TABLE push_subscriptions; DROP TABLE push_test_limits; DROP TABLE push_config; DROP TABLE vault_grants; DROP TABLE vault_challenges; DROP TABLE vault_closures; DROP TABLE records; DROP TABLE vaults; PRAGMA user_version=3; INSERT INTO users(id,login,password_hash,role,created_at) VALUES('owner','owner','stored-hash','admin',123);");
+    db.exec("DROP TRIGGER reminder_record_changed; DROP TRIGGER reminder_vault_deleted; DROP TABLE reminder_deliveries; DROP TABLE reminders; DROP TABLE reminder_settings; DROP INDEX records_object; DROP TRIGGER push_revoke_session; DROP TABLE push_tests; DROP TABLE push_subscriptions; DROP TABLE push_test_limits; DROP TABLE push_config; DROP TABLE vault_grants; DROP TABLE vault_challenges; DROP TABLE vault_closures; DROP TABLE records; DROP TABLE vaults; PRAGMA user_version=3; INSERT INTO users(id,login,password_hash,role,created_at) VALUES('owner','owner','stored-hash','admin',123);");
     const installation = db.prepare('SELECT * FROM installation').get(), user = db.prepare('SELECT * FROM users').get();
     migrate(db); migrate(db);
-    assert.equal(db.prepare('PRAGMA user_version').get().user_version,6);
+    assert.equal(db.prepare('PRAGMA user_version').get().user_version,7);
     assert.deepEqual(db.prepare('SELECT * FROM installation').get(),installation);
     assert.deepEqual(db.prepare('SELECT * FROM users').get(),user);
     assert.equal(db.prepare('SELECT count(*) n FROM vaults').get().n,0);
@@ -27,7 +27,7 @@ test('schema 4 vault headers and immutable ciphertext survive the access migrati
   const db = new DatabaseSync(':memory:');
   try {
     migrate(db);
-    db.exec(`DROP TRIGGER push_revoke_session; DROP TABLE push_tests; DROP TABLE push_subscriptions; DROP TABLE push_test_limits; DROP TABLE push_config; DROP TABLE vault_grants; DROP TABLE vault_challenges; DROP TABLE vault_closures;
+    db.exec(`DROP TRIGGER reminder_record_changed; DROP TRIGGER reminder_vault_deleted; DROP TABLE reminder_deliveries; DROP TABLE reminders; DROP TABLE reminder_settings; DROP INDEX records_object; DROP TRIGGER push_revoke_session; DROP TABLE push_tests; DROP TABLE push_subscriptions; DROP TABLE push_test_limits; DROP TABLE push_config; DROP TABLE vault_grants; DROP TABLE vault_challenges; DROP TABLE vault_closures;
       ALTER TABLE vaults DROP COLUMN access_pack; ALTER TABLE vaults DROP COLUMN lock_epoch;
       PRAGMA user_version=4;
       INSERT INTO users(id,login,password_hash,role,created_at) VALUES('owner','owner','stored-hash','admin',123);
@@ -36,7 +36,7 @@ test('schema 4 vault headers and immutable ciphertext survive the access migrati
     const installation=db.prepare('SELECT * FROM installation').get(),users=db.prepare('SELECT * FROM users').all();
     const records=db.prepare('SELECT * FROM records').all();
     migrate(db);migrate(db);
-    assert.equal(db.prepare('PRAGMA user_version').get().user_version,6);
+    assert.equal(db.prepare('PRAGMA user_version').get().user_version,7);
     assert.deepEqual(db.prepare('SELECT * FROM installation').get(),installation);
     assert.deepEqual(db.prepare('SELECT * FROM users').all(),users);
     assert.deepEqual(db.prepare('SELECT * FROM records').all(),records);
@@ -49,7 +49,7 @@ test('schema 5 push migration preserves vault grants, sessions and ciphertext by
   const db=new DatabaseSync(':memory:');
   try{
     migrate(db);
-    db.exec(`DROP TRIGGER push_revoke_session; DROP TABLE push_tests; DROP TABLE push_subscriptions; DROP TABLE push_test_limits; DROP TABLE push_config;
+    db.exec(`DROP TRIGGER reminder_record_changed; DROP TRIGGER reminder_vault_deleted; DROP TABLE reminder_deliveries; DROP TABLE reminders; DROP TABLE reminder_settings; DROP INDEX records_object; DROP TRIGGER push_revoke_session; DROP TABLE push_tests; DROP TABLE push_subscriptions; DROP TABLE push_test_limits; DROP TABLE push_config;
       PRAGMA user_version=5;
       INSERT INTO users(id,login,password_hash,role,created_at) VALUES('owner','owner','hash','admin',123);
       INSERT INTO sessions VALUES('session','owner','access',999,'refresh',999,999,0);
@@ -59,9 +59,30 @@ test('schema 5 push migration preserves vault grants, sessions and ciphertext by
     const tables=['users','sessions','vaults','records','vault_grants','installation'];
     const before=tables.map(table=>db.prepare('SELECT * FROM '+table).all());
     migrate(db);migrate(db);
-    assert.equal(db.prepare('PRAGMA user_version').get().user_version,6);
+    assert.equal(db.prepare('PRAGMA user_version').get().user_version,7);
     assert.deepEqual(tables.map(table=>db.prepare('SELECT * FROM '+table).all()),before);
     assert.equal(db.prepare('SELECT count(*) n FROM push_subscriptions').get().n,0);
+  }finally{db.close();}
+});
+
+test('schema 6 reminder migration preserves subscriptions, VAPID keys, sessions and ciphertext byte for byte',()=>{
+  const db=new DatabaseSync(':memory:');
+  try{
+    migrate(db);
+    db.exec(`DROP TRIGGER reminder_record_changed; DROP TRIGGER reminder_vault_deleted; DROP TABLE reminder_deliveries; DROP TABLE reminders; DROP TABLE reminder_settings; DROP INDEX records_object; PRAGMA user_version=6;
+      INSERT INTO users(id,login,password_hash,role,created_at) VALUES('owner','owner','hash','admin',123);
+      INSERT INTO sessions VALUES('session','owner','access',999,'refresh',999,999,0);
+      INSERT INTO vaults VALUES('vault','owner','opaque-header',0,NULL,0,NULL);
+      INSERT INTO records VALUES('record','vault','object',NULL,'opaque-ciphertext');
+      INSERT INTO push_config VALUES(1,'public-key','private-key');
+      INSERT INTO push_subscriptions VALUES('subscription','owner','session','device','https://web.push.apple.com/id','p256dh','auth');
+      INSERT INTO push_tests VALUES('test','subscription',500,600,'scheduled',0,0);`);
+    const tables=['users','sessions','vaults','records','push_config','push_subscriptions','push_tests','installation'];
+    const before=tables.map(table=>db.prepare('SELECT * FROM '+table).all());migrate(db);migrate(db);
+    assert.equal(db.prepare('PRAGMA user_version').get().user_version,7);
+    assert.deepEqual(tables.map(table=>db.prepare('SELECT * FROM '+table).all()),before);
+    assert.deepEqual(db.prepare('SELECT name FROM sqlite_master WHERE type=\'table\' AND name LIKE \'reminder%\' ORDER BY name').all().map(x=>x.name),
+      ['reminder_deliveries','reminder_settings','reminders']);
   }finally{db.close();}
 });
 
@@ -88,7 +109,7 @@ test('WAL backup preserves schema 1; migration preserves installation and admini
     restoredDb.close();
     db.close();
     db = openDatabase(dir, { countBoot: false });
-    assert.equal(db.prepare('PRAGMA user_version').get().user_version, 6);
+    assert.equal(db.prepare('PRAGMA user_version').get().user_version, 7);
     assert.equal(db.prepare('SELECT boot_count FROM installation').get().boot_count, 7);
     assert.equal(db.prepare('SELECT installation_id FROM installation').get().installation_id, 'preserved-id');
     migrate(db);

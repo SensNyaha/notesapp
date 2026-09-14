@@ -36,21 +36,29 @@ self.addEventListener('fetch', event => {
   })());
 });
 self.addEventListener('push', event => {
-  // Never render arbitrary payload text or URLs. Even malformed/late pushes remain neutral.
-  let id = 'test';
-  try { const data=event.data?.json();if(data?.type==='tasks-test'&&/^[0-9a-f-]{36}$/.test(data.id))id=data.id; } catch {}
+  const uuid=/^[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}$/;
+  let id='test',body='Тестовое уведомление. Уведомления на этом устройстве работают.',data={type:'tasks-test'};
+  try {
+    const value=event.data?.json();
+    if(value?.type==='tasks-test'&&uuid.test(value.id))id=value.id;
+    else if(value?.type==='tasks-reminder'&&uuid.test(value.accountId)&&uuid.test(value.vaultId)&&uuid.test(value.objectId)&&uuid.test(value.configId)
+      &&typeof value.body==='string'&&value.body.trim()&&Array.from(value.body).length<=200){
+      id=value.configId;body=value.body;data={type:'tasks-reminder',accountId:value.accountId,vaultId:value.vaultId,objectId:value.objectId,configId:value.configId};
+    }
+  } catch {}
   event.waitUntil(self.registration.showNotification('Tasks', {
-    body:'Тестовое уведомление. Уведомления на этом устройстве работают.',
-    icon:'/icons/icon-192.png',badge:'/icons/icon-192.png',tag:'tasks-test-'+id,
-    data:{type:'tasks-test'},
+    body,icon:'/icons/icon-192.png',badge:'/icons/icon-192.png',tag:'tasks-'+id,renotify:data.type==='tasks-reminder',data,
   }));
 });
 self.addEventListener('notificationclick', event => {
   event.notification.close();
   event.waitUntil((async()=>{
+    const d=event.notification.data;
+    const target=d?.type==='tasks-reminder'?'#reminder='+encodeURIComponent([d.accountId,d.vaultId,d.objectId,d.configId].join('.')):'';
+    const path='/'+target;
     const windows=await self.clients.matchAll({type:'window',includeUncontrolled:true});
     const existing=windows.find(client=>new URL(client.url).origin===self.location.origin&&new URL(client.url).pathname==='/');
-    if(existing)return existing.focus();
-    return self.clients.openWindow('/');
+    if(existing){if(target&&existing.navigate)await existing.navigate(path);return existing.focus();}
+    return self.clients.openWindow(path);
   })());
 });

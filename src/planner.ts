@@ -4,7 +4,10 @@ import { readState, writeState, exclusive, announce, type State, type Vault, typ
 import { session } from './auth.ts';
 import type { User } from './types/auth';
 import { createAccess, signAccess } from './crypto/access.ts';
-export interface Note { title: string; text: string; author?:{name:string;time:number} }
+import { validPlan } from '../shared/reminders.mjs';
+import type { ReminderPlan } from '../shared/reminders.mjs';
+import { reminderRequest } from './reminders.ts';
+export interface Note { title: string; text: string; reminder?:ReminderPlan; author?:{name:string;time:number} }
 const id = () => crypto.randomUUID();
 export const heads = (v: Vault) => { const parents = new Set(v.records.flatMap(r => [r.parent,...(r.resolves??[])])); return v.records.filter(r => !parents.has(r.id)); };
 export const context = (user: string, v: Header, objectId: string, revisionId: string): Context =>
@@ -13,7 +16,9 @@ function note(value: unknown): Note {
   if (!value || typeof value !== 'object' || !('title' in value) || typeof value.title !== 'string'
     || !('text' in value) || typeof value.text !== 'string') throw Error('Повреждённая заметка');
   const author='author' in value?value.author:undefined;
-  return { title: value.title, text: value.text, ...(author&&typeof author==='object'&&'name'in author&&typeof author.name==='string'&&'time'in author&&Number.isSafeInteger(author.time)
+  const reminder='reminder'in value?value.reminder:undefined;
+  if(reminder!==undefined&&!validPlan(reminder))throw Error('Повреждено напоминание');
+  return { title: value.title, text: value.text, ...(reminder?{reminder}:{}), ...(author&&typeof author==='object'&&'name'in author&&typeof author.name==='string'&&'time'in author&&Number.isSafeInteger(author.time)
     ?{author:author as {name:string;time:number}}:{}) };
 }
 export async function readNote(user: string, v: Vault, r: Revision): Promise<Note> {
@@ -66,7 +71,7 @@ export const closeVault = (user: User, vid: string) => edit(user, async s => {
 });
 async function addRevision(user: string, v: Vault, objectId: string, parent: string | null, value: Note) {
   if (!v.key || v.deleted || v.transfer) throw Error('Хранилище недоступно для записи');
-  const rid = id(), r: Revision = { id: rid, objectId, parent, sealed: await seal(v.key, context(user, v.header, objectId, rid), parent, value), pending: true };
+  const rid = id(), r: Revision = { id: rid, objectId, parent, sealed: await seal(v.key, context(user, v.header, objectId, rid), parent, value), pending: true, reminderPending:true };
   v.records.push(r); return r;
 }
 export const saveNote = (user: User, vid: string, objectId: string, parent: string | null, value: Note, draftKey?: CryptoKey) => edit(user, async s => {
@@ -95,7 +100,8 @@ async function stashDeleted(s: State, v: Vault) {
   v.records = []; delete v.key; delete v.transfer;
 }
 export const moveStash = (user: User, sid: string, target: string) => edit(user, async s => {
-  await addRevision(user.id, vault(s, target), id(), null, await readStash(s, sid));
+  const value=await readStash(s,sid);
+  await addRevision(user.id,vault(s,target),id(),null,{...value,...(value.reminder?{reminder:{...value.reminder,id:id(),state:'off' as const}}:{})});
   s.stash = s.stash.filter(r => r.id !== sid);
 });
 export const discardStash = (user: User, sid: string) => edit(user, async s => { s.stash = s.stash.filter(r => r.id !== sid); });
@@ -109,14 +115,16 @@ export const resolveConflict=(user:User,vid:string,objectId:string,expected:stri
   const others=versions.filter(r=>r.id!==chosen),resolves=others.map(r=>r.id);
   const author={name:s.deviceName??'Устройство',time:Date.now()};
   const rid=id(),value=await readNote(user.id,v,selected);
-  v.records.push({id:rid,objectId,parent:chosen,resolves,pending:true,
+  v.records.push({id:rid,objectId,parent:chosen,resolves,pending:true,reminderPending:true,
     sealed:await seal(v.key!,context(user.id,v.header,objectId,rid),chosen,{...value,author,resolves})});
-  if(keepBoth)for(const r of others)await addRevision(user.id,v,id(),null,{...await readNote(user.id,v,r),author});
+  if(keepBoth)for(const r of others){const copy=await readNote(user.id,v,r);
+    await addRevision(user.id,v,id(),null,{...copy,...(copy.reminder?{reminder:{...copy.reminder,id:id(),state:'off' as const}}:{}),author});}
 });
 export const transferVault = (user: User, source: string, name: string, phrase: string) => edit(user, async s => {
   const v = vault(s, source); if (v.deleted || v.transfer) throw Error('Перенос уже начат или хранилище удалено');
   const target = await makeVault(user.id, name, phrase);
-  for (const r of heads(v)) await addRevision(user.id, target, id(), null, await readNote(user.id, v, r));
+  for (const r of heads(v)){const copy=await readNote(user.id,v,r);
+    await addRevision(user.id,target,id(),null,{...copy,...(copy.reminder?{reminder:{...copy.reminder,id:id(),state:'off' as const}}:{})});}
   s.vaults.push(target); v.transfer = { target: target.header.id, revisions: target.records.map(r => r.id) };
   return target.header.id;
 });
@@ -150,7 +158,7 @@ async function vaultRequest(account: string, path: string, body?: unknown, crede
 async function commit(user:User,fn:(s:State)=>Promise<void>){
   await exclusive(async()=>{const s=await readState(user.id);if(!s)throw Error('Локальный аккаунт закрыт');await fn(s);await writeState(s);announce();});
 }
-const wire=(r:Revision)=>{const{pending:_,...value}=r;return value;};
+const wire=(r:Revision)=>{const{pending:_,reminderPending:__,...value}=r;return value;};
 function lock(v:Vault,epoch?:number){delete v.key;delete v.grant;v.needsGrant=false;if(epoch!==undefined)v.epoch=epoch;}
 const accessContext=(user:string,v:Vault)=>context(user,v.header,v.header.keyId,v.header.keyId);
 export async function closeAllVault(user:User,vid:string,password:string){
@@ -161,6 +169,14 @@ export async function closeAllVault(user:User,vid:string,password:string){
     if(!v.closeOperation){v.closeOperation=id();v.closeBaseEpoch=v.epoch??0;}operationId=v.closeOperation;});
   const result=await vaultRequest(user.id,'/close-all',{vaultId:vid,operationId,password,confirmed:true});
   await commit(user,async s=>{const v=vault(s,vid,false);lock(v,result.epoch);delete v.closeOperation;delete v.closeBaseEpoch;});
+}
+export async function acknowledgeReminder(user:User,target:{vaultId:string;objectId:string;configId:string}){
+  await edit(user,async s=>{s.reminderSeen??=[];if(!s.reminderSeen.some(x=>x.vaultId===target.vaultId&&x.objectId===target.objectId&&x.configId===target.configId))s.reminderSeen.push(target);});
+  try{
+    const current=await session();if(current?.id!==user.id)return;
+    const result=await reminderRequest(user,'seen',target);
+    if(result.exists)await commit(user,async s=>{s.reminderSeen=(s.reminderSeen??[]).filter(x=>x.vaultId!==target.vaultId||x.objectId!==target.objectId||x.configId!==target.configId);});
+  }catch{/* The durable local acknowledgement is retried by synchronize(). */}
 }
 export async function synchronize(user:User){
   if(!navigator.locks)throw Error('Для синхронизации нужен Web Locks');
@@ -187,7 +203,7 @@ export async function synchronize(user:User){
     for(const item of remote.vaults){
       await commit(user,async s=>{
         let v=s.vaults.find(v=>v.header.id===item.id);
-        if(item.deleted){if(v){v.deleted=true;await stashDeleted(s,v);}return;}
+        if(item.deleted){s.reminderSeen=(s.reminderSeen??[]).filter(x=>x.vaultId!==item.id);if(v){v.deleted=true;await stashDeleted(s,v);}return;}
         if(!v){v={header:item.header,records:[]};s.vaults.push(v);}
         if(JSON.stringify(v.header)!==JSON.stringify(item.header)){v.syncError='Заголовок хранилища изменён';failures.push(v.syncError);return;}
         const epoch=item.epoch??0;
@@ -246,22 +262,43 @@ export async function synchronize(user:User){
         await api('/record',{vaultId:vid,record:wire(r)},[vid]);
         await commit(user,async state=>{const local=vault(state,vid,false).records.find(x=>x.id===r.id);if(local)local.pending=false;});
       }
+      ({v}=await snapshot(vid));
+      if(v.key){
+        const pendingSeen=(await readState(user.id))?.reminderSeen?.filter(x=>x.vaultId===vid)??[];
+        for(const target of pendingSeen){const current=(await snapshot(vid)).v,latest=heads(current).filter(r=>r.objectId===target.objectId);
+          if(latest.length===1&&current.key){const value=await readNote(user.id,current,latest[0]);
+            if(value.reminder?.id!==target.configId)await commit(user,async state=>{state.reminderSeen=(state.reminderSeen??[]).filter(x=>x.vaultId!==vid||x.objectId!==target.objectId||x.configId!==target.configId);});}}
+        const objects=[...new Set(v.records.filter(r=>r.reminderPending).map(r=>r.objectId))];
+        for(const objectId of objects){
+          const current=(await snapshot(vid)).v,latest=heads(current).filter(r=>r.objectId===objectId);
+          if(latest.length!==1||!current.key)continue;
+          const head=latest[0],value=await readNote(user.id,current,head);
+          await reminderRequest(user,'set',{vaultId:vid,objectId,recordId:head.id,plan:value.reminder??null},[vid]);
+          await commit(user,async state=>{for(const r of vault(state,vid,false).records)if(r.objectId===objectId)delete r.reminderPending;
+            if(!value.reminder)state.reminderSeen=(state.reminderSeen??[]).filter(x=>x.vaultId!==vid||x.objectId!==objectId);});
+        }
+      }
       await commit(user,async state=>{delete vault(state,vid,false).syncError;});
     }catch(error){await recordFailure(vid,error);}}
+    for(const target of (await readState(user.id))?.reminderSeen??[]){
+      const result=await reminderRequest(user,'seen',target);
+      if(result.exists)await commit(user,async s=>{s.reminderSeen=(s.reminderSeen??[]).filter(x=>x.vaultId!==target.vaultId||x.objectId!==target.objectId||x.configId!==target.configId);});
+    }
     const transfers=(await readState(user.id))?.vaults.filter(v=>v.transfer&&!v.deleted).map(v=>v.header.id)??[];
     for(const vid of transfers){try{
       const {s,v}=await snapshot(vid),transfer=v.transfer!;const target=s.vaults.find(x=>x.header.id===transfer.target);
-      if(!target||target.pending||target.deleted||target.syncError)continue;
+      if(!target||target.pending||target.deleted||target.syncError||target.records.some(r=>r.reminderPending))continue;
       const received=await fetchRecords(transfer.target);
       for(const rid of transfer.revisions){const expected=target.records.find(r=>r.id===rid),actual=received.find(r=>r.id===rid);
         if(!expected||!actual||JSON.stringify(wire(expected))!==JSON.stringify(actual))throw Error('Проверка перенесённой заметки не прошла');}
       await api('/transfer',{source:vid,target:transfer.target,revisions:transfer.revisions,confirmed:true},[vid,transfer.target]);
-      await commit(user,async state=>{const current=vault(state,vid,false);current.deleted=true;current.records=[];lock(current);delete current.transfer;});
+      await commit(user,async state=>{const current=vault(state,vid,false);current.deleted=true;current.records=[];lock(current);delete current.transfer;
+        state.reminderSeen=(state.reminderSeen??[]).filter(x=>x.vaultId!==vid);});
     }catch(error){await recordFailure(vid,error);}}
     if(failures.length)throw Error([...new Set(failures)].join(' · '));
   });
 }
-export const hasUnsaved = (s: State) => s.stash.length > 0 || s.vaults.some(v => v.pending || v.transfer || v.records.some(r => r.pending));
+export const hasUnsaved = (s: State) => Boolean(s.reminderSeen?.length)||s.stash.length > 0 || s.vaults.some(v => v.pending || v.transfer || v.records.some(r => r.pending||r.reminderPending));
 let flushHandler: (() => Promise<void>) | undefined;
 export function registerDraftFlush(fn?: () => Promise<void>) { flushHandler = fn; }
 export async function flushDraft() { await flushHandler?.(); }

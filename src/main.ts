@@ -12,10 +12,18 @@ import { profiles, readState, eraseState, exclusive, announce, changes } from '.
 import { flushDraft, hasUnsaved, synchronize } from './planner';
 import { session, signOut, authMessage } from './auth';
 import type { User } from './types/auth';
+import { updateReminderZone, type ReminderTarget } from './reminders';
 
 const e = h;
 
 type DefinitionRow = [term: string, value: string, wide?: boolean];
+function initialReminderTarget():ReminderTarget|undefined{
+  const match=location.hash.match(/^#reminder=([0-9a-f.-]+)$/),parts=match?.[1].split('.');
+  const uuid=/^[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}$/;
+  if(match)history.replaceState(null,'',location.pathname+location.search);
+  return parts?.length===4&&parts.every(value=>uuid.test(value))
+    ?{accountId:parts[0],vaultId:parts[1],objectId:parts[2],configId:parts[3]}:undefined;
+}
 
 function DefinitionList({ rows }: { rows: DefinitionRow[] }) {
   return e('dl', null, rows.map(([term, value, wide = false]) =>
@@ -33,6 +41,8 @@ function App() {
   const [localProfiles, setLocalProfiles] = useState<User[]>([]);
   const localMode = useRef(false);
   const [notice, setNotice] = useState('');
+  const [reminderTarget,setReminderTarget]=useState<ReminderTarget|undefined>(initialReminderTarget);
+  useEffect(()=>{const read=()=>{const target=initialReminderTarget();setReminderTarget(target);if(target)setPage('home');};window.addEventListener('hashchange',read);return()=>window.removeEventListener('hashchange',read);},[]);
   useEffect(() => { setPage('home'); setNotice(''); }, [user?.id]);
   const [authLoading, setAuthLoading] = useState(true);
   const [authError, setAuthError] = useState('');
@@ -56,7 +66,7 @@ function App() {
         if (result) {
           if (!active || result.id === active.id) {
             if (result.mustChangePassword && active && !active.mustChangePassword) await flushDraft();
-            localMode.current = false; setUser(result);
+            localMode.current = false; setUser(result);void updateReminderZone(result).catch(()=>{});
           }
         }
         setAuthError(active && (!result || result.id !== active.id) ? 'Для синхронизации войдите в этот аккаунт. Локальные данные доступны.' : '');
@@ -198,7 +208,7 @@ function App() {
       e('button', { onClick: () => void checkSession() }, 'Повторить проверку входа')),
     localProfiles.length > 0 && e('section', { class: 'auth-status card' }, e('h2', null, 'Данные на этом устройстве'),
       localProfiles.map(profile => e('button', { onClick: () => { localMode.current = true; setUser(profile); } }, 'Открыть локально · ' + profile.login))),
-    e(Login, { onLogin: (result) => { authGeneration.current++; localMode.current = false; setUser(result); setAuthError(''); } }));
+    e(Login, { onLogin: (result) => { authGeneration.current++; localMode.current = false; setUser(result); setAuthError('');void updateReminderZone(result).catch(()=>{}); } }));
 
   if (user.mustChangePassword || page === 'password') return e('div', null,
     updateNotice && e('div', { class: 'auth-status' }, updateNotice),
@@ -213,7 +223,7 @@ function App() {
     e('header', null,
       e('a', { class: 'brand', href: '/', 'aria-label': 'Tasks, главная' },
         e('img', { src: '/icon.svg', width: 40, height: 40, alt: '' }), 'Tasks'),
-      e('span', { class: 'stage' }, 'Этап 08')),
+      e('span', { class: 'stage' }, 'Этап 09')),
     e('div', { class: 'account-bar' }, e('p', null, user.login, ' · ', user.role === 'admin' ? 'Администратор' : 'Пользователь'),
       e('button', { disabled: loggingOut, onClick: logout }, loggingOut ? 'Выходим…' : 'Выйти')),
     authError && e('p', { class: 'error', role: 'alert' }, authError),
@@ -225,7 +235,8 @@ function App() {
       e('button', { onClick: () => void flushDraft().then(() => setPage('password')).catch(() => setAuthError('Сохраните черновик')) }, 'Изменить пароль'),
       user.role === 'admin' && e('button', { onClick: () => void flushDraft().then(() => setPage('users')).catch(() => setAuthError('Сохраните черновик')) }, 'Пользователи'),
       e('button', { onClick: () => void flushDraft().then(detachPush).then(() => { setUser(null); void profiles().then(setLocalProfiles); }).catch(error => setAuthError(error instanceof Error?error.message:'Сохраните черновик и проверьте сеть')) }, 'Войти снова / другой аккаунт')),
-    page === 'home' && e(Planner, { user, key: user.id }),
+    reminderTarget&&reminderTarget.accountId!==user.id&&e('p',{class:'auth-notice',role:'status'},'Уведомление относится к другому аккаунту. Войдите в нужный аккаунт, чтобы открыть заметку.'),
+    page === 'home' && e(Planner, { user, key: user.id, reminderTarget, onReminderHandled:()=>setReminderTarget(undefined) }),
     page === 'notifications' && e(Notifications, { user, key: user.id }),
     updateNotice,
     page === 'diagnostics' && e('div', null,

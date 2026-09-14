@@ -3,12 +3,14 @@ import type { WrappedKey } from './crypto/vault';
 import type { Sealed } from './crypto/records';
 import type { AccessPack } from './crypto/access';
 export interface Header { id: string; keyId: string; revisionId: string; wrapper: WrappedKey; name: Sealed }
-export interface Revision { id: string; objectId: string; parent: string | null; sealed: Sealed; pending?: boolean; resolves?:string[] }
+export interface Revision { id: string; objectId: string; parent: string | null; sealed: Sealed; pending?: boolean; reminderPending?:boolean; resolves?:string[] }
 export interface Vault { header: Header; key?: CryptoKey; pending?: boolean; deleted?: boolean; records: Revision[];
   transfer?: { target: string; revisions: string[] }; epoch?:number; access?:AccessPack; grant?:string;
   needsGrant?:boolean; closeOperation?:string; closeBaseEpoch?:number; syncError?:string }
 export interface Stashed { id: string; sealed: Sealed; source: string }
-export interface State { user: User; vaults: Vault[]; stash: Stashed[]; stashKey?: CryptoKey; deviceId?:string; deviceName?:string; lastVaultId?:string }
+export interface ReminderSeen { vaultId:string;objectId:string;configId:string }
+export interface State { user: User; vaults: Vault[]; stash: Stashed[]; stashKey?: CryptoKey; deviceId?:string; deviceName?:string; lastVaultId?:string;
+  reminderSeen?:ReminderSeen[] }
 let connection: Promise<IDBDatabase> | undefined;
 function database() {
   return connection ??= new Promise((resolve, reject) => {

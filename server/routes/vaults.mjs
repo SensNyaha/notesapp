@@ -1,5 +1,6 @@
 import { requireUser, AccountError, fail } from '../auth/accounts.mjs';
 import { registerVaultAccess } from './vault-access.mjs';
+import { registerReminders } from './reminders.mjs';
 const uuid = { type: 'string', pattern: '^[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}$' };
 const obj = properties => ({ type: 'object', additionalProperties: false, properties, required: Object.keys(properties) });
 const b64 = (min, max = min) => ({ type: 'string', pattern: '^[A-Za-z0-9_-]+$', minLength: min, maxLength: max });
@@ -30,6 +31,7 @@ export function registerVaults(app, db, { guard, accessOf, clock }) {
   const post = (path, schema, fn) => app.post('/api/vaults/' + path,
     { bodyLimit: 1450000, preHandler: guard, schema: { body: schema } }, action(fn));
   const permit=registerVaultAccess(app,db,{own,action,post,obj,uuid,b64,sealed,guard,accessOf,clock});
+  registerReminders(app,db,{action,guard,own,permit,clock});
   app.get('/api/vaults', action((_req, user) => ({ vaults: db.prepare('SELECT * FROM vaults WHERE user_id=? ORDER BY id').all(user.id)
     .map(v => ({ id: v.id, deleted: Boolean(v.deleted), replacement: v.replacement, header: v.header ? JSON.parse(v.header) : null,
       epoch:v.lock_epoch,access:v.access_pack?JSON.parse(v.access_pack):null })) })));

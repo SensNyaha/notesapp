@@ -1,6 +1,6 @@
 import { randomUUID } from 'node:crypto';
 
-export const SCHEMA_VERSION = 6;
+export const SCHEMA_VERSION = 7;
 
 export function migrate(db) {
   db.exec('BEGIN IMMEDIATE');
@@ -75,6 +75,26 @@ export function migrate(db) {
       CREATE TABLE push_test_limits (user_id TEXT PRIMARY KEY NOT NULL REFERENCES users(id), last_test INTEGER NOT NULL) STRICT;
       CREATE TRIGGER push_revoke_session AFTER UPDATE OF revoked ON sessions WHEN NEW.revoked=1
         BEGIN DELETE FROM push_subscriptions WHERE session_id=NEW.id; END;
+    `);
+    if(version<7)db.exec(`
+      CREATE TABLE reminder_settings(user_id TEXT PRIMARY KEY REFERENCES users(id),zone TEXT NOT NULL DEFAULT 'UTC',nudge_hours INTEGER NOT NULL DEFAULT 1 CHECK(nudge_hours IN(0,1,3,6,24))) STRICT;
+      CREATE TABLE reminders(id TEXT PRIMARY KEY,user_id TEXT NOT NULL REFERENCES users(id),vault_id TEXT NOT NULL REFERENCES vaults(id),object_id TEXT NOT NULL,
+        config_id TEXT NOT NULL,record_id TEXT NOT NULL,local_at TEXT NOT NULL,due_at INTEGER,plan_state TEXT NOT NULL CHECK(plan_state IN('active','off','done')),body TEXT,
+        paused INTEGER NOT NULL DEFAULT 0 CHECK(paused IN(0,1)),fired_at INTEGER,seen_at INTEGER,next_nudge INTEGER,cycle INTEGER NOT NULL DEFAULT 0 CHECK(cycle>=0),
+        UNIQUE(vault_id,object_id)) STRICT;
+      CREATE TABLE reminder_deliveries(id TEXT PRIMARY KEY,reminder_id TEXT NOT NULL REFERENCES reminders(id) ON DELETE CASCADE,
+        subscription_id TEXT NOT NULL REFERENCES push_subscriptions(id) ON DELETE CASCADE,cycle INTEGER NOT NULL CHECK(cycle>0),
+        status TEXT NOT NULL CHECK(status IN('scheduled','sending','accepted','expired','failed','unknown')),
+        due_at INTEGER NOT NULL,expires_at INTEGER NOT NULL,attempts INTEGER NOT NULL DEFAULT 0 CHECK(attempts>=0),lease_until INTEGER NOT NULL DEFAULT 0) STRICT;
+      CREATE INDEX reminder_delivery_due ON reminder_deliveries(status,due_at);
+      CREATE INDEX records_object ON records(vault_id,object_id);
+      CREATE TRIGGER reminder_record_changed AFTER INSERT ON records BEGIN
+        UPDATE reminders SET paused=1 WHERE vault_id=NEW.vault_id AND object_id=NEW.object_id;
+        DELETE FROM reminder_deliveries WHERE reminder_id IN(SELECT id FROM reminders WHERE vault_id=NEW.vault_id AND object_id=NEW.object_id);
+      END;
+      CREATE TRIGGER reminder_vault_deleted AFTER UPDATE OF deleted ON vaults WHEN NEW.deleted=1 BEGIN
+        DELETE FROM reminders WHERE vault_id=NEW.id;
+      END;
     `);
     db.exec(`PRAGMA user_version = ${SCHEMA_VERSION}`);
     db.exec('COMMIT');
