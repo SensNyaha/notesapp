@@ -12,7 +12,7 @@ import { generateVaultKey } from '../src/crypto/vault.ts';
 import { seal, unseal } from '../src/crypto/records.ts';
 import { signAccess } from '../src/crypto/access.ts';
 import { createVault, openVault, closeVault, saveNote, readNote, heads, synchronize, transferVault,
-  readStash, moveStash, discardStash, edit, closeAllVault, resolveConflict, renameDevice, acknowledgeReminder, context } from '../src/planner.ts';
+  readStash, moveStash, discardStash, edit, closeAllVault, resolveConflict, renameDevice, acknowledgeReminder, context, vaultName } from '../src/planner.ts';
 import { readState, writeState, changes } from '../src/storage.ts';
 
 test('record v2 interoperates with OpenSSL AES-KW/GCM and authenticates context, parent and payload', async () => {
@@ -88,6 +88,8 @@ test('vault persistence, offline queue, conflicts, deletion and encrypted stash 
     assert.equal((await readState(user.id)).vaults[0].key,undefined);
     await openVault(user,source,'      ');await synchronize(user);
     s=await readState(user.id);assert.equal(s.vaults[0].records[0].pending,false);
+    assert.equal((await send('/api/vaults')).json().vaults.find(v=>v.id===source).displayName,'PRIVATE VAULT 87654');
+    assert.equal(await vaultName(user.id,{...s.vaults[0],key:undefined}),'PRIVATE VAULT 87654 (закрыто)');
     deviceB=structuredClone(s);
   });
   await t.test('authorization, CSRF, permanent accounts, ownership and immutable/idempotent revisions',async()=>{
@@ -105,6 +107,7 @@ test('vault persistence, offline queue, conflicts, deletion and encrypted stash 
     await post('/api/auth/change-password',{currentPassword:'Temporary9Pass',password:'Permanent9Pass',repeatPassword:'Permanent9Pass',revokeOthers:true});
     assert.deepEqual((await send('/api/vaults')).json().vaults,[]);
     assert.equal((await send('/api/vaults/'+source)).statusCode,404);
+    assert.equal((await post('/api/vaults/label',{vaultId:source,displayName:'Foreign rename'})).statusCode,404);
     assert.equal((await post('/api/vaults/create',v.header)).statusCode,409);
     jar.clear();for(const [k,v]of adminJar)jar.set(k,v);
     await post('/api/auth/login',credentials);
@@ -182,12 +185,12 @@ test('vault persistence, offline queue, conflicts, deletion and encrypted stash 
     await openVault(user,local,'abcdef');after=await readState(user.id);closed=after.vaults.find(v=>v.header.id===local);
     assert.equal((await readNote(user.id,closed,heads(closed)[0])).text,'Private while locked');
   });
-  await t.test('SQLite and backup contain ciphertext only',async()=>{
+  await t.test('SQLite records and backup keep note content encrypted; vault labels are intentional metadata',async()=>{
     const db=new DatabaseSync(join(dir,'tasks.sqlite'));
     const wire=JSON.stringify(db.prepare('SELECT * FROM vaults').all())+JSON.stringify(db.prepare('SELECT * FROM records').all());
     for(const plain of [secret.title,secret.text,'PRIVATE VAULT 87654','Forgotten offline edit'])assert.ok(!wire.includes(plain));
     const before=db.prepare('SELECT * FROM installation').get();
-    assert.equal(db.prepare('PRAGMA user_version').get().user_version,7);db.close();
+    assert.equal(db.prepare('PRAGMA user_version').get().user_version,8);db.close();
     const {createBackup}=await import('../server/cli/backup.mjs');const file=join(dir,'copy.sqlite');
     await createBackup(join(dir,'tasks.sqlite'),file);const bytes=await readFile(file);assert.ok(!bytes.includes(Buffer.from(secret.text)));
     assert.ok(before.installation_id);
@@ -297,5 +300,20 @@ test('vault persistence, offline queue, conflicts, deletion and encrypted stash 
     probe=new DatabaseSync(join(dir,'tasks.sqlite'),{readOnly:true});
     assert.equal(probe.prepare('SELECT 1 FROM reminders WHERE vault_id=?').get(vid),undefined);
     assert.equal(probe.prepare('SELECT plan_state FROM reminders WHERE vault_id=?').get(destination).plan_state,'off');probe.close();
+  });
+  await t.test('legacy names backfill from an unlocked device and reach a fresh locked device',async()=>{
+    const vid=await createVault(user,'Узнаваемое хранилище','abcdef');await synchronize(user);
+    const probe=new DatabaseSync(join(dir,'tasks.sqlite'));
+    try{probe.prepare('DELETE FROM vault_labels WHERE vault_id=?').run(vid);}finally{probe.close();}
+    await edit(user,async s=>{delete s.vaults.find(v=>v.header.id===vid).displayName;});
+    await synchronize(user);
+    const first=await readState(user.id);
+    assert.equal(first.vaults.find(v=>v.header.id===vid).displayName,'Узнаваемое хранилище');
+    await writeState({user,vaults:[],stash:[],deviceId:randomUUID()});
+    // Other vaults were globally locked earlier; names must arrive despite their missing grants.
+    await assert.rejects(synchronize(user),/закрыто на всех устройствах/);
+    const second=await readState(user.id),locked=second.vaults.find(v=>v.header.id===vid);
+    assert.equal(locked.key,undefined);assert.equal(await vaultName(user.id,locked),'Узнаваемое хранилище (закрыто)');
+    await writeState(first);
   });
 });

@@ -1,4 +1,5 @@
 import cookie from '@fastify/cookie';
+import { diskUsage } from '../diagnostics.mjs';
 import { registerVaults } from './vaults.mjs';
 import { registerPush } from './push.mjs';
 import { randomBytes, timingSafeEqual } from 'node:crypto';
@@ -7,7 +8,7 @@ import { bootstrapFromEnvironment, insertFirstAdmin, needsSetup } from '../auth/
 import { createSession, currentUser, rotateSession, revokeSession, token, validToken } from '../auth/sessions.mjs';
 import { AccountError, publicUser, accountRow, requireUser, createAccount, resetAccount, changePassword } from '../auth/accounts.mjs';
 
-export async function registerAuth(app, db, config, clock = Date.now, push = {}) {
+export async function registerAuth(app, db, config, clock = Date.now, push = {}, dataDir) {
   await bootstrapFromEnvironment(db, config.bootstrap, clock());
   const dummyHash = await hashPassword('Aa1' + randomBytes(32).toString('base64url'));
   await app.register(cookie);
@@ -146,6 +147,7 @@ export async function registerAuth(app, db, config, clock = Date.now, push = {})
     };
   }
   const authorizeAdmin = request => () => requireUser(db, accessOf(request), clock(), { admin: true });
+  app.get('/api/auth/diagnostics',accountAction(async()=>({disk:diskUsage(dataDir)}),{hash:false}));
   app.get('/api/auth/users', accountAction(async () => ({ users: db.prepare('SELECT * FROM users ORDER BY login').all().map(accountRow) }), { hash: false }));
   app.post('/api/auth/users/create', { preHandler: guard, schema: { body: loginSchema } }, accountAction(async request =>
     ({ user: await createAccount(db, request.body, authorizeAdmin(request), clock) })));

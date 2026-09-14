@@ -4,7 +4,7 @@ import type { Sealed } from './crypto/records';
 import type { AccessPack } from './crypto/access';
 export interface Header { id: string; keyId: string; revisionId: string; wrapper: WrappedKey; name: Sealed }
 export interface Revision { id: string; objectId: string; parent: string | null; sealed: Sealed; pending?: boolean; reminderPending?:boolean; resolves?:string[] }
-export interface Vault { header: Header; key?: CryptoKey; pending?: boolean; deleted?: boolean; records: Revision[];
+export interface Vault { header: Header; displayName?:string; key?: CryptoKey; pending?: boolean; deleted?: boolean; records: Revision[];
   transfer?: { target: string; revisions: string[] }; epoch?:number; access?:AccessPack; grant?:string;
   needsGrant?:boolean; closeOperation?:string; closeBaseEpoch?:number; syncError?:string }
 export interface Stashed { id: string; sealed: Sealed; source: string }

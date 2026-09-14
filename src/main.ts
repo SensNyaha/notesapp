@@ -7,6 +7,7 @@ import { PasswordScreen, UsersScreen } from './components/Accounts';
 import { CryptoCheck } from './components/CryptoCheck';
 import { Planner } from './components/Planner';
 import { Notifications } from './components/Notifications';
+import { ServerStorage } from './components/ServerStorage';
 import { detachPush, browserUnsubscribe } from './push';
 import { profiles, readState, eraseState, exclusive, announce, changes } from './storage';
 import { flushDraft, hasUnsaved, synchronize } from './planner';
@@ -240,6 +241,7 @@ function App() {
     page === 'notifications' && e(Notifications, { user, key: user.id }),
     updateNotice,
     page === 'diagnostics' && e('div', null,
+    user.role==='admin'&&e(ServerStorage,{key:user.id}),
     e('section', { class: 'intro' },
       e('p', { class: 'eyebrow' }, 'ПЕРВЫЙ ЗАПУСК'),
       e('h1', null, 'Основа приложения'),

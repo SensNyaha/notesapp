@@ -47,6 +47,13 @@ const newPassword = (currentPassword, password = permanent, revokeOthers = true)
 test('HTTP admin creates users; temporary and ordinary users cannot manage accounts; secrets stay out of responses and storage', async t => {
   const f = await fixture(t), b = f.browser();
   assert.equal((await b.get('users')).statusCode, 401);
+  assert.equal((await b.get('diagnostics')).statusCode,401);
+  const diagnostics=await f.a.get('diagnostics');assert.equal(diagnostics.statusCode,200);
+  assert.equal(diagnostics.headers['cache-control'],'no-store');
+  const disk=diagnostics.json().disk;
+  assert.ok(BigInt(disk.totalBytes)>0n);assert.ok(BigInt(disk.availableBytes)>=0n);
+  assert.ok(BigInt(disk.availableBytes)<=BigInt(disk.totalBytes));
+  assert.ok(['ok','warning','critical'].includes(disk.level));assert.ok(!diagnostics.body.includes(f.dir));
   assert.equal((await f.a.post('users/create', { login: 'Other', password: temporary, role: 'admin' })).statusCode, 400);
   assert.equal((await f.a.post('users/create', { login: 'Other', password: temporary }, { origin: 'http://evil.invalid' })).statusCode, 403);
   const response = await f.a.post('users/create', { login: 'Other', password: temporary });
@@ -63,6 +70,7 @@ test('HTTP admin creates users; temporary and ordinary users cannot manage accou
   assert.equal((await b.post('change-password', { ...newPassword(temporary), repeatPassword: 'Mismatch9' })).statusCode, 400);
   const changed = await b.post('change-password', newPassword(temporary));
   assert.equal(changed.statusCode, 200); assert.equal(changed.json().user.mustChangePassword, false);
+  assert.equal((await b.get('diagnostics')).statusCode,403);
   assert.equal((await b.get('users')).json().error, 'admin_required');
   assert.equal((await b.post('users/reset', { id: row.id, expectedVersion: 1, password: temporary, confirmed: true })).statusCode, 403);
   const listing = await f.a.get('users');
@@ -154,7 +162,7 @@ test('schema 2 backup migrates to current schema preserving admin, installation 
   const source = join(f.dir, 'tasks.sqlite'), backup = join(f.dir, 'schema2.sqlite');
   assert.equal((await createBackup(source, backup)).schemaVersion, 2);
   migrate(f.db);
-  assert.equal(f.db.prepare('PRAGMA user_version').get().user_version, 7);
+  assert.equal(f.db.prepare('PRAGMA user_version').get().user_version, 8);
   assert.deepEqual(f.db.prepare('SELECT * FROM installation').get(), before);
   assert.equal(currentUser(f.db, pair.access, f.now()).mustChangePassword, false);
   assert.equal(f.db.prepare('SELECT password_hash FROM users WHERE id=?').get(owner.id).password_hash, owner.password_hash);

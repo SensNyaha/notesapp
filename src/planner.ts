@@ -41,7 +41,7 @@ export async function readNote(user: string, v: Vault, r: Revision): Promise<Not
   return note(value);
 }
 export async function vaultName(user: string, v: Vault) {
-  if (!v.key) return 'Закрытое хранилище · ' + v.header.id.slice(0, 8);
+  if (!v.key) return v.displayName ? v.displayName+' (закрыто)' : 'Название ещё не синхронизировано (закрыто) · ' + v.header.id.slice(0, 8);
   const result = await unseal(v.key, context(user, v.header, v.header.id, v.header.revisionId), null, v.header.name);
   if (typeof result !== 'string') throw Error('Повреждённое имя хранилища'); return result;
 }
@@ -65,7 +65,7 @@ async function makeVault(user: string, name: string, phrase: string): Promise<Va
   const ctx = { accountId: user, vaultId: v.id, keyId: v.keyId, objectId: v.keyId, revisionId: v.revisionId };
   const header: Header = { ...v, wrapper: await wrapWithPhrase(key, ctx, phrase),
     name: await seal(key, { ...ctx, objectId: v.id }, null, name) };
-  return { header, key: await rememberKey(key), records: [], pending: true };
+  return { header, displayName:name, key: await rememberKey(key), records: [], pending: true };
 }
 export const createVault = (user: User, name: string, phrase: string) => edit(user, async s => {
   const v = await makeVault(user.id, name, phrase); s.vaults.push(v); return v.header.id;
@@ -73,7 +73,7 @@ export const createVault = (user: User, name: string, phrase: string) => edit(us
 export const openVault = (user: User, vid: string, phrase: string) => edit(user, async s => {
   const v = vault(s, vid, false);
   try { v.key = await rememberKey(await unwrapWithPhrase(context(user.id, v.header, v.header.keyId, v.header.revisionId), phrase, v.header.wrapper));
-    await vaultName(user.id, v);
+    v.displayName=await vaultName(user.id, v);
   } catch { delete v.key; throw Error('Неверная фраза или повреждённые данные.'); }
   if (v.deleted) await stashDeleted(s, v);
   else v.needsGrant=true;
@@ -218,6 +218,7 @@ export async function synchronize(user:User){
         let v=s.vaults.find(v=>v.header.id===item.id);
         if(item.deleted){s.reminderSeen=(s.reminderSeen??[]).filter(x=>x.vaultId!==item.id);if(v){v.deleted=true;await stashDeleted(s,v);}return;}
         if(!v){v={header:item.header,records:[]};s.vaults.push(v);}
+        if(typeof item.displayName==='string'&&item.displayName.trim()&&item.displayName.length<=200)v.displayName=item.displayName;
         if(JSON.stringify(v.header)!==JSON.stringify(item.header)){v.syncError='Заголовок хранилища изменён';failures.push(v.syncError);return;}
         const epoch=item.epoch??0;
         if(epoch<(v.epoch??0))throw Error('Сервер вернул устаревшую блокировку');
@@ -241,7 +242,7 @@ export async function synchronize(user:User){
       if(remoteHeader&&JSON.stringify(remoteHeader)!==JSON.stringify(v.header))continue;
       if(v.pending){
         const source=s.vaults.find(x=>x.transfer?.target===vid);
-        await api('/create',{...v.header,...(source?{transferSource:source.header.id}:{})},source?[source.header.id]:[]);
+        await api('/create',{...v.header,...(v.displayName?{displayName:v.displayName}:{}),...(source?{transferSource:source.header.id}:{})},source?[source.header.id]:[]);
         await commit(user,async state=>{vault(state,vid,false).pending=false;});
       }
       ({s,v}=await snapshot(vid));
@@ -261,6 +262,11 @@ export async function synchronize(user:User){
         await commit(user,async state=>{const current=vault(state,vid,false);
           if(!current.key||!current.needsGrant||current.epoch!==granted.epoch)throw new APIError('vault_locked');
           current.grant=granted.token;current.needsGrant=false;});
+      }
+      if(v.key&&!remote.vaults.find((item:any)=>item.id===vid)?.displayName){
+        const displayName=await vaultName(user.id,v);
+        await api('/label',{vaultId:vid,displayName},[vid]);
+        await commit(user,async state=>{vault(state,vid,false).displayName=displayName;});
       }
       const incoming=await fetchRecords(vid);
       await commit(user,async state=>{

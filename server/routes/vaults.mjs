@@ -9,6 +9,7 @@ const wrapper = obj({ v: { const: 1 }, alg: { const: 'A256GCM' }, purpose: { con
   iv: b64(16), ciphertext: b64(64), kdf: obj({ name: { const: 'PBKDF2-SHA256' },
     iterations: { type: 'integer', minimum: 600000, maximum: 2000000 }, salt: b64(22) }) });
 const header = obj({ id: uuid, keyId: uuid, revisionId: uuid, wrapper, name: sealed });
+const displayName = { type:'string',minLength:1,maxLength:200,pattern:'\\S' };
 const record = obj({ id: uuid, objectId: uuid, parent: { anyOf: [uuid, { type: 'null' }] }, sealed });
 record.properties.resolves = { type:'array',minItems:1,maxItems:100,uniqueItems:true,items:uuid };
 
@@ -34,6 +35,7 @@ export function registerVaults(app, db, { guard, accessOf, clock }) {
   registerReminders(app,db,{action,guard,own,permit,clock});
   app.get('/api/vaults', action((_req, user) => ({ vaults: db.prepare('SELECT * FROM vaults WHERE user_id=? ORDER BY id').all(user.id)
     .map(v => ({ id: v.id, deleted: Boolean(v.deleted), replacement: v.replacement, header: v.header ? JSON.parse(v.header) : null,
+      displayName:v.deleted?null:db.prepare('SELECT display_name FROM vault_labels WHERE vault_id=?').get(v.id)?.display_name??null,
       epoch:v.lock_epoch,access:v.access_pack?JSON.parse(v.access_pack):null })) })));
   app.get('/api/vaults/:id', { schema: { params: obj({ id: uuid }), querystring: { type: 'object', additionalProperties: false,
     properties: { after: { type: 'string', pattern: '^[0-9]{1,15}$' } } } } }, action((req, user) => {
@@ -41,8 +43,8 @@ export function registerVaults(app, db, { guard, accessOf, clock }) {
     const rows = db.prepare('SELECT rowid,payload FROM records WHERE vault_id=? AND rowid>? ORDER BY rowid LIMIT 5').all(req.params.id, Number(req.query.after ?? 0));
     return { records: rows.map(r => JSON.parse(r.payload)), next: rows.length === 5 ? rows.at(-1).rowid : null };
   }));
-  post('create', { ...header, properties: { ...header.properties, transferSource: uuid } }, (req, user) => {
-    const { transferSource, ...value } = req.body;
+  post('create', { ...header, properties: { ...header.properties, transferSource: uuid, displayName } }, (req, user) => {
+    const { transferSource, displayName:label, ...value } = req.body;
     if (transferSource) permit(req,own(user, transferSource));
     const text = JSON.stringify(value), old = db.prepare('SELECT * FROM vaults WHERE id=?').get(req.body.id);
     if (old) {
@@ -54,7 +56,13 @@ export function registerVaults(app, db, { guard, accessOf, clock }) {
       if (count >= (transferSource ? 101 : 100)) fail('vault_limit', 409);
       db.prepare('INSERT INTO vaults(id,user_id,header) VALUES(?,?,?)').run(req.body.id, user.id, text);
     }
+    if(label)db.prepare('INSERT OR IGNORE INTO vault_labels(vault_id,display_name) VALUES(?,?)').run(value.id,label);
     return { ok: true };
+  });
+  post('label',obj({vaultId:uuid,displayName}),(req,user)=>{
+    permit(req,own(user,req.body.vaultId));
+    db.prepare('INSERT OR IGNORE INTO vault_labels(vault_id,display_name) VALUES(?,?)').run(req.body.vaultId,req.body.displayName);
+    return {ok:true};
   });
   post('record', obj({ vaultId: uuid, record }), (req, user) => {
     const { vaultId, record: r } = req.body; permit(req,own(user, vaultId));

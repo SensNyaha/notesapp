@@ -4,7 +4,7 @@ services:
     build:
       context: .
       network: host
-    image: tasks:0.10.0
+    image: tasks:0.10.1
     environment:
       APP_ORIGIN: ${APP_ORIGIN:-http://localhost:3100}
       AUTH_COOKIE_MODE: ${AUTH_COOKIE_MODE:-localhost}

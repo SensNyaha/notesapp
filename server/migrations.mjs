@@ -1,6 +1,6 @@
 import { randomUUID } from 'node:crypto';
 
-export const SCHEMA_VERSION = 7;
+export const SCHEMA_VERSION = 8;
 
 export function migrate(db) {
   db.exec('BEGIN IMMEDIATE');
@@ -95,6 +95,12 @@ export function migrate(db) {
       CREATE TRIGGER reminder_vault_deleted AFTER UPDATE OF deleted ON vaults WHEN NEW.deleted=1 BEGIN
         DELETE FROM reminders WHERE vault_id=NEW.id;
       END;
+    `);
+    if(version<8)db.exec(`
+      CREATE TABLE IF NOT EXISTS vault_labels (vault_id TEXT PRIMARY KEY REFERENCES vaults(id) ON DELETE CASCADE,
+        display_name TEXT NOT NULL CHECK(length(display_name) BETWEEN 1 AND 200)) STRICT;
+      CREATE TRIGGER IF NOT EXISTS vault_label_deleted AFTER UPDATE OF deleted ON vaults WHEN NEW.deleted=1
+        BEGIN DELETE FROM vault_labels WHERE vault_id=NEW.id; END;
     `);
     db.exec(`PRAGMA user_version = ${SCHEMA_VERSION}`);
     db.exec('COMMIT');

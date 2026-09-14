@@ -272,6 +272,7 @@ export function Planner({ user,reminderTarget,onReminderHandled }: { user: User;
   if (screen === 'create' || screen === 'open' || screen === 'transfer') return e('section', { class: 'card' },
     e('button', { disabled: busy, onClick: () => { setScreen('list'); setPhrase(''); setRepeat(''); } }, 'Назад'),
     e('h2', null, screen === 'open' ? 'Открыть хранилище' : screen === 'transfer' ? 'Перенести с новой фразой' : 'Новое хранилище'),
+    screen!=='open'&&e('p',{class:'hint'},'Название видно на всех ваших устройствах до разблокировки и хранится на сервере отдельно от зашифрованных заметок.'),
     e('p', { class: 'hint' }, 'Фраза не отправляется на сервер. Доступ сохранится на этом устройстве до «Закрыть хранилище». Без фразы и сохранённого доступа восстановить заметки невозможно.'),
     e('form', { onSubmit: submit }, screen !== 'open' && e('label', null, 'Название', e('input', { required: true, maxLength: 200, value: name, onInput: (ev: Event) => setName((ev.target as HTMLInputElement).value) })),
       e('label', null, 'Фраза хранилища', e('input', { type: 'password', autoComplete: screen === 'open' ? 'current-password' : 'new-password', required: true, value: phrase,

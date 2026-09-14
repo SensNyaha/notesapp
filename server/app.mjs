@@ -54,7 +54,7 @@ export async function createApp({ dataDir = resolve('data'), staticDir = resolve
       serverTime: new Date().toISOString(),
     };
   });
-  try { await registerAuth(app, db, auth, clock, push); }
+  try { await registerAuth(app, db, auth, clock, push, dataDir); }
   catch (error) { await app.close(); throw error; }
   for (const file of listPublicFiles(staticDir)) {
     const body = readFileSync(file.path);
