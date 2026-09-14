@@ -10,8 +10,9 @@ import { reminderRequest } from './reminders.ts';
 export interface NoteAttachment { id:string;name:string;type:string;size:number;data:string }
 export interface ChecklistItem { id:string;text:string;done:boolean }
 export interface TagDefinition { id:string;name:string;color:string;deleted:boolean;op:string }
+export type VaultPushMode='neutral'|'title';
 export interface Note { title: string; text: string; html?:string;attachments?:NoteAttachment[];checklist?:ChecklistItem[];tagIds?:string[];pinned?:boolean;reminder?:ReminderPlan; author?:{name:string;time:number} }
-interface TagCatalog { kind:'tag-catalog';title:string;text:string;tags:TagDefinition[] }
+interface TagCatalog { kind:'tag-catalog';title:string;text:string;tags:TagDefinition[];push?:{mode:VaultPushMode;op:string} }
 const id = () => crypto.randomUUID();
 const allHeads = (v: Vault) => { const parents = new Set(v.records.flatMap(r => [r.parent,...(r.resolves??[])])); return v.records.filter(r => !parents.has(r.id)); };
 export const heads = (v: Vault) => allHeads(v).filter(r=>r.objectId!==v.header.id);
@@ -74,16 +75,21 @@ async function readCatalogRevision(user:string,v:Vault,r:Revision):Promise<TagCa
     if(typeof value.title==='string'&&typeof value.text==='string')return null;
     throw Error('Повреждён каталог тегов');
   }
-  if(typeof value.title!=='string'||typeof value.text!=='string'||!Array.isArray(value.tags)||value.tags.length>500||!value.tags.every(validTag))throw Error('Повреждён каталог тегов');
-  return {kind:'tag-catalog',title:value.title,text:value.text,tags:value.tags};
+  if(typeof value.title!=='string'||typeof value.text!=='string'||!Array.isArray(value.tags)||value.tags.length>500||!value.tags.every(validTag)
+    ||value.push!==undefined&&(!value.push||!['neutral','title'].includes(value.push.mode!)||typeof value.push.op!=='string'||value.push.op.length>100))throw Error('Повреждён каталог тегов');
+  return {kind:'tag-catalog',title:value.title,text:value.text,tags:value.tags,...(value.push?{push:value.push as {mode:VaultPushMode;op:string}}:{})};
 }
-export async function readTags(user:string,v:Vault):Promise<TagDefinition[]>{
+async function readCatalog(user:string,v:Vault):Promise<{tags:TagDefinition[];push:{mode:VaultPushMode;op:string}}>{
   const versions=(await Promise.all(v.records.filter(r=>r.objectId===v.header.id).map(r=>readCatalogRevision(user,v,r)))).filter((value):value is TagCatalog=>Boolean(value));
   const merged=new Map(DEFAULT_TAGS.map(tag=>[tag.id,{...tag}]));
+  let push:{mode:VaultPushMode;op:string}={mode:'neutral',op:'000000000000-default'};
   for(const catalog of versions)for(const tag of catalog.tags){const previous=merged.get(tag.id);
     if(!previous||tag.deleted&&!previous.deleted||tag.deleted===previous.deleted&&tag.op>previous.op)merged.set(tag.id,{...tag});}
-  return [...merged.values()].sort((a,b)=>a.name.localeCompare(b.name,'ru'));
+  for(const catalog of versions)if(catalog.push&&catalog.push.op>push.op)push={...catalog.push};
+  return {tags:[...merged.values()].sort((a,b)=>a.name.localeCompare(b.name,'ru')),push};
 }
+export async function readTags(user:string,v:Vault):Promise<TagDefinition[]>{return(await readCatalog(user,v)).tags;}
+export async function readVaultPushMode(user:string,v:Vault):Promise<VaultPushMode>{return(await readCatalog(user,v)).push.mode;}
 export async function vaultName(user: string, v: Vault) {
   if (!v.key) return v.displayName ? v.displayName+' (закрыто)' : 'Название ещё не синхронизировано (закрыто) · ' + v.header.id.slice(0, 8);
   const result = await unseal(v.key, context(user, v.header, v.header.id, v.header.revisionId), null, v.header.name);
@@ -131,14 +137,20 @@ async function addRevision(user: string, v: Vault, objectId: string, parent: str
   const rid = id(), r: Revision = { id: rid, objectId, parent, sealed: await seal(v.key, context(user, v.header, objectId, rid), parent, value), pending: true, reminderPending:true };
   v.records.push(r); return r;
 }
-async function writeTags(user:string,v:Vault,tags:TagDefinition[]){
+async function writeCatalog(user:string,v:Vault,tags:TagDefinition[],push:{mode:VaultPushMode;op:string}){
   if(!v.key||v.deleted||v.transfer)throw Error('Хранилище недоступно для записи');
   const versions=catalogHeads(v),parent=versions[0]?.id??null,resolves=versions.slice(1).map(r=>r.id),rid=id();
-  const value={kind:'tag-catalog' as const,title:'Служебные данные тегов',text:'Обновите приложение, чтобы управлять тегами этого хранилища.',tags,...(resolves.length?{resolves}:{})};
+  const value={kind:'tag-catalog' as const,title:'Служебные данные тегов',text:'Обновите приложение, чтобы управлять тегами этого хранилища.',tags,push,...(resolves.length?{resolves}:{})};
   v.records.push({id:rid,objectId:v.header.id,parent,...(resolves.length?{resolves}:{}),pending:true,
     sealed:await seal(v.key,context(user,v.header,v.header.id,rid),parent,value)});
 }
 function nextTagOp(tags:TagDefinition[]){const generation=Math.max(0,...tags.map(tag=>Number.parseInt(tag.op.slice(0,12),10)||0))+1;return String(generation).padStart(12,'0')+'-'+id();}
+function nextCatalogOp(tags:TagDefinition[],push:{op:string}){const generation=Math.max(Number.parseInt(push.op.slice(0,12),10)||0,...tags.map(tag=>Number.parseInt(tag.op.slice(0,12),10)||0))+1;return String(generation).padStart(12,'0')+'-'+id();}
+async function writeTags(user:string,v:Vault,tags:TagDefinition[]){const catalog=await readCatalog(user,v);await writeCatalog(user,v,tags,catalog.push);}
+export const setVaultPushMode=(user:User,vid:string,mode:VaultPushMode)=>edit(user,async s=>{
+  if(!['neutral','title'].includes(mode))throw Error('Недопустимый режим push');const v=vault(s,vid),catalog=await readCatalog(user.id,v);
+  await writeCatalog(user.id,v,catalog.tags,{mode,op:nextCatalogOp(catalog.tags,catalog.push)});
+});
 export const createTag=(user:User,vid:string,name:string,color:string)=>edit(user,async s=>{
   const v=vault(s,vid),clean=name.trim();if(!clean||clean.length>60)throw Error('Название тега: от 1 до 60 символов');
   if(!/^#[0-9A-Fa-f]{6}$/.test(color))throw Error('Выберите цвет тега');const tags=await readTags(user.id,v);
@@ -211,7 +223,7 @@ export const transferVault = (user: User, source: string, name: string, phrase: 
   const target = await makeVault(user.id, name, phrase);
   for (const r of heads(v)){const copy=await readNote(user.id,v,r);
     await addRevision(user.id,target,id(),null,{...copy,...(copy.reminder?{reminder:{...copy.reminder,id:id(),state:'off' as const}}:{})});}
-  if(catalogHeads(v).length)await writeTags(user.id,target,await readTags(user.id,v));
+  if(catalogHeads(v).length){const catalog=await readCatalog(user.id,v);await writeCatalog(user.id,target,catalog.tags,catalog.push);}
   s.vaults.push(target); v.transfer = { target: target.header.id, revisions: target.records.map(r => r.id) };
   return target.header.id;
 });
@@ -257,12 +269,12 @@ export async function closeAllVault(user:User,vid:string,password:string){
   const result=await vaultRequest(user.id,'/close-all',{vaultId:vid,operationId,password,confirmed:true});
   await commit(user,async s=>{const v=vault(s,vid,false);lock(v,result.epoch);delete v.closeOperation;delete v.closeBaseEpoch;});
 }
-export async function acknowledgeReminder(user:User,target:{vaultId:string;objectId:string;configId:string}){
-  await edit(user,async s=>{s.reminderSeen??=[];if(!s.reminderSeen.some(x=>x.vaultId===target.vaultId&&x.objectId===target.objectId&&x.configId===target.configId))s.reminderSeen.push(target);});
+export async function acknowledgeReminder(user:User,target:{vaultId:string;objectId:string;configId:string;occurrenceId?:string}){
+  await edit(user,async s=>{s.reminderSeen??=[];if(!s.reminderSeen.some(x=>x.vaultId===target.vaultId&&x.objectId===target.objectId&&x.configId===target.configId&&x.occurrenceId===target.occurrenceId))s.reminderSeen.push(target);});
   try{
     const current=await session();if(current?.id!==user.id)return;
     const result=await reminderRequest(user,'seen',target);
-    if(result.exists)await commit(user,async s=>{s.reminderSeen=(s.reminderSeen??[]).filter(x=>x.vaultId!==target.vaultId||x.objectId!==target.objectId||x.configId!==target.configId);});
+    if(result.exists)await commit(user,async s=>{s.reminderSeen=(s.reminderSeen??[]).filter(x=>x.vaultId!==target.vaultId||x.objectId!==target.objectId||x.configId!==target.configId||x.occurrenceId!==target.occurrenceId);});
   }catch{/* The durable local acknowledgement is retried by synchronize(). */}
 }
 export async function synchronize(user:User){
@@ -360,7 +372,7 @@ export async function synchronize(user:User){
         const pendingSeen=(await readState(user.id))?.reminderSeen?.filter(x=>x.vaultId===vid)??[];
         for(const target of pendingSeen){const current=(await snapshot(vid)).v,latest=heads(current).filter(r=>r.objectId===target.objectId);
           if(latest.length===1&&current.key){const value=await readNote(user.id,current,latest[0]);
-            if(value.reminder?.id!==target.configId)await commit(user,async state=>{state.reminderSeen=(state.reminderSeen??[]).filter(x=>x.vaultId!==vid||x.objectId!==target.objectId||x.configId!==target.configId);});}}
+            if(value.reminder?.id!==target.configId)await commit(user,async state=>{state.reminderSeen=(state.reminderSeen??[]).filter(x=>x.vaultId!==vid||x.objectId!==target.objectId||x.configId!==target.configId||x.occurrenceId!==target.occurrenceId);});}}
         const objects=[...new Set(v.records.filter(r=>r.reminderPending).map(r=>r.objectId))];
         for(const objectId of objects){
           const current=(await snapshot(vid)).v,latest=heads(current).filter(r=>r.objectId===objectId);
@@ -375,7 +387,7 @@ export async function synchronize(user:User){
     }catch(error){await recordFailure(vid,error);}}
     for(const target of (await readState(user.id))?.reminderSeen??[]){
       const result=await reminderRequest(user,'seen',target);
-      if(result.exists)await commit(user,async s=>{s.reminderSeen=(s.reminderSeen??[]).filter(x=>x.vaultId!==target.vaultId||x.objectId!==target.objectId||x.configId!==target.configId);});
+      if(result.exists)await commit(user,async s=>{s.reminderSeen=(s.reminderSeen??[]).filter(x=>x.vaultId!==target.vaultId||x.objectId!==target.objectId||x.configId!==target.configId||x.occurrenceId!==target.occurrenceId);});
     }
     const transfers=(await readState(user.id))?.vaults.filter(v=>v.transfer&&!v.deleted).map(v=>v.header.id)??[];
     for(const vid of transfers){try{

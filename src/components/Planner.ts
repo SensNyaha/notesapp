@@ -4,10 +4,11 @@ import type { User } from '../types/auth';
 import { readState, changes, type State } from '../storage';
 import { createVault, openVault, closeVault, saveNote, readNote, vaultName, heads, synchronize, transferVault,
   readStash, moveStash, discardStash, registerDraftFlush, edit, hasUnsaved, closeAllVault, resolveConflict, renameDevice,
-  acknowledgeReminder, readTags, createTag, renameTag, deleteTag, copyNote, type Note, type TagDefinition } from '../planner';
+  acknowledgeReminder, readTags, createTag, renameTag, deleteTag, copyNote, readVaultPushMode, setVaultPushMode,
+  type Note, type TagDefinition, type VaultPushMode } from '../planner';
 import { localTime } from '../../shared/reminders.mjs';
-import type { ReminderPlan } from '../../shared/reminders.mjs';
-import { reminderRequest, type ReminderStatus, type ReminderTarget } from '../reminders';
+import type { ReminderPlan,ReminderRepeat,ReminderEnd } from '../../shared/reminders.mjs';
+import { reminderRequest, type ReminderSettings, type ReminderStatus, type ReminderTarget } from '../reminders';
 import { Attachments, RichTextEditor, sanitizeNoteHtml } from './RichTextEditor';
 import { noteSearchScore } from '../search';
 
@@ -18,6 +19,7 @@ export function Planner({ user,reminderTarget,onReminderHandled }: { user: User;
   const [names, setNames] = useState<Record<string, string>>({});
   const [notes, setNotes] = useState<Record<string, Note>>({});
   const [tags,setTags]=useState<Record<string,TagDefinition[]>>({});
+  const [pushDefaults,setPushDefaults]=useState<Record<string,VaultPushMode>>({});
   const [stash, setStash] = useState<Record<string, Note>>({});
   const [selected, setSelected] = useState('');
   const selectionInitialized = useRef(false);
@@ -38,10 +40,16 @@ export function Planner({ user,reminderTarget,onReminderHandled }: { user: User;
   const [draft, setDraft] = useState<Draft | null>(null); const draftRef = useRef<Draft | null>(null);
   const [viewing,setViewing]=useState<OpenedNote|null>(null);const viewingRef=useRef<OpenedNote|null>(null);
   const zone=Intl.DateTimeFormat().resolvedOptions().timeZone||'UTC';
+  const localDateAfter=(days:number)=>new Date(Date.parse(localTime(Date.now(),zone).slice(0,10)+'T00:00:00Z')+days*86400000).toISOString().slice(0,10);
   const [reminderDate,setReminderDate]=useState(''),[reminderClock,setReminderClock]=useState('');
   const [reminderMode,setReminderMode]=useState<'neutral'|'custom'|'title'>('neutral'),[reminderText,setReminderText]=useState('');
   const [reminderConsent,setReminderConsent]=useState(false);
   const [serverReminders,setServerReminders]=useState<ReminderStatus[]>([]);
+  const [reminderSettings,setReminderSettings]=useState<ReminderSettings>({zone, nudge_hours:1,all_day_time:'09:00'});
+  const [reminderAllDay,setReminderAllDay]=useState(false),[reminderImportant,setReminderImportant]=useState(false);
+  const [reminderRepeat,setReminderRepeat]=useState<ReminderRepeat>({type:'once'}),[reminderEnd,setReminderEnd]=useState<ReminderEnd>({type:'never'});
+  const [selectedOccurrence,setSelectedOccurrence]=useState(''),[snoozeOpen,setSnoozeOpen]=useState(false),[snoozeLocal,setSnoozeLocal]=useState('');
+  const [todayMenuOpen,setTodayMenuOpen]=useState(false),[todayPickOpen,setTodayPickOpen]=useState(false),[showReminderHistory,setShowReminderHistory]=useState(false);
   const [query,setQuery]=useState(''),[selectedTags,setSelectedTags]=useState<string[]>([]);
   const [quickFilter,setQuickFilter]=useState<'all'|'pinned'|'untagged'|'reminder'>('all'),[sort,setSort]=useState<'newest'|'oldest'|'title'>('newest');
   const [searchSort,setSearchSort]=useState<'relevance'|'newest'|'oldest'>('relevance');
@@ -57,10 +65,10 @@ export function Planner({ user,reminderTarget,onReminderHandled }: { user: User;
   async function load() {
     const g = ++generation.current, s = await readState(user.id);
     if (!s) { if (alive.current && g === generation.current) { setState(undefined); setNames({}); setNotes({});setTags({}); setStash({}); showDraft(null); } return; }
-    const ns: Record<string, string> = {}, texts: Record<string, Note> = {}, catalogs:Record<string,TagDefinition[]>={},st: Record<string, Note> = {};
+    const ns: Record<string, string> = {}, texts: Record<string, Note> = {}, catalogs:Record<string,TagDefinition[]>={},defaults:Record<string,VaultPushMode>={},st: Record<string, Note> = {};
     for (const v of s.vaults) {
       ns[v.header.id] = await vaultName(user.id, v);
-      if (v.key){catalogs[v.header.id]=await readTags(user.id,v);for (const r of heads(v)) texts[r.id] = await readNote(user.id, v, r);}
+      if (v.key){catalogs[v.header.id]=await readTags(user.id,v);defaults[v.header.id]=await readVaultPushMode(user.id,v);for (const r of heads(v)) texts[r.id] = await readNote(user.id, v, r);}
     }
     for (const item of s.stash) st[item.id] = await readStash(s, item.id);
     if (!alive.current || g !== generation.current) return;
@@ -68,7 +76,7 @@ export function Planner({ user,reminderTarget,onReminderHandled }: { user: User;
       selectionInitialized.current = true;
       if (s.vaults.some(v => v.header.id === s.lastVaultId && !v.deleted)) setSelected(s.lastVaultId!);
     }
-    setState(s); setNames(ns); setNotes(texts);setTags(catalogs); setStash(st);
+    setState(s); setNames(ns); setNotes(texts);setTags(catalogs);setPushDefaults(defaults); setStash(st);
     const d = draftRef.current;
     if (d && !s.vaults.some(v => v.header.id === d.vault && v.key && !v.deleted)) {
       if (d.dirty) await flush(); showDraft(null); setStatus('Хранилище закрыто или удалено. Черновик сохранён зашифрованным; стеш используется только при удалении источника.');
@@ -106,7 +114,7 @@ export function Planner({ user,reminderTarget,onReminderHandled }: { user: User;
   async function sync() {
     if (syncRunning.current) return;
     syncRunning.current = true;
-    try { await flush(); await synchronize(user);void reminderRequest(user,'').then(remote=>setServerReminders(remote.items)).catch(()=>{}); const s = await readState(user.id);
+    try { await flush(); await synchronize(user);void reminderRequest(user,'').then(remote=>{setServerReminders(remote.items);setReminderSettings(remote.settings);}).catch(()=>{}); const s = await readState(user.id);
       setStatus(s && hasUnsaved(s) ? 'Сохранено на устройстве. Есть отложенные или неотправленные заметки.' : 'Синхронизация завершена'); await load(); }
     catch (caught) { if (alive.current) setStatus(caught instanceof Error && !(caught instanceof TypeError) && caught.name !== 'TimeoutError'
       ? caught.message : 'Нет синхронизации. Локальные изменения сохранены; повторим при подключении.'); }
@@ -127,7 +135,7 @@ export function Planner({ user,reminderTarget,onReminderHandled }: { user: User;
   }, [user.id]);
   useEffect(()=>{
     if(!reminderTarget||reminderTarget.accountId!==user.id||!state)return;
-    if(acknowledgedTarget.current!==reminderTarget.configId){acknowledgedTarget.current=reminderTarget.configId;void acknowledgeReminder(user,reminderTarget);}
+    const targetKey=reminderTarget.configId+'.'+(reminderTarget.occurrenceId??'');if(acknowledgedTarget.current!==targetKey){acknowledgedTarget.current=targetKey;void acknowledgeReminder(user,reminderTarget);}
     const targetVault=state.vaults.find(v=>v.header.id===reminderTarget.vaultId);
     if(!targetVault){setStatus('Заметка из уведомления ещё не загружена. Выполняется синхронизация.');void sync();return;}
     if(selected!==reminderTarget.vaultId)select(reminderTarget.vaultId);
@@ -138,7 +146,7 @@ export function Planner({ user,reminderTarget,onReminderHandled }: { user: User;
     const revision=versions[0],value=revision&&notes[revision.id];
     if(value){showDraft(null);showViewing({...value,vault:targetVault.header.id,object:revision.objectId,revision:revision.id,key:targetVault.key});setScreen('list');onReminderHandled();}
     else{setStatus('Заметка из уведомления загружается.');void sync();}
-  },[reminderTarget?.configId,state,notes,selected,screen]);
+  },[reminderTarget?.configId,reminderTarget?.occurrenceId,state,notes,selected,screen]);
   const v = state?.vaults.find(v => v.header.id === selected);
   const active = state?.vaults.filter(v => !v.deleted) ?? [];
   const opened = active.filter(v => v.key && !v.transfer);
@@ -157,7 +165,7 @@ export function Planner({ user,reminderTarget,onReminderHandled }: { user: User;
   function change(field: 'title' | 'text', value: string) {
     const d = draftRef.current; if (!d) return;
     const reminder=field==='title'&&d.reminder?.mode==='title'
-      ?{...d.reminder,id:crypto.randomUUID(),text:Array.from(value).slice(0,200).join('')}:d.reminder;
+      ?{...d.reminder,text:Array.from(value).slice(0,200).join('')}:d.reminder;
     showDraft({ ...d, [field]: value,...(reminder?{reminder}:{}),dirty: true }); setStatus('Сохраняем…');
     if (timer.current) clearTimeout(timer.current);
     timer.current = setTimeout(() => { void flush().catch(() => setError('Не удалось сохранить. Не закрывайте страницу; повторите сохранение.')); }, 350);
@@ -176,10 +184,15 @@ export function Planner({ user,reminderTarget,onReminderHandled }: { user: User;
     if(timer.current)clearTimeout(timer.current);
     timer.current=setTimeout(()=>{void flush().catch(()=>setError('Не удалось сохранить напоминание.'));},350);
   }
-  function openReminderForm(){
-    const d=draftRef.current;if(!d)return;const local=d.reminder?.local??localTime(Date.now()+3600000,zone);
-    setReminderDate(local.slice(0,10));setReminderClock(local.slice(11,16));setReminderMode(d.reminder?.mode??'neutral');
-    setReminderText(d.reminder?.text??'');setReminderConsent(false);setError('');setScreen('reminder');
+  function prepareReminderForm(d:Draft){
+    const local=d.reminder?.local??localTime(Date.now()+3600000,zone),mode=d.reminder?.mode??pushDefaults[d.vault]??'neutral';
+    setReminderDate(local.slice(0,10));setReminderClock(local.slice(11,16));setReminderMode(mode);setReminderText(d.reminder?.text??'');
+    setReminderAllDay(Boolean(d.reminder?.allDay));setReminderImportant(Boolean(d.reminder?.important));setReminderRepeat(d.reminder?.repeat??{type:'once'});setReminderEnd(d.reminder?.end??{type:'never'});
+    setReminderConsent(mode==='title'&&(d.reminder?.mode==='title'||pushDefaults[d.vault]==='title'));setError('');setScreen('reminder');
+  }
+  function openReminderForm(){const d=draftRef.current;if(d)prepareReminderForm(d);}
+  function editReminderFor(current:NonNullable<State['vaults'][number]>,revision:ReturnType<typeof heads>[number]){
+    const value=notes[revision.id];if(!value||!current.key)return;const d={...value,vault:current.header.id,object:revision.objectId,revision:revision.id,dirty:false,key:current.key};showViewing(null);showDraft(d);prepareReminderForm(d);
   }
   function openRevision(current:NonNullable<State['vaults'][number]>,revision:ReturnType<typeof heads>[number]){
     const value=notes[revision.id];if(!value||!current.key)return;
@@ -249,21 +262,37 @@ export function Planner({ user,reminderTarget,onReminderHandled }: { user: User;
   }
   if(screen==='reminder'&&draft){
     const quick=(hours:number)=>{const local=localTime(Date.now()+hours*3600000,zone);setReminderDate(local.slice(0,10));setReminderClock(local.slice(11));};
-    const tomorrow=()=>{const local=localTime(Date.now()+86400000,zone);setReminderDate(local.slice(0,10));setReminderClock('09:00');};
+    const tomorrow=()=>{setReminderDate(localDateAfter(1));setReminderClock('09:00');};
     return e('section',{class:'card reminder-form'},e('button',{disabled:busy,onClick:()=>setScreen('list')},'Назад'),e('h1',null,'Напоминание'),
-      e('p',{class:'hint'},'Разовое напоминание. Часовой пояс: '+zone+'. При следующем открытии приложения онлайн будущие сроки сохранят местные дату и время в новом поясе.'),
+      e('p',{class:'hint'},'Одно расписание на заметку. Часовой пояс: '+zone+'. При открытии приложения онлайн будущие сроки сохраняют местные дату и время в новом поясе.'),
       e('div',{class:'actions compact'},e('button',{type:'button',onClick:()=>quick(1)},'Через час'),e('button',{type:'button',onClick:tomorrow},'Завтра, 09:00')),
       e('form',{onSubmit:(event:Event)=>{event.preventDefault();void run(async()=>{
-        const local=reminderDate+'T'+reminderClock;
+        const local=reminderDate+'T'+(reminderAllDay?reminderSettings.all_day_time:reminderClock);
         if(!/^\d{4}-\d\d-\d\dT\d\d:\d\d$/.test(local))throw Error('Укажите дату и время');
         if(reminderMode!=='neutral'&&!reminderConsent)throw Error('Подтвердите отправку текста через push-службу');
         const pushText=reminderMode==='title'?Array.from(draft.title).slice(0,200).join(''):reminderText;
         if(reminderMode==='custom'&&(!pushText.trim()||Array.from(pushText).length>200))throw Error('Собственный текст: от 1 до 200 символов');
-        changeReminder({id:crypto.randomUUID(),state:'active',local,mode:reminderMode,text:reminderMode==='neutral'?'':pushText});
+        if(reminderEnd.type==='date'&&reminderEnd.date<reminderDate)throw Error('Дата окончания не может быть раньше первого срабатывания');
+        const schedule={local,repeat:reminderRepeat,end:reminderEnd,allDay:reminderAllDay,important:reminderImportant};
+        const old=draft.reminder,unchanged=old&&JSON.stringify({local:reminderAllDay?old.local.slice(0,10):old.local,repeat:old.repeat??{type:'once'},end:old.end??{type:'never'},allDay:Boolean(old.allDay),important:Boolean(old.important)})===JSON.stringify({...schedule,local:reminderAllDay?schedule.local.slice(0,10):schedule.local});
+        changeReminder({id:unchanged?old!.id:crypto.randomUUID(),state:'active',...schedule,mode:reminderMode,text:reminderMode==='neutral'?'':pushText});
         setScreen('list');await flush();void sync();
       });}},
-        e('div',{class:'reminder-fields'},e('label',null,'Дата',e('input',{type:'date',required:true,value:reminderDate,onInput:(ev:Event)=>setReminderDate((ev.target as HTMLInputElement).value)})),
-          e('label',null,'Время',e('input',{type:'time',required:true,value:reminderClock,onInput:(ev:Event)=>setReminderClock((ev.target as HTMLInputElement).value)}))),
+        e('div',{class:'reminder-fields'},e('label',null,'Дата первого срабатывания',e('input',{type:'date',required:true,value:reminderDate,onInput:(ev:Event)=>setReminderDate((ev.target as HTMLInputElement).value)})),
+          e('label',null,'Время',e('input',{type:'time',required:!reminderAllDay,disabled:reminderAllDay,value:reminderAllDay?reminderSettings.all_day_time:reminderClock,onInput:(ev:Event)=>setReminderClock((ev.target as HTMLInputElement).value)}))),
+        e('label',{class:'check-row'},e('input',{type:'checkbox',checked:reminderAllDay,onChange:(ev:Event)=>setReminderAllDay((ev.target as HTMLInputElement).checked)}),'Весь день · push в '+reminderSettings.all_day_time),
+        e('fieldset',null,e('legend',null,'Повтор'),
+          e('label',null,'Расписание',e('select',{value:reminderRepeat.type,onChange:(ev:Event)=>{const type=(ev.target as HTMLSelectElement).value;setReminderRepeat(type==='daily'?{type:'daily'}:type==='weekly'?{type:'weekly',days:[new Date((reminderDate||'2026-01-05')+'T00:00:00Z').getUTCDay()||7]}:type==='interval'?{type:'interval',days:2}:type==='monthly'?{type:'monthly',day:Number(reminderDate.slice(8,10))||1,shortMonth:'last'}:{type:'once'});}},
+            e('option',{value:'once'},'Один раз'),e('option',{value:'daily'},'Каждый день'),e('option',{value:'weekly'},'По дням недели'),e('option',{value:'interval'},'Каждые N дней'),e('option',{value:'monthly'},'Каждый месяц'))),
+          reminderRepeat.type==='weekly'&&e('div',{class:'weekday-picker'},['Пн','Вт','Ср','Чт','Пт','Сб','Вс'].map((label,index)=>e('label',{class:'check-row',key:label},e('input',{type:'checkbox',checked:reminderRepeat.days.includes(index+1),onChange:(ev:Event)=>{const checked=(ev.target as HTMLInputElement).checked,days=checked?[...reminderRepeat.days,index+1]:reminderRepeat.days.filter(day=>day!==index+1);if(days.length)setReminderRepeat({type:'weekly',days:days.sort()});}}),label))),
+          reminderRepeat.type==='interval'&&e('label',null,'Интервал, дней',e('input',{type:'number',min:2,max:365,value:reminderRepeat.days,onInput:(ev:Event)=>setReminderRepeat({type:'interval',days:Number((ev.target as HTMLInputElement).value)})})),
+          reminderRepeat.type==='monthly'&&e('div',null,e('label',null,'День месяца',e('input',{type:'number',min:1,max:31,value:reminderRepeat.day,onInput:(ev:Event)=>setReminderRepeat({...reminderRepeat,day:Number((ev.target as HTMLInputElement).value)})})),
+            e('label',null,'Если такого дня нет',e('select',{value:reminderRepeat.shortMonth,onChange:(ev:Event)=>setReminderRepeat({...reminderRepeat,shortMonth:(ev.target as HTMLSelectElement).value as 'last'|'skip'})},e('option',{value:'last'},'В последний день месяца'),e('option',{value:'skip'},'Пропустить месяц')))),
+          reminderRepeat.type!=='once'&&e('div',null,e('label',null,'Окончание',e('select',{value:reminderEnd.type,onChange:(ev:Event)=>{const type=(ev.target as HTMLSelectElement).value;setReminderEnd(type==='date'?{type:'date',date:reminderDate}:type==='count'?{type:'count',count:10}:{type:'never'});}},e('option',{value:'never'},'Без окончания'),e('option',{value:'date'},'По дату включительно'),e('option',{value:'count'},'После количества срабатываний'))),
+            reminderEnd.type==='date'&&e('label',null,'Последняя дата',e('input',{type:'date',required:true,value:reminderEnd.date,onInput:(ev:Event)=>setReminderEnd({type:'date',date:(ev.target as HTMLInputElement).value})})),
+            reminderEnd.type==='count'&&e('label',null,'Количество, включая первое',e('input',{type:'number',min:1,max:10000,required:true,value:reminderEnd.count,onInput:(ev:Event)=>setReminderEnd({type:'count',count:Number((ev.target as HTMLInputElement).value)})})))),
+        e('label',{class:'check-row important-control'},e('input',{type:'checkbox',checked:reminderImportant,onChange:(ev:Event)=>setReminderImportant((ev.target as HTMLInputElement).checked)}),'Важное напоминание (выделение в приложении и высокий приоритет Web Push)'),
+        e('label',null,'Режим push по умолчанию для этого хранилища',e('select',{value:pushDefaults[draft.vault]??'neutral',disabled:busy,onChange:(ev:Event)=>{const mode=(ev.target as HTMLSelectElement).value as VaultPushMode;if(mode==='title'&&!confirm('Заголовки будущих напоминаний этого хранилища будут передаваться серверу и push-службе без шифрования. Продолжить?'))return;void run(async()=>{await setVaultPushMode(user,draft.vault,mode);setPushDefaults(current=>({...current,[draft.vault]:mode}));});}},e('option',{value:'neutral'},'Нейтральный'),e('option',{value:'title'},'Заголовок заметки'))),
         e('fieldset',null,e('legend',null,'Текст уведомления'),
           e('label',{class:'check-row'},e('input',{type:'radio',name:'reminder-mode',checked:reminderMode==='neutral',onChange:()=>setReminderMode('neutral')}),'Нейтральный: «У вас запланировано напоминание»'),
           e('label',{class:'check-row'},e('input',{type:'radio',name:'reminder-mode',checked:reminderMode==='custom',onChange:()=>setReminderMode('custom')}),'Свой текст'),
@@ -340,19 +369,61 @@ export function Planner({ user,reminderTarget,onReminderHandled }: { user: User;
     !state?.stash.length && e('p', null, 'Отложенных заметок нет'), feedback,
     e('button', { onClick: () => setScreen('list') }, 'Оставить на потом'));
   if(screen==='schedule'){
-    const items=(state?.vaults??[]).flatMap(current=>current.key&&!current.deleted?heads(current).map(revision=>({current,revision,note:notes[revision.id]})):[])
-      .filter(item=>item.note?.reminder).sort((a,b)=>a.note!.reminder!.local.localeCompare(b.note!.reminder!.local));
-    const localKeys=new Set(items.map(item=>item.current.header.id+'.'+item.revision.objectId));
-    const closed=serverReminders.filter(item=>!localKeys.has(item.vault_id+'.'+item.object_id));
-    return e('section',{class:'card planner'},e('button',{onClick:()=>setScreen('list')},'Назад'),e('h1',null,'Сегодня и напоминания'),
-      e('p',{class:'hint'},'Показаны напоминания из открытых на этом устройстве хранилищ. Закрытые хранилища продолжают отправлять нейтральные push, если они настроены.'),
-      !items.length&&!closed.length&&e('div',{class:'empty-state'},e('h2',null,'Напоминаний пока нет'),e('p',null,'Откройте заметку и нажмите «Напомнить».')),
-      items.map(({current,revision,note})=>e('button',{class:'note-row',key:revision.id,onClick:()=>{openRevision(current,revision);setScreen('list');}},
-        e('strong',null,note!.title||'Без заголовка'),e('span',null,new Date(note!.reminder!.local+'Z').toLocaleString('ru-RU',{timeZone:'UTC'})),
-        e('small',null,(names[current.header.id]||'Хранилище')+' · '+(note!.reminder!.state==='active'?'Активно':note!.reminder!.state==='done'?'Выполнено':'Выключено')))),
-      closed.map(item=>e('article',{class:'note-row',key:item.id},e('strong',null,'Напоминание из закрытого хранилища'),
-        e('span',null,new Date(item.local_at+'Z').toLocaleString('ru-RU',{timeZone:'UTC'})),e('small',null,item.paused?'Приостановлено из-за конфликта':item.seen_at?'Открыто':item.plan_state==='active'?'Активно':'Выключено'),
-        state?.vaults.some(v=>v.header.id===item.vault_id&&!v.deleted&&!v.key)&&e('button',{onClick:()=>form('open',item.vault_id)},'Открыть хранилище'))),feedback);
+    const localNotes=(state?.vaults??[]).flatMap(current=>current.key&&!current.deleted?heads(current).map(revision=>({current,revision,note:notes[revision.id]})):[]).filter(item=>Boolean(item.note));
+    const findLocal=(item:ReminderStatus)=>localNotes.find(local=>local.current.header.id===item.vault_id&&local.revision.objectId===item.object_id);
+    const nowLocal=localTime(Date.now(),zone),today=nowLocal.slice(0,10),tomorrowDate=new Date(Date.parse(today+'T00:00:00Z')+86400000).toISOString().slice(0,10);
+    const activeStatuses=new Set(['scheduled','fired','seen','missed']),visible=serverReminders.filter(item=>showReminderHistory||activeStatuses.has(item.occurrence_status)).filter(item=>{
+      if(!selectedTags.length)return true;const local=findLocal(item);return Boolean(local&&local.current.header.id===selected&&selectedTags.every(tagId=>(local.note!.tagIds??[]).includes(tagId)));
+    });
+    const itemLocal=(item:ReminderStatus)=>item.snooze_local??item.scheduled_local;
+    const groups:[string,string,(item:ReminderStatus)=>boolean][]=[
+      ['overdue','Просрочено',item=>['scheduled','fired','seen'].includes(item.occurrence_status)&&itemLocal(item)<nowLocal],
+      ['today','Сегодня',item=>['scheduled','fired','seen'].includes(item.occurrence_status)&&itemLocal(item).slice(0,10)===today&&itemLocal(item)>=nowLocal],
+      ['tomorrow','Завтра',item=>['scheduled','fired','seen'].includes(item.occurrence_status)&&itemLocal(item).slice(0,10)===tomorrowDate],
+      ['later','Позже',item=>['scheduled','fired','seen'].includes(item.occurrence_status)&&itemLocal(item).slice(0,10)>tomorrowDate],
+      ['missed','Пропущено',item=>item.occurrence_status==='missed'],
+      ['history','История',item=>['done','skipped'].includes(item.occurrence_status)],
+    ];
+    const selectedItem=serverReminders.find(item=>item.occurrence_id===selectedOccurrence),selectedLocal=selectedItem&&findLocal(selectedItem);
+    const repeatLabel=(item:ReminderStatus)=>{const schedule=JSON.parse(item.schedule) as {repeat:ReminderRepeat;allDay:boolean;important:boolean};return schedule.repeat.type==='once'?'Один раз':schedule.repeat.type==='daily'?'Ежедневно':schedule.repeat.type==='weekly'?'По дням недели':schedule.repeat.type==='interval'?'Каждые '+schedule.repeat.days+' дн.':'Ежемесячно';};
+    const refreshReminders=async()=>{const value=await reminderRequest(user,'');setServerReminders(value.items);setReminderSettings(value.settings);};
+    const act=(item:ReminderStatus,operation:'complete'|'skip'|'snooze'|'pause',local:null|string=null)=>void run(async()=>{await reminderRequest(user,'action',{occurrenceId:item.occurrence_id,operation,local});setSnoozeOpen(false);await refreshReminders();});
+    const addNew=()=>{const current=(v?.key&&!v.deleted?v:opened[0]);if(!current?.key){setError('Сначала откройте хранилище');return;}select(current.header.id);const d:Draft={vault:current.header.id,object:crypto.randomUUID(),revision:null,title:'',text:'',dirty:false,key:current.key};showViewing(null);showDraft(d);prepareReminderForm(d);};
+    const removeSchedule=()=>{if(!selectedLocal)return;const d:Draft={...selectedLocal.note!,vault:selectedLocal.current.header.id,object:selectedLocal.revision.objectId,revision:selectedLocal.revision.id,dirty:true,key:selectedLocal.current.key!};showDraft({...d,reminder:undefined});setSelectedOccurrence('');setScreen('list');void run(async()=>{await flush();void sync();});};
+    const pauseSchedule=()=>{if(!selectedLocal?.note?.reminder){act(selectedItem!,'pause');return;}const d:Draft={...selectedLocal.note,vault:selectedLocal.current.header.id,object:selectedLocal.revision.objectId,revision:selectedLocal.revision.id,dirty:true,key:selectedLocal.current.key!};
+      showDraft({...d,reminder:{...selectedLocal.note.reminder,state:'off'}});setSelectedOccurrence('');setScreen('list');void run(async()=>{await flush();void sync();});};
+    const formatLocal=(local:string)=>new Date(local+'Z').toLocaleString('ru-RU',{timeZone:'UTC',day:'numeric',month:'long',hour:'2-digit',minute:'2-digit'});
+    if(selectedItem)return e('section',{class:'card planner occurrence-detail'},e('button',{onClick:()=>{setSelectedOccurrence('');setSnoozeOpen(false);}},'Назад'),
+      e('p',{class:'eyebrow'},selectedItem.occurrence_status==='missed'?'ПРОПУЩЕНО':selectedItem.occurrence_status==='done'?'ВЫПОЛНЕНО':'СРАБАТЫВАНИЕ'),
+      e('h1',null,selectedLocal?.note?.title||'Напоминание из закрытого хранилища'),
+      e('p',{class:'occurrence-time'},formatLocal(selectedItem.snooze_local??selectedItem.scheduled_local)),
+      e('p',{class:'hint'},(names[selectedItem.vault_id]||'Закрытое хранилище')+' · '+repeatLabel(selectedItem)+(JSON.parse(selectedItem.schedule).important?' · Важное':'')),
+      selectedLocal&&e('article',{class:'linked-note'},e('strong',null,'Связанная заметка'),e('p',null,selectedLocal.note!.text.slice(0,180)||'Нет текста')),
+      ['scheduled','fired','seen'].includes(selectedItem.occurrence_status)&&e('div',{class:'actions occurrence-actions'},
+        e('button',{class:'primary',disabled:busy,onClick:()=>act(selectedItem,'complete')},'Выполнить'),e('button',{disabled:busy,onClick:()=>setSnoozeOpen(!snoozeOpen)},'Отложить')),
+      snoozeOpen&&e('section',{class:'snooze-sheet'},e('h2',null,'Отложить'),
+        e('div',{class:'quick-filters'},[[15,'15 минут'],[60,'1 час'],[180,'3 часа']].map(([minutes,label])=>e('button',{disabled:busy,onClick:()=>act(selectedItem,'snooze',localTime(Date.now()+Number(minutes)*60000,zone))},label)),
+          e('button',{disabled:busy,onClick:()=>act(selectedItem,'snooze',localDateAfter(1)+'T09:00')},'Завтра, 09:00'),
+          e('button',{disabled:busy,onClick:()=>{let ms=Date.now()+86400000;while(![6,7].includes(new Date(localTime(ms,zone)+'Z').getUTCDay()||7))ms+=86400000;act(selectedItem,'snooze',localTime(ms,zone).slice(0,10)+'T09:00');}},'На выходные')),
+        e('label',null,'Своя дата и время',e('input',{type:'datetime-local',value:snoozeLocal,min:localTime(Date.now()+60000,zone),onInput:(ev:Event)=>setSnoozeLocal((ev.target as HTMLInputElement).value)})),
+        e('button',{class:'primary',disabled:busy||!snoozeLocal,onClick:()=>act(selectedItem,'snooze',snoozeLocal)},'Отложить')),
+      e('div',{class:'actions'},selectedLocal&&e('button',{onClick:()=>{openRevision(selectedLocal.current,selectedLocal.revision);setSelectedOccurrence('');setScreen('list');}},'Открыть заметку'),
+        selectedLocal&&e('button',{onClick:()=>{setSelectedOccurrence('');editReminderFor(selectedLocal.current,selectedLocal.revision);}},'Изменить напоминание'),
+        e('button',{disabled:busy,onClick:pauseSchedule},'Приостановить расписание')),
+      selectedLocal?e('button',{class:'danger-button',disabled:busy,onClick:()=>{if(confirm('Удалить расписание и всю историю его срабатываний?'))removeSchedule();}},'Удалить напоминание')
+        :state?.vaults.some(item=>item.header.id===selectedItem.vault_id&&!item.deleted&&!item.key)&&e('button',{onClick:()=>form('open',selectedItem.vault_id)},'Открыть хранилище'),feedback);
+    return e('section',{class:'card planner today-screen'},e('button',{onClick:()=>setScreen('list')},'Назад'),
+      e('div',{class:'card-heading'},e('div',null,e('p',{class:'eyebrow'},new Date().toLocaleDateString('ru-RU',{weekday:'long',day:'numeric',month:'long'}).toUpperCase()),e('h1',null,'Сегодня')),
+        e('button',{class:'today-add',onClick:()=>setTodayMenuOpen(!todayMenuOpen),'aria-expanded':todayMenuOpen},'+ Добавить')),
+      e('div',{class:'today-counters'},groups.slice(0,4).map(([key,label,test])=>e('div',{key},e('strong',null,visible.filter(test).length),e('span',null,label)))),
+      todayMenuOpen&&e('div',{class:'note-action-menu today-add-menu'},e('button',{onClick:addNew},'Новая заметка с напоминанием'),e('button',{onClick:()=>setTodayPickOpen(!todayPickOpen)},'Выбрать существующую заметку')),
+      todayPickOpen&&e('div',{class:'today-note-picker'},localNotes.map(item=>e('button',{class:'note-row',key:item.revision.id,onClick:()=>{setTodayMenuOpen(false);setTodayPickOpen(false);editReminderFor(item.current,item.revision);}},e('strong',null,item.note!.title||'Без заголовка'),e('small',null,names[item.current.header.id])))),
+      v?.key&&activeTags(v.header.id).length>0&&e('div',{class:'tag-filter today-tag-filter'},activeTags(v.header.id).map(tag=>e('button',{key:tag.id,class:selectedTags.includes(tag.id)?'tag-chip selected':'tag-chip',style:{'--tag-color':tag.color},'aria-pressed':selectedTags.includes(tag.id),onClick:()=>setSelectedTags(current=>current.includes(tag.id)?current.filter(id=>id!==tag.id):[...current,tag.id])},tag.name))),
+      e('label',{class:'check-row history-toggle'},e('input',{type:'checkbox',checked:showReminderHistory,onChange:(ev:Event)=>setShowReminderHistory((ev.target as HTMLInputElement).checked)}),'Показать выполненные и пропущенные срабатывания'),
+      !visible.length&&e('div',{class:'empty-state'},e('h2',null,'Напоминаний пока нет'),e('p',null,'Добавьте новую заметку с напоминанием или выберите существующую.')),
+      groups.map(([key,label,test])=>{const items=visible.filter(test);return items.length&&e('section',{class:'today-group',key},e('h2',null,label),items.map(item=>{const local=findLocal(item),schedule=JSON.parse(item.schedule);return e('button',{class:'note-row occurrence-row'+(schedule.important?' important':''),key:item.occurrence_id,onClick:()=>setSelectedOccurrence(item.occurrence_id)},
+          e('strong',null,local?.note?.title||'Напоминание из закрытого хранилища'),e('span',null,schedule.allDay?'Весь день · '+item.scheduled_local.slice(11):formatLocal(item.snooze_local??item.scheduled_local)),
+          e('small',null,(names[item.vault_id]||'Закрытое хранилище')+' · '+repeatLabel(item)+(item.snooze_local?' · Отложено':'')));}))}),feedback);
   }
   if(screen==='tags'&&v?.key){const catalog=activeTags(v.header.id);return e('section',{class:'card planner tag-manager'},
     e('button',{onClick:()=>{setScreen('list');setEditingTag('');setTagName('');}},'Назад'),e('h1',null,'Теги хранилища'),
@@ -386,7 +457,7 @@ export function Planner({ user,reminderTarget,onReminderHandled }: { user: User;
       e('div',{class:'tag-filter'},activeTags(v.header.id).map(tag=>e('button',{key:tag.id,class:selectedTags.includes(tag.id)?'tag-chip selected':'tag-chip',style:{'--tag-color':tag.color},'aria-pressed':selectedTags.includes(tag.id),onClick:()=>setSelectedTags(current=>current.includes(tag.id)?current.filter(id=>id!==tag.id):[...current,tag.id])},tag.name)),
         e('button',{onClick:()=>setScreen('tags')},'Управлять тегами'))),
     e('div', { class: 'actions' }, e('button', { disabled: busy, onClick: () => form('create') }, '+ Хранилище'),
-      e('button',{disabled:busy,onClick:()=>{setScreen('schedule');void reminderRequest(user,'').then(value=>setServerReminders(value.items)).catch(()=>{});}},'Сегодня'),
+      e('button',{disabled:busy,onClick:()=>{setScreen('schedule');setSelectedOccurrence('');setSelectedTags([]);void reminderRequest(user,'').then(value=>{setServerReminders(value.items);setReminderSettings(value.settings);}).catch(()=>{});}},'Сегодня'),
       e('button', { onClick: () => setScreen('stash') }, 'Отложенные заметки (' + (state?.stash.length ?? 0) + ')'),
       e('button',{onClick:()=>{setName(state?.deviceName??'Устройство');setScreen('device');}},'Это устройство: '+(state?.deviceName??'Устройство'))),
     v&&!v.deleted&&e('div',null,

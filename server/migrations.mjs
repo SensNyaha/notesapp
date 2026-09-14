@@ -1,6 +1,6 @@
 import { randomUUID } from 'node:crypto';
 
-export const SCHEMA_VERSION = 8;
+export const SCHEMA_VERSION = 9;
 
 export function migrate(db) {
   db.exec('BEGIN IMMEDIATE');
@@ -101,6 +101,25 @@ export function migrate(db) {
         display_name TEXT NOT NULL CHECK(length(display_name) BETWEEN 1 AND 200)) STRICT;
       CREATE TRIGGER IF NOT EXISTS vault_label_deleted AFTER UPDATE OF deleted ON vaults WHEN NEW.deleted=1
         BEGIN DELETE FROM vault_labels WHERE vault_id=NEW.id; END;
+    `);
+    if(version<9)db.exec(`
+      ALTER TABLE reminder_settings ADD COLUMN all_day_time TEXT NOT NULL DEFAULT '09:00';
+      ALTER TABLE reminders ADD COLUMN schedule TEXT NOT NULL DEFAULT '{"repeat":{"type":"once"},"end":{"type":"never"},"allDay":false,"important":false}';
+      CREATE TABLE reminder_occurrences(
+        id TEXT PRIMARY KEY, reminder_id TEXT NOT NULL REFERENCES reminders(id) ON DELETE CASCADE, config_id TEXT NOT NULL,
+        sequence INTEGER NOT NULL CHECK(sequence>0), scheduled_local TEXT NOT NULL,
+        due_at INTEGER, snooze_local TEXT, effective_due_at INTEGER,
+        status TEXT NOT NULL CHECK(status IN('scheduled','fired','seen','done','skipped','missed')),
+        fired_at INTEGER, seen_at INTEGER, completed_at INTEGER, next_nudge INTEGER,
+        cycle INTEGER NOT NULL DEFAULT 0 CHECK(cycle>=0), UNIQUE(reminder_id,sequence)
+      ) STRICT;
+      CREATE INDEX reminder_occurrence_due ON reminder_occurrences(status,effective_due_at);
+      ALTER TABLE reminder_deliveries ADD COLUMN occurrence_id TEXT;
+      INSERT INTO reminder_occurrences(id,reminder_id,config_id,sequence,scheduled_local,due_at,effective_due_at,status,fired_at,seen_at,completed_at,next_nudge,cycle)
+        SELECT id,id,config_id,1,local_at,due_at,due_at,
+          CASE WHEN plan_state='done' THEN 'done' WHEN seen_at IS NOT NULL THEN 'seen' WHEN fired_at IS NOT NULL THEN 'fired' ELSE 'scheduled' END,
+          fired_at,seen_at,CASE WHEN plan_state='done' THEN coalesce(seen_at,fired_at,due_at) END,next_nudge,cycle FROM reminders;
+      UPDATE reminder_deliveries SET occurrence_id=reminder_id WHERE occurrence_id IS NULL;
     `);
     db.exec(`PRAGMA user_version = ${SCHEMA_VERSION}`);
     db.exec('COMMIT');

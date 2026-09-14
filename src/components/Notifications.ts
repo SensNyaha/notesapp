@@ -82,6 +82,8 @@ export function Notifications({user}:{user:User}){
     e('label',null,'Если заметку не открыли',e('select',{value:String(reminders?.nudge_hours??1),disabled:busy||!reminders,
       onChange:(event:Event)=>void run(async()=>{const nudgeHours=Number((event.target as HTMLSelectElement).value);await reminderRequest(user,'settings',{nudgeHours});setNotice('Настройка повторов сохранена для аккаунта.');})},
       e('option',{value:'0'},'Не повторять'),e('option',{value:'1'},'Каждый час'),e('option',{value:'3'},'Каждые 3 часа'),e('option',{value:'6'},'Каждые 6 часов'),e('option',{value:'24'},'Раз в сутки'))),
+    e('label',null,'Время push для событий «Весь день»',e('input',{type:'time',value:reminders?.all_day_time??'09:00',disabled:busy||!reminders,
+      onChange:(event:Event)=>void run(async()=>{const allDayTime=(event.target as HTMLInputElement).value;await reminderRequest(user,'settings',{nudgeHours:reminders?.nudge_hours??1,allDayTime});setNotice('Время событий «Весь день» сохранено для аккаунта.');})})),
     reminders&&e('p',{class:'hint'},'Часовой пояс аккаунта: '+reminders.zone+'. Он обновляется при открытии приложения онлайн.'),
     e('p',{class:'hint'},'Переход по push или открытие заметки на любом устройстве прекращает повторы, но не отмечает напоминание выполненным.'),
     e('p',{class:'hint'},'Принятие push-службой не подтверждает показ на телефоне. Уведомление нейтральное, без названия хранилища и текста заметок. Тест действует одну минуту.'),

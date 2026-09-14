@@ -6,7 +6,7 @@ import { join } from 'node:path';
 import { randomUUID,randomBytes,createECDH } from 'node:crypto';
 import { DatabaseSync } from 'node:sqlite';
 import { createApp } from '../server/app.mjs';
-import { zonedTime } from '../shared/reminders.mjs';
+import { zonedTime,nextOccurrenceLocal } from '../shared/reminders.mjs';
 
 const origin='https://notes.example.test';
 const b64=n=>randomBytes(n).toString('base64url');
@@ -36,7 +36,7 @@ async function fixture(t){
 
 test('reminders keep encrypted records opaque, follow the account timezone and pause on conflicts',async t=>{
   const f=await fixture(t),a=f.a,v=header(),objectId=randomUUID(),base=record(objectId);
-  assert.deepEqual((await a.request('/api/reminders/settings')).json(),{zone:'UTC',nudge_hours:1});
+  assert.deepEqual((await a.request('/api/reminders/settings')).json(),{zone:'UTC',nudge_hours:1,all_day_time:'09:00'});
   assert.equal((await a.request('/api/vaults/create',v)).statusCode,200);
   assert.equal((await a.request('/api/vaults/record',{vaultId:v.id,record:base})).statusCode,200);
   const config=randomUUID(),plan={id:config,state:'active',local:'2026-09-13T10:10',mode:'neutral',text:''};
@@ -62,7 +62,8 @@ test('one-time reminders reach every subscribed session, repeat at the account i
   await a.request('/api/reminders/set',{vaultId:v.id,objectId,recordId:base.id,plan});
   await f.restart();f.advance(60000);await f.app.runPushTests();await f.app.runPushTests();
   assert.equal(f.deliveries.length,2);assert.deepEqual(new Set(f.deliveries.map(x=>x[0].endpoint)),new Set([subA.endpoint,subB.endpoint]));
-  for(const [,payload] of f.deliveries)assert.deepEqual(JSON.parse(payload),{type:'tasks-reminder',accountId:a.user.id,vaultId:v.id,objectId,configId:config,body:'Пора действовать'});
+  for(const [,payload] of f.deliveries){const value=JSON.parse(payload);assert.match(value.occurrenceId,/^[0-9a-f-]{36}$/);delete value.occurrenceId;
+    assert.deepEqual(value,{type:'tasks-reminder',accountId:a.user.id,vaultId:v.id,objectId,configId:config,body:'Пора действовать'});}
   f.advance(3600000);await f.app.runPushTests();await f.app.runPushTests();assert.equal(f.deliveries.length,4);
   assert.equal((await b.request('/api/auth/refresh',{})).statusCode,200);assert.equal((await b.request('/api/auth/session')).statusCode,200);
   assert.equal((await b.request('/api/reminders/seen',{vaultId:v.id,objectId,configId:config})).statusCode,200);f.advance(3600000);await f.app.runPushTests();
@@ -84,4 +85,37 @@ test('title reminder mode exposes synchronized title text and falls back to neut
 test('timezone conversion rejects DST gaps and chooses the first instant of a repeated local time',()=>{
   assert.equal(zonedTime('2026-03-29T02:30','Europe/Berlin'),null);
   assert.equal(zonedTime('2026-10-25T02:30','Europe/Berlin'),Date.parse('2026-10-25T00:30:00Z'));
+});
+
+test('calendar recurrence handles weekdays, short months and inclusive endings',()=>{
+  const base={id:randomUUID(),state:'active',local:'2026-01-31T09:00',mode:'neutral',text:'',end:{type:'never'}};
+  assert.equal(nextOccurrenceLocal({...base,repeat:{type:'monthly',day:31,shortMonth:'last'}},base.local,1),'2026-02-28T09:00');
+  assert.equal(nextOccurrenceLocal({...base,repeat:{type:'monthly',day:31,shortMonth:'skip'}},base.local,1),'2026-03-31T09:00');
+  assert.equal(nextOccurrenceLocal({...base,local:'2026-09-11T09:00',repeat:{type:'weekly',days:[1,3]}},'2026-09-11T09:00',1),'2026-09-14T09:00');
+  assert.equal(nextOccurrenceLocal({...base,repeat:{type:'daily'},end:{type:'count',count:2}},base.local,2),null);
+  assert.equal(nextOccurrenceLocal({...base,repeat:{type:'daily'},end:{type:'date',date:'2026-02-01'}},base.local,1),'2026-02-01T09:00');
+});
+
+test('recurring reminders keep occurrence history, support snooze, catch up once and delete as one schedule',async t=>{
+  const f=await fixture(t),a=f.a,v=header(),objectId=randomUUID(),base=record(objectId),sub=subscription();
+  await a.request('/api/push/subscribe',{deviceId:randomUUID(),subscription:sub});await a.request('/api/vaults/create',v);await a.request('/api/vaults/record',{vaultId:v.id,record:base});
+  const plan={id:randomUUID(),state:'active',local:'2026-09-13T10:01',mode:'neutral',text:'',repeat:{type:'daily'},end:{type:'count',count:3},important:true};
+  assert.equal((await a.request('/api/reminders/set',{vaultId:v.id,objectId,recordId:base.id,plan})).statusCode,200);
+  let items=(await a.request('/api/reminders')).json().items;assert.equal(items.length,3);assert.deepEqual(items.map(x=>x.sequence),[1,2,3]);
+  const first=items[0];assert.equal((await a.request('/api/reminders/action',{occurrenceId:first.occurrence_id,operation:'snooze',local:'2026-09-14T12:00'})).statusCode,200);
+  items=(await a.request('/api/reminders')).json().items;assert.equal(items.find(x=>x.sequence===1).snooze_local,'2026-09-14T12:00');assert.equal(items.find(x=>x.sequence===2).scheduled_local,'2026-09-14T10:01');
+  f.advance(2*86400000+2*60000);await f.app.runPushTests();await f.app.runPushTests();await a.request('/api/auth/refresh',{});
+  items=(await a.request('/api/reminders')).json().items;assert.equal(items.filter(x=>x.occurrence_status==='fired').length,1);assert.equal(items.filter(x=>x.occurrence_status==='missed').length,2);assert.equal(f.deliveries.length,1);assert.equal(f.deliveries[0][2].urgency,'high');
+  const fired=items.find(x=>x.occurrence_status==='fired');assert.equal((await a.request('/api/reminders/action',{occurrenceId:fired.occurrence_id,operation:'complete',local:null})).statusCode,200);
+  assert.equal((await a.request('/api/reminders/set',{vaultId:v.id,objectId,recordId:base.id,plan:null})).statusCode,200);
+  assert.equal(f.db.prepare('SELECT count(*) n FROM reminders').get().n,0);assert.equal(f.db.prepare('SELECT count(*) n FROM reminder_occurrences').get().n,0);
+});
+
+test('all-day reminders use the account time and reschedule only unfinished occurrences',async t=>{
+  const f=await fixture(t),a=f.a,v=header(),objectId=randomUUID(),base=record(objectId);await a.request('/api/vaults/create',v);await a.request('/api/vaults/record',{vaultId:v.id,record:base});
+  const plan={id:randomUUID(),state:'active',local:'2026-09-14T18:45',mode:'neutral',text:'',allDay:true,repeat:{type:'daily'},end:{type:'count',count:2}};
+  await a.request('/api/reminders/set',{vaultId:v.id,objectId,recordId:base.id,plan});let rows=f.db.prepare('SELECT * FROM reminder_occurrences ORDER BY sequence').all();assert.deepEqual(rows.map(x=>x.scheduled_local),['2026-09-14T09:00','2026-09-15T09:00']);
+  f.db.prepare("UPDATE reminder_occurrences SET status='done' WHERE sequence=1").run();
+  assert.equal((await a.request('/api/reminders/settings',{nudgeHours:1,allDayTime:'08:30'})).statusCode,200);rows=f.db.prepare('SELECT * FROM reminder_occurrences ORDER BY sequence').all();
+  assert.equal(rows[0].scheduled_local,'2026-09-14T09:00');assert.equal(rows[1].scheduled_local,'2026-09-15T08:30');assert.equal(f.db.prepare('SELECT local_at FROM reminders').get().local_at,'2026-09-14T08:30');
 });

@@ -22,8 +22,8 @@ function initialReminderTarget():ReminderTarget|undefined{
   const match=location.hash.match(/^#reminder=([0-9a-f.-]+)$/),parts=match?.[1].split('.');
   const uuid=/^[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}$/;
   if(match)history.replaceState(null,'',location.pathname+location.search);
-  return parts?.length===4&&parts.every(value=>uuid.test(value))
-    ?{accountId:parts[0],vaultId:parts[1],objectId:parts[2],configId:parts[3]}:undefined;
+  return (parts?.length===4||parts?.length===5)&&parts.every(value=>uuid.test(value))
+    ?{accountId:parts[0],vaultId:parts[1],objectId:parts[2],configId:parts[3],...(parts[4]?{occurrenceId:parts[4]}:{})}:undefined;
 }
 
 function DefinitionList({ rows }: { rows: DefinitionRow[] }) {

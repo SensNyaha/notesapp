@@ -41,9 +41,9 @@ self.addEventListener('push', event => {
   try {
     const value=event.data?.json();
     if(value?.type==='tasks-test'&&uuid.test(value.id))id=value.id;
-    else if(value?.type==='tasks-reminder'&&uuid.test(value.accountId)&&uuid.test(value.vaultId)&&uuid.test(value.objectId)&&uuid.test(value.configId)
+    else if(value?.type==='tasks-reminder'&&uuid.test(value.accountId)&&uuid.test(value.vaultId)&&uuid.test(value.objectId)&&uuid.test(value.configId)&&uuid.test(value.occurrenceId)
       &&typeof value.body==='string'&&value.body.trim()&&Array.from(value.body).length<=200){
-      id=value.configId;body=value.body;data={type:'tasks-reminder',accountId:value.accountId,vaultId:value.vaultId,objectId:value.objectId,configId:value.configId};
+      id=value.occurrenceId;body=value.body;data={type:'tasks-reminder',accountId:value.accountId,vaultId:value.vaultId,objectId:value.objectId,configId:value.configId,occurrenceId:value.occurrenceId};
     }
   } catch {}
   event.waitUntil(self.registration.showNotification('Tasks', {
@@ -54,7 +54,7 @@ self.addEventListener('notificationclick', event => {
   event.notification.close();
   event.waitUntil((async()=>{
     const d=event.notification.data;
-    const target=d?.type==='tasks-reminder'?'#reminder='+encodeURIComponent([d.accountId,d.vaultId,d.objectId,d.configId].join('.')):'';
+    const target=d?.type==='tasks-reminder'?'#reminder='+encodeURIComponent([d.accountId,d.vaultId,d.objectId,d.configId,d.occurrenceId].join('.')):'';
     const path='/'+target;
     const windows=await self.clients.matchAll({type:'window',includeUncontrolled:true});
     const existing=windows.find(client=>new URL(client.url).origin===self.location.origin&&new URL(client.url).pathname==='/');

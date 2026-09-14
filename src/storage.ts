@@ -8,7 +8,7 @@ export interface Vault { header: Header; displayName?:string; key?: CryptoKey; p
   transfer?: { target: string; revisions: string[] }; epoch?:number; access?:AccessPack; grant?:string;
   needsGrant?:boolean; closeOperation?:string; closeBaseEpoch?:number; syncError?:string }
 export interface Stashed { id: string; sealed: Sealed; source: string }
-export interface ReminderSeen { vaultId:string;objectId:string;configId:string }
+export interface ReminderSeen { vaultId:string;objectId:string;configId:string;occurrenceId?:string }
 export interface State { user: User; vaults: Vault[]; stash: Stashed[]; stashKey?: CryptoKey; deviceId?:string; deviceName?:string; lastVaultId?:string;
   reminderSeen?:ReminderSeen[] }
 let connection: Promise<IDBDatabase> | undefined;

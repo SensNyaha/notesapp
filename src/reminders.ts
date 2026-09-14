@@ -2,11 +2,12 @@ import type { User } from './types/auth.ts';
 import { readState } from './storage.ts';
 import { session } from './auth.ts';
 
-export interface ReminderSettings { zone:string;nudge_hours:number }
-export interface ReminderTarget { accountId:string;vaultId:string;objectId:string;configId:string }
+export interface ReminderSettings { zone:string;nudge_hours:number;all_day_time:string }
+export interface ReminderTarget { accountId:string;vaultId:string;objectId:string;configId:string;occurrenceId?:string }
 export interface ReminderStatus {
-  id:string;vault_id:string;object_id:string;config_id:string;record_id:string;local_at:string;due_at:number|null;
-  plan_state:'active'|'off'|'done';paused:number;fired_at:number|null;seen_at:number|null;delivery:string|null;
+  id:string;vault_id:string;object_id:string;config_id:string;record_id:string;local_at:string;due_at:number|null;schedule:string;
+  plan_state:'active'|'off'|'done';paused:number;occurrence_id:string;sequence:number;scheduled_local:string;snooze_local:string|null;effective_due_at:number|null;
+  occurrence_status:'scheduled'|'fired'|'seen'|'done'|'skipped'|'missed';fired_at:number|null;seen_at:number|null;completed_at:number|null;delivery:string|null;
 }
 
 const messages:Record<string,string>={
@@ -14,6 +15,7 @@ const messages:Record<string,string>={
   invalid_reminder:'Проверьте дату, время и текст напоминания.',reminder_conflict:'Напоминание приостановлено до разрешения конфликта версий.',
   reminder_limit:'Достигнут лимит 1000 напоминаний аккаунта.',account_mismatch:'Открыт другой аккаунт.',
   unauthorized:'Войдите в аккаунт для синхронизации напоминаний.',vault_locked:'Откройте хранилище для синхронизации напоминания.',
+  occurrence_missing:'Срабатывание уже удалено или изменено.',
 };
 
 export async function reminderRequest(user:User,path:string,body?:unknown,vaultIds:string[]=[]):Promise<any>{

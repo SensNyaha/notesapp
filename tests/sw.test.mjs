@@ -76,8 +76,8 @@ test('offline shell works; API and non-public paths bypass the Service Worker ca
   assert.equal(request('/index.html', 'cors', 'POST').handled, false);
   handlers.push({data:{json:()=>({type:'tasks-test',id:'a'.repeat(36),body:'private text',url:'https://evil.test'})},waitUntil(promise){pending=promise;}});
   await pending;assert.equal(notifications.length,1);assert.ok(!JSON.stringify(notifications).includes('private text'));assert.ok(!JSON.stringify(notifications).includes('evil.test'));
-  const ids=['11111111-1111-4111-8111-111111111111','22222222-2222-4222-8222-222222222222','33333333-3333-4333-8333-333333333333','44444444-4444-4444-8444-444444444444'];
-  handlers.push({data:{json:()=>({type:'tasks-reminder',accountId:ids[0],vaultId:ids[1],objectId:ids[2],configId:ids[3],body:'Разрешённый текст'})},waitUntil(promise){pending=promise;}});
+  const ids=['11111111-1111-4111-8111-111111111111','22222222-2222-4222-8222-222222222222','33333333-3333-4333-8333-333333333333','44444444-4444-4444-8444-444444444444','55555555-5555-4555-8555-555555555555'];
+  handlers.push({data:{json:()=>({type:'tasks-reminder',accountId:ids[0],vaultId:ids[1],objectId:ids[2],configId:ids[3],occurrenceId:ids[4],body:'Разрешённый текст'})},waitUntil(promise){pending=promise;}});
   await pending;assert.equal(notifications.length,2);assert.equal(notifications[1][1].body,'Разрешённый текст');
   windows=[{url:'http://localhost:3100/',navigate:async path=>{navigated=path;},focus:async()=>{focused++;}}];
   const reminderClick={notification:{close(){closed++;},data:notifications[1][1].data},waitUntil(promise){pending=promise;}};

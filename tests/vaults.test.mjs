@@ -13,7 +13,7 @@ import { seal, unseal } from '../src/crypto/records.ts';
 import { signAccess } from '../src/crypto/access.ts';
 import { createVault, openVault, closeVault, saveNote, readNote, heads, synchronize, transferVault,
   readStash, moveStash, discardStash, edit, closeAllVault, resolveConflict, renameDevice, acknowledgeReminder, context, vaultName,
-  readTags,createTag,renameTag,deleteTag,copyNote } from '../src/planner.ts';
+  readTags,createTag,renameTag,deleteTag,copyNote,readVaultPushMode,setVaultPushMode } from '../src/planner.ts';
 import { readState, writeState, changes } from '../src/storage.ts';
 
 test('record v2 interoperates with OpenSSL AES-KW/GCM and authenticates context, parent and payload', async () => {
@@ -191,7 +191,7 @@ test('vault persistence, offline queue, conflicts, deletion and encrypted stash 
     const wire=JSON.stringify(db.prepare('SELECT * FROM vaults').all())+JSON.stringify(db.prepare('SELECT * FROM records').all());
     for(const plain of [secret.title,secret.text,'PRIVATE VAULT 87654','Forgotten offline edit'])assert.ok(!wire.includes(plain));
     const before=db.prepare('SELECT * FROM installation').get();
-    assert.equal(db.prepare('PRAGMA user_version').get().user_version,8);db.close();
+    assert.equal(db.prepare('PRAGMA user_version').get().user_version,9);db.close();
     const {createBackup}=await import('../server/cli/backup.mjs');const file=join(dir,'copy.sqlite');
     await createBackup(join(dir,'tasks.sqlite'),file);const bytes=await readFile(file);assert.ok(!bytes.includes(Buffer.from(secret.text)));
     assert.ok(before.installation_id);
@@ -304,11 +304,12 @@ test('vault persistence, offline queue, conflicts, deletion and encrypted stash 
   });
   await t.test('vault-scoped encrypted tags, checklist, pinning and copy survive synchronization',async()=>{
     const vid=await createVault(user,'Организация','abcdef');let s=await readState(user.id),v=s.vaults.find(item=>item.header.id===vid);
-    const defaults=await readTags(user.id,v);assert.ok(defaults.some(tag=>tag.name==='Работа'));assert.equal(heads(v).length,0);
+    const defaults=await readTags(user.id,v);assert.ok(defaults.some(tag=>tag.name==='Работа'));assert.equal(await readVaultPushMode(user.id,v),'neutral');assert.equal(heads(v).length,0);
+    await setVaultPushMode(user,vid,'title');s=await readState(user.id);v=s.vaults.find(item=>item.header.id===vid);assert.equal(await readVaultPushMode(user.id,v),'title');
     const tagId=await createTag(user,vid,'PRIVATE TAG 7719','#123ABC');await renameTag(user,vid,tagId,'PRIVATE RENAMED TAG 8821','#ABC123');
     s=await readState(user.id);v=s.vaults.find(item=>item.header.id===vid);const catalogRevision=v.records.filter(r=>r.objectId===v.header.id).at(-1);
     await saveNote(user,vid,v.header.id,catalogRevision.id,{title:'Служебные данные тегов',text:'Случайно сохранено старым клиентом'});
-    s=await readState(user.id);v=s.vaults.find(item=>item.header.id===vid);assert.equal((await readTags(user.id,v)).find(tag=>tag.id===tagId).name,'PRIVATE RENAMED TAG 8821');assert.equal(heads(v).length,0);
+    s=await readState(user.id);v=s.vaults.find(item=>item.header.id===vid);assert.equal((await readTags(user.id,v)).find(tag=>tag.id===tagId).name,'PRIVATE RENAMED TAG 8821');assert.equal(await readVaultPushMode(user.id,v),'title');assert.equal(heads(v).length,0);
     const reminder={id:randomUUID(),state:'active',local:'2027-01-20T11:15',mode:'neutral',text:''};
     const checklist=[{id:randomUUID(),text:'PRIVATE CHECK 6631',done:false},{id:randomUUID(),text:'Готово',done:true}];
     const saved=await saveNote(user,vid,randomUUID(),null,{title:'Организованная',text:'Основной текст',checklist,tagIds:[tagId],pinned:true,reminder});
