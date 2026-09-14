@@ -12,7 +12,8 @@ import { generateVaultKey } from '../src/crypto/vault.ts';
 import { seal, unseal } from '../src/crypto/records.ts';
 import { signAccess } from '../src/crypto/access.ts';
 import { createVault, openVault, closeVault, saveNote, readNote, heads, synchronize, transferVault,
-  readStash, moveStash, discardStash, edit, closeAllVault, resolveConflict, renameDevice, acknowledgeReminder, context, vaultName } from '../src/planner.ts';
+  readStash, moveStash, discardStash, edit, closeAllVault, resolveConflict, renameDevice, acknowledgeReminder, context, vaultName,
+  readTags,createTag,renameTag,deleteTag,copyNote } from '../src/planner.ts';
 import { readState, writeState, changes } from '../src/storage.ts';
 
 test('record v2 interoperates with OpenSSL AES-KW/GCM and authenticates context, parent and payload', async () => {
@@ -300,6 +301,28 @@ test('vault persistence, offline queue, conflicts, deletion and encrypted stash 
     probe=new DatabaseSync(join(dir,'tasks.sqlite'),{readOnly:true});
     assert.equal(probe.prepare('SELECT 1 FROM reminders WHERE vault_id=?').get(vid),undefined);
     assert.equal(probe.prepare('SELECT plan_state FROM reminders WHERE vault_id=?').get(destination).plan_state,'off');probe.close();
+  });
+  await t.test('vault-scoped encrypted tags, checklist, pinning and copy survive synchronization',async()=>{
+    const vid=await createVault(user,'Организация','abcdef');let s=await readState(user.id),v=s.vaults.find(item=>item.header.id===vid);
+    const defaults=await readTags(user.id,v);assert.ok(defaults.some(tag=>tag.name==='Работа'));assert.equal(heads(v).length,0);
+    const tagId=await createTag(user,vid,'PRIVATE TAG 7719','#123ABC');await renameTag(user,vid,tagId,'PRIVATE RENAMED TAG 8821','#ABC123');
+    s=await readState(user.id);v=s.vaults.find(item=>item.header.id===vid);const catalogRevision=v.records.filter(r=>r.objectId===v.header.id).at(-1);
+    await saveNote(user,vid,v.header.id,catalogRevision.id,{title:'Служебные данные тегов',text:'Случайно сохранено старым клиентом'});
+    s=await readState(user.id);v=s.vaults.find(item=>item.header.id===vid);assert.equal((await readTags(user.id,v)).find(tag=>tag.id===tagId).name,'PRIVATE RENAMED TAG 8821');assert.equal(heads(v).length,0);
+    const reminder={id:randomUUID(),state:'active',local:'2027-01-20T11:15',mode:'neutral',text:''};
+    const checklist=[{id:randomUUID(),text:'PRIVATE CHECK 6631',done:false},{id:randomUUID(),text:'Готово',done:true}];
+    const saved=await saveNote(user,vid,randomUUID(),null,{title:'Организованная',text:'Основной текст',checklist,tagIds:[tagId],pinned:true,reminder});
+    const copiedId=await copyNote(user,vid,saved.id);await synchronize(user);s=await readState(user.id);v=s.vaults.find(item=>item.header.id===vid);
+    assert.equal(heads(v).length,2);const original=await readNote(user.id,v,heads(v).find(r=>r.id===saved.id));
+    const copied=await readNote(user.id,v,heads(v).find(r=>r.id===copiedId));assert.deepEqual(original.checklist,checklist);assert.deepEqual(original.tagIds,[tagId]);assert.equal(original.pinned,true);
+    assert.deepEqual(copied.checklist,checklist);assert.deepEqual(copied.tagIds,[tagId]);assert.equal(copied.pinned,false);assert.equal(copied.reminder.state,'off');assert.notEqual(copied.reminder.id,reminder.id);
+    assert.equal((await readTags(user.id,v)).find(tag=>tag.id===tagId).name,'PRIVATE RENAMED TAG 8821');
+    const probe=new DatabaseSync(join(dir,'tasks.sqlite'),{readOnly:true});try{const payloads=probe.prepare('SELECT payload FROM records WHERE vault_id=?').all(vid).map(row=>row.payload).join('');
+      assert.ok(!payloads.includes('PRIVATE RENAMED TAG 8821'));assert.ok(!payloads.includes('PRIVATE CHECK 6631'));}finally{probe.close();}
+    const beforeConcurrent=await readState(user.id);offline=true;await deleteTag(user,vid,tagId);const deletedOnDevice=await readState(user.id);
+    await writeState(beforeConcurrent);await renameTag(user,vid,tagId,'Старая офлайн-правка','#654321');offline=false;await synchronize(user);
+    await writeState(deletedOnDevice);await synchronize(user);s=await readState(user.id);v=s.vaults.find(item=>item.header.id===vid);
+    assert.equal((await readTags(user.id,v)).find(tag=>tag.id===tagId).deleted,true);assert.deepEqual((await readNote(user.id,v,heads(v)[0])).tagIds,[tagId]);
   });
   await t.test('legacy names backfill from an unlocked device and reach a fresh locked device',async()=>{
     const vid=await createVault(user,'Узнаваемое хранилище','abcdef');await synchronize(user);

@@ -8,9 +8,21 @@ import { validPlan } from '../shared/reminders.mjs';
 import type { ReminderPlan } from '../shared/reminders.mjs';
 import { reminderRequest } from './reminders.ts';
 export interface NoteAttachment { id:string;name:string;type:string;size:number;data:string }
-export interface Note { title: string; text: string; html?:string;attachments?:NoteAttachment[];reminder?:ReminderPlan; author?:{name:string;time:number} }
+export interface ChecklistItem { id:string;text:string;done:boolean }
+export interface TagDefinition { id:string;name:string;color:string;deleted:boolean;op:string }
+export interface Note { title: string; text: string; html?:string;attachments?:NoteAttachment[];checklist?:ChecklistItem[];tagIds?:string[];pinned?:boolean;reminder?:ReminderPlan; author?:{name:string;time:number} }
+interface TagCatalog { kind:'tag-catalog';title:string;text:string;tags:TagDefinition[] }
 const id = () => crypto.randomUUID();
-export const heads = (v: Vault) => { const parents = new Set(v.records.flatMap(r => [r.parent,...(r.resolves??[])])); return v.records.filter(r => !parents.has(r.id)); };
+const allHeads = (v: Vault) => { const parents = new Set(v.records.flatMap(r => [r.parent,...(r.resolves??[])])); return v.records.filter(r => !parents.has(r.id)); };
+export const heads = (v: Vault) => allHeads(v).filter(r=>r.objectId!==v.header.id);
+const catalogHeads=(v:Vault)=>allHeads(v).filter(r=>r.objectId===v.header.id);
+export const DEFAULT_TAGS:ReadonlyArray<TagDefinition>=Object.freeze([
+  ['10000000-0000-4000-8000-000000000001','Работа','#356AE6'],['10000000-0000-4000-8000-000000000002','Личное','#8B5CF6'],
+  ['10000000-0000-4000-8000-000000000003','Важное','#E24A4A'],['10000000-0000-4000-8000-000000000004','Идеи','#D68A00'],
+  ['10000000-0000-4000-8000-000000000005','Покупки','#159A76'],['10000000-0000-4000-8000-000000000006','Учёба','#2878B8'],
+  ['10000000-0000-4000-8000-000000000007','Здоровье','#2F9E44'],['10000000-0000-4000-8000-000000000008','Финансы','#6D7C32'],
+  ['10000000-0000-4000-8000-000000000009','Путешествия','#C056A1'],
+].map(([tagId,name,color])=>Object.freeze({id:tagId,name,color,deleted:false,op:'000000000000-default'})));
 export const context = (user: string, v: Header, objectId: string, revisionId: string): Context =>
   ({ accountId: user, vaultId: v.id, keyId: v.keyId, objectId, revisionId });
 function validAttachment(item:unknown):item is NoteAttachment{
@@ -26,11 +38,21 @@ function note(value: unknown): Note {
   const reminder='reminder'in value?value.reminder:undefined;
   const html='html'in value?value.html:undefined;
   const attachments='attachments'in value?value.attachments:undefined;
+  const checklist='checklist'in value?value.checklist:undefined;
+  const tagIds='tagIds'in value?value.tagIds:undefined;
+  const pinned='pinned'in value?value.pinned:undefined;
   if(reminder!==undefined&&!validPlan(reminder))throw Error('Повреждено напоминание');
   if(html!==undefined&&typeof html!=='string')throw Error('Повреждено форматирование заметки');
   if(attachments!==undefined&&(!Array.isArray(attachments)||attachments.length>15||!attachments.every(validAttachment)
     ||attachments.reduce((sum,item)=>sum+item.size,0)>512*1024))throw Error('Повреждены вложения заметки');
+  if(checklist!==undefined&&(!Array.isArray(checklist)||checklist.length>500||!checklist.every(item=>item&&typeof item==='object'
+    &&'id'in item&&typeof item.id==='string'&&item.id.length<=100&&'text'in item&&typeof item.text==='string'&&item.text.length<=1000
+    &&'done'in item&&typeof item.done==='boolean')))throw Error('Повреждён чек-лист заметки');
+  if(tagIds!==undefined&&(!Array.isArray(tagIds)||tagIds.length>100||!tagIds.every(item=>typeof item==='string'&&item.length<=100)
+    ||new Set(tagIds).size!==tagIds.length))throw Error('Повреждены теги заметки');
+  if(pinned!==undefined&&typeof pinned!=='boolean')throw Error('Повреждён признак закрепления заметки');
   return { title: value.title, text: value.text, ...(html!==undefined?{html}:{}), ...(attachments?{attachments:attachments as NoteAttachment[]}:{}),
+    ...(checklist?{checklist:checklist as ChecklistItem[]}:{}),...(tagIds?{tagIds:tagIds as string[]}:{}),...(pinned!==undefined?{pinned}:{}),
     ...(reminder?{reminder}:{}), ...(author&&typeof author==='object'&&'name'in author&&typeof author.name==='string'&&'time'in author&&Number.isSafeInteger(author.time)
     ?{author:author as {name:string;time:number}}:{}) };
 }
@@ -39,6 +61,28 @@ export async function readNote(user: string, v: Vault, r: Revision): Promise<Not
   const value=await unseal(v.key, context(user, v.header, r.objectId, r.id), r.parent, r.sealed) as Note&{resolves?:string[]};
   if(JSON.stringify(value.resolves??[])!==JSON.stringify(r.resolves??[]))throw Error('Повреждена связь конфликтующих версий');
   return note(value);
+}
+function validTag(value:unknown):value is TagDefinition{return Boolean(value&&typeof value==='object'&&'id'in value&&typeof value.id==='string'&&value.id.length<=100
+  &&'name'in value&&typeof value.name==='string'&&value.name.trim()&&value.name.length<=60&&'color'in value&&typeof value.color==='string'&&/^#[0-9A-Fa-f]{6}$/.test(value.color)
+  &&'deleted'in value&&typeof value.deleted==='boolean'&&'op'in value&&typeof value.op==='string'&&value.op.length<=100);}
+async function readCatalogRevision(user:string,v:Vault,r:Revision):Promise<TagCatalog|null>{
+  if(!v.key)throw Error('Откройте хранилище');
+  const value=await unseal(v.key,context(user,v.header,r.objectId,r.id),r.parent,r.sealed) as Partial<TagCatalog>&{resolves?:string[]};
+  if(JSON.stringify(value.resolves??[])!==JSON.stringify(r.resolves??[]))throw Error('Повреждена связь версий каталога тегов');
+  // A previous PWA may save the compatibility note. Its parent still keeps the real catalog recoverable.
+  if(value.kind!=='tag-catalog'){
+    if(typeof value.title==='string'&&typeof value.text==='string')return null;
+    throw Error('Повреждён каталог тегов');
+  }
+  if(typeof value.title!=='string'||typeof value.text!=='string'||!Array.isArray(value.tags)||value.tags.length>500||!value.tags.every(validTag))throw Error('Повреждён каталог тегов');
+  return {kind:'tag-catalog',title:value.title,text:value.text,tags:value.tags};
+}
+export async function readTags(user:string,v:Vault):Promise<TagDefinition[]>{
+  const versions=(await Promise.all(v.records.filter(r=>r.objectId===v.header.id).map(r=>readCatalogRevision(user,v,r)))).filter((value):value is TagCatalog=>Boolean(value));
+  const merged=new Map(DEFAULT_TAGS.map(tag=>[tag.id,{...tag}]));
+  for(const catalog of versions)for(const tag of catalog.tags){const previous=merged.get(tag.id);
+    if(!previous||tag.deleted&&!previous.deleted||tag.deleted===previous.deleted&&tag.op>previous.op)merged.set(tag.id,{...tag});}
+  return [...merged.values()].sort((a,b)=>a.name.localeCompare(b.name,'ru'));
 }
 export async function vaultName(user: string, v: Vault) {
   if (!v.key) return v.displayName ? v.displayName+' (закрыто)' : 'Название ещё не синхронизировано (закрыто) · ' + v.header.id.slice(0, 8);
@@ -87,6 +131,30 @@ async function addRevision(user: string, v: Vault, objectId: string, parent: str
   const rid = id(), r: Revision = { id: rid, objectId, parent, sealed: await seal(v.key, context(user, v.header, objectId, rid), parent, value), pending: true, reminderPending:true };
   v.records.push(r); return r;
 }
+async function writeTags(user:string,v:Vault,tags:TagDefinition[]){
+  if(!v.key||v.deleted||v.transfer)throw Error('Хранилище недоступно для записи');
+  const versions=catalogHeads(v),parent=versions[0]?.id??null,resolves=versions.slice(1).map(r=>r.id),rid=id();
+  const value={kind:'tag-catalog' as const,title:'Служебные данные тегов',text:'Обновите приложение, чтобы управлять тегами этого хранилища.',tags,...(resolves.length?{resolves}:{})};
+  v.records.push({id:rid,objectId:v.header.id,parent,...(resolves.length?{resolves}:{}),pending:true,
+    sealed:await seal(v.key,context(user,v.header,v.header.id,rid),parent,value)});
+}
+function nextTagOp(tags:TagDefinition[]){const generation=Math.max(0,...tags.map(tag=>Number.parseInt(tag.op.slice(0,12),10)||0))+1;return String(generation).padStart(12,'0')+'-'+id();}
+export const createTag=(user:User,vid:string,name:string,color:string)=>edit(user,async s=>{
+  const v=vault(s,vid),clean=name.trim();if(!clean||clean.length>60)throw Error('Название тега: от 1 до 60 символов');
+  if(!/^#[0-9A-Fa-f]{6}$/.test(color))throw Error('Выберите цвет тега');const tags=await readTags(user.id,v);
+  if(tags.some(tag=>!tag.deleted&&tag.name.localeCompare(clean,'ru',{sensitivity:'accent'})===0))throw Error('Такой тег уже существует');
+  const tag={id:id(),name:clean,color:color.toUpperCase(),deleted:false,op:nextTagOp(tags)};await writeTags(user.id,v,[...tags,tag]);return tag.id;
+});
+export const renameTag=(user:User,vid:string,tagId:string,name:string,color:string)=>edit(user,async s=>{
+  const v=vault(s,vid),clean=name.trim();if(!clean||clean.length>60)throw Error('Название тега: от 1 до 60 символов');
+  if(!/^#[0-9A-Fa-f]{6}$/.test(color))throw Error('Выберите цвет тега');const tags=await readTags(user.id,v),tag=tags.find(item=>item.id===tagId&&!item.deleted);
+  if(!tag)throw Error('Тег уже удалён');if(tags.some(item=>item.id!==tagId&&!item.deleted&&item.name.localeCompare(clean,'ru',{sensitivity:'accent'})===0))throw Error('Такой тег уже существует');
+  const op=nextTagOp(tags);await writeTags(user.id,v,tags.map(item=>item.id===tagId?{...item,name:clean,color:color.toUpperCase(),op}:item));
+});
+export const deleteTag=(user:User,vid:string,tagId:string)=>edit(user,async s=>{
+  const v=vault(s,vid),tags=await readTags(user.id,v),tag=tags.find(item=>item.id===tagId&&!item.deleted);if(!tag)throw Error('Тег уже удалён');
+  const op=nextTagOp(tags);await writeTags(user.id,v,tags.map(item=>item.id===tagId?{...item,deleted:true,op}:item));
+});
 export const saveNote = (user: User, vid: string, objectId: string, parent: string | null, value: Note, draftKey?: CryptoKey) => edit(user, async s => {
   const v = vault(s, vid, false); if (v.deleted) {
     await addStash(s, vid, value); return { id: parent ?? objectId, stashed: true };
@@ -95,6 +163,11 @@ export const saveNote = (user: User, vid: string, objectId: string, parent: stri
   // Never persist the temporary key again or put this draft into an independently accessible stash.
   const writable = v.key ? v : { ...v, key: draftKey };
   const r = await addRevision(user.id, writable, objectId, parent, {...value,author:{name:s.deviceName??'Устройство',time:Date.now()}}); return { id: r.id, stashed: false };
+});
+export const copyNote=(user:User,vid:string,revisionId:string)=>edit(user,async s=>{
+  const v=vault(s,vid),revision=heads(v).find(r=>r.id===revisionId);if(!revision)throw Error('Версия заметки изменилась');
+  const source=await readNote(user.id,v,revision),reminder=source.reminder?{...source.reminder,id:id(),state:'off' as const}:undefined,{author:_,...contents}=source;
+  const created=await addRevision(user.id,v,id(),null,{...contents,title:source.title?source.title+' — копия':'Копия заметки',pinned:false,reminder});return created.id;
 });
 function stashContext(s: State, sid: string): Context {
   return { accountId: s.user.id, vaultId: s.user.id, keyId: s.user.id, objectId: sid, revisionId: sid };
@@ -138,6 +211,7 @@ export const transferVault = (user: User, source: string, name: string, phrase: 
   const target = await makeVault(user.id, name, phrase);
   for (const r of heads(v)){const copy=await readNote(user.id,v,r);
     await addRevision(user.id,target,id(),null,{...copy,...(copy.reminder?{reminder:{...copy.reminder,id:id(),state:'off' as const}}:{})});}
+  if(catalogHeads(v).length)await writeTags(user.id,target,await readTags(user.id,v));
   s.vaults.push(target); v.transfer = { target: target.header.id, revisions: target.records.map(r => r.id) };
   return target.header.id;
 });

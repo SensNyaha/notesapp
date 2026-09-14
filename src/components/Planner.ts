@@ -4,7 +4,7 @@ import type { User } from '../types/auth';
 import { readState, changes, type State } from '../storage';
 import { createVault, openVault, closeVault, saveNote, readNote, vaultName, heads, synchronize, transferVault,
   readStash, moveStash, discardStash, registerDraftFlush, edit, hasUnsaved, closeAllVault, resolveConflict, renameDevice,
-  acknowledgeReminder, type Note } from '../planner';
+  acknowledgeReminder, readTags, createTag, renameTag, deleteTag, copyNote, type Note, type TagDefinition } from '../planner';
 import { localTime } from '../../shared/reminders.mjs';
 import type { ReminderPlan } from '../../shared/reminders.mjs';
 import { reminderRequest, type ReminderStatus, type ReminderTarget } from '../reminders';
@@ -16,17 +16,19 @@ export function Planner({ user,reminderTarget,onReminderHandled }: { user: User;
   const [state, setState] = useState<State>();
   const [names, setNames] = useState<Record<string, string>>({});
   const [notes, setNotes] = useState<Record<string, Note>>({});
+  const [tags,setTags]=useState<Record<string,TagDefinition[]>>({});
   const [stash, setStash] = useState<Record<string, Note>>({});
   const [selected, setSelected] = useState('');
   const selectionInitialized = useRef(false);
   function select(vid: string) {
     selectionInitialized.current = true;
     setSelected(vid);
+    setSelectedTags([]);setQuickFilter('all');
     if (vid) void edit(user, async s => {
       if (s.vaults.some(v => v.header.id === vid && !v.deleted)) s.lastVaultId = vid;
     }).catch(() => setError('Не удалось запомнить выбранное хранилище'));
   }
-  const [screen, setScreen] = useState<'list' | 'create' | 'open' | 'transfer' | 'stash' | 'close-all' | 'conflict' | 'device'|'reminder'|'schedule'>('list');
+  const [screen, setScreen] = useState<'list' | 'create' | 'open' | 'transfer' | 'stash' | 'close-all' | 'conflict' | 'device'|'reminder'|'schedule'|'tags'>('list');
   const [password,setPassword]=useState('');
   const [comparison,setComparison]=useState<{objectId:string;versions:string[];chosen:string}>();
   const [name, setName] = useState(''); const [phrase, setPhrase] = useState(''); const [repeat, setRepeat] = useState('');
@@ -39,19 +41,24 @@ export function Planner({ user,reminderTarget,onReminderHandled }: { user: User;
   const [reminderMode,setReminderMode]=useState<'neutral'|'custom'|'title'>('neutral'),[reminderText,setReminderText]=useState('');
   const [reminderConsent,setReminderConsent]=useState(false);
   const [serverReminders,setServerReminders]=useState<ReminderStatus[]>([]);
+  const [query,setQuery]=useState(''),[selectedTags,setSelectedTags]=useState<string[]>([]);
+  const [quickFilter,setQuickFilter]=useState<'all'|'pinned'|'untagged'|'reminder'>('all'),[sort,setSort]=useState<'newest'|'oldest'|'title'>('newest');
+  const [hideCompleted,setHideCompleted]=useState(false),[menuOpen,setMenuOpen]=useState(false);
+  const [tagName,setTagName]=useState(''),[tagColor,setTagColor]=useState('#356AE6'),[editingTag,setEditingTag]=useState('');
   const [status, setStatus] = useState(''); const [error, setError] = useState(''); const [busy, setBusy] = useState(false);
   const timer = useRef<ReturnType<typeof setTimeout>>(); const saving = useRef<Promise<void> | null>(null);
+  const draggedChecklistItem=useRef<number|null>(null);
   const syncRunning = useRef(false), alive = useRef(true), generation = useRef(0);
   const acknowledgedTarget=useRef('');
   function showDraft(d: Draft | null) { draftRef.current = d; setDraft(d); }
   function showViewing(note:OpenedNote|null){viewingRef.current=note;setViewing(note);}
   async function load() {
     const g = ++generation.current, s = await readState(user.id);
-    if (!s) { if (alive.current && g === generation.current) { setState(undefined); setNames({}); setNotes({}); setStash({}); showDraft(null); } return; }
-    const ns: Record<string, string> = {}, texts: Record<string, Note> = {}, st: Record<string, Note> = {};
+    if (!s) { if (alive.current && g === generation.current) { setState(undefined); setNames({}); setNotes({});setTags({}); setStash({}); showDraft(null); } return; }
+    const ns: Record<string, string> = {}, texts: Record<string, Note> = {}, catalogs:Record<string,TagDefinition[]>={},st: Record<string, Note> = {};
     for (const v of s.vaults) {
       ns[v.header.id] = await vaultName(user.id, v);
-      if (v.key) for (const r of heads(v)) texts[r.id] = await readNote(user.id, v, r);
+      if (v.key){catalogs[v.header.id]=await readTags(user.id,v);for (const r of heads(v)) texts[r.id] = await readNote(user.id, v, r);}
     }
     for (const item of s.stash) st[item.id] = await readStash(s, item.id);
     if (!alive.current || g !== generation.current) return;
@@ -59,7 +66,7 @@ export function Planner({ user,reminderTarget,onReminderHandled }: { user: User;
       selectionInitialized.current = true;
       if (s.vaults.some(v => v.header.id === s.lastVaultId && !v.deleted)) setSelected(s.lastVaultId!);
     }
-    setState(s); setNames(ns); setNotes(texts); setStash(st);
+    setState(s); setNames(ns); setNotes(texts);setTags(catalogs); setStash(st);
     const d = draftRef.current;
     if (d && !s.vaults.some(v => v.header.id === d.vault && v.key && !v.deleted)) {
       if (d.dirty) await flush(); showDraft(null); setStatus('Хранилище закрыто или удалено. Черновик сохранён зашифрованным; стеш используется только при удалении источника.');
@@ -72,12 +79,14 @@ export function Planner({ user,reminderTarget,onReminderHandled }: { user: User;
     const task = (saving.current ?? Promise.resolve()).catch(() => {}).then(async () => {
       while (draftRef.current?.dirty) {
       const snapshot = { ...draftRef.current };
-       const result = await saveNote(user, snapshot.vault, snapshot.object, snapshot.revision,
+      const result = await saveNote(user, snapshot.vault, snapshot.object, snapshot.revision,
         { title: snapshot.title, text: snapshot.text,...(snapshot.html!==undefined?{html:snapshot.html}:{}),
-          ...(snapshot.attachments?.length?{attachments:snapshot.attachments}:{}),...(snapshot.reminder?{reminder:snapshot.reminder}:{}) }, snapshot.key);
+          ...(snapshot.attachments?.length?{attachments:snapshot.attachments}:{}),...(snapshot.checklist?.length?{checklist:snapshot.checklist}:{}),
+          ...(snapshot.tagIds?.length?{tagIds:snapshot.tagIds}:{}),...(snapshot.pinned?{pinned:true}:{}),...(snapshot.reminder?{reminder:snapshot.reminder}:{}) }, snapshot.key);
       const latest = draftRef.current;
       if (latest && latest.object === snapshot.object) {
-        const unchanged = latest.title === snapshot.title && latest.text === snapshot.text&&JSON.stringify(latest.reminder)===JSON.stringify(snapshot.reminder);
+        const comparable=(value:Note)=>JSON.stringify({title:value.title,text:value.text,html:value.html,attachments:value.attachments??[],checklist:value.checklist??[],tagIds:value.tagIds??[],pinned:Boolean(value.pinned),reminder:value.reminder});
+        const unchanged = comparable(latest)===comparable(snapshot);
         showDraft({ ...latest, revision: result.id, dirty: !unchanged });
       }
       setStatus(result.stashed ? 'Хранилище недоступно. Заметка сохранена в стеше.' : 'Сохранено на устройстве · ожидает синхронизации');
@@ -151,9 +160,9 @@ export function Planner({ user,reminderTarget,onReminderHandled }: { user: User;
     if (timer.current) clearTimeout(timer.current);
     timer.current = setTimeout(() => { void flush().catch(() => setError('Не удалось сохранить. Не закрывайте страницу; повторите сохранение.')); }, 350);
   }
-  function changeContent(patch:Pick<Note,'text'|'html'>|{attachments:NonNullable<Note['attachments']>}){
+  function changeContent(patch:Partial<Pick<Note,'text'|'html'|'attachments'|'checklist'|'tagIds'|'pinned'>>){
     const d=draftRef.current;if(!d)return;const next={...d,...patch,dirty:true};
-    if(new TextEncoder().encode(JSON.stringify({title:next.title,text:next.text,html:next.html,attachments:next.attachments,reminder:next.reminder})).length>900*1024){
+    if(new TextEncoder().encode(JSON.stringify({title:next.title,text:next.text,html:next.html,attachments:next.attachments,checklist:next.checklist,tagIds:next.tagIds,pinned:next.pinned,reminder:next.reminder})).length>900*1024){
       setError('Заметка достигла локального лимита 900 КБ. Удалите часть текста или вложений.');return;
     }
     showDraft(next);setError('');setStatus('Сохраняем…');if(timer.current)clearTimeout(timer.current);
@@ -178,6 +187,29 @@ export function Planner({ user,reminderTarget,onReminderHandled }: { user: User;
   function editRevision(current:NonNullable<State['vaults'][number]>,revision:ReturnType<typeof heads>[number]){
     openRevision(current,revision);const value=notes[revision.id];if(!value||!current.key)return;
     showDraft({...value,vault:current.header.id,object:revision.objectId,revision:revision.id,dirty:false,key:current.key});
+  }
+  function activeTags(vid:string){return (tags[vid]??[]).filter(tag=>!tag.deleted);}
+  function tagChips(vid:string,ids:string[]|undefined){const byId=new Map(activeTags(vid).map(tag=>[tag.id,tag]));return (ids??[]).map(tagId=>byId.get(tagId)).filter((tag):tag is TagDefinition=>Boolean(tag));}
+  async function duplicate(current:NonNullable<State['vaults'][number]>,revision:string){
+    await flush();await copyNote(user,current.header.id,revision);showViewing(null);setMenuOpen(false);setStatus('Копия создана и сохранена на устройстве.');void sync();
+  }
+  async function updateViewing(patch:Partial<Note>){
+    const current=viewingRef.current;if(!current)return;showDraft({...current,...patch,dirty:true});await flush();const saved=draftRef.current;
+    if(saved?.revision)showViewing({...saved,revision:saved.revision});showDraft(null);void sync();
+  }
+  function checklistEditor(){
+    if(!draft)return null;const items=draft.checklist??[];
+    const replace=(next:NonNullable<Note['checklist']>)=>changeContent({checklist:next});
+    const reorder=(index:number,target:number)=>{if(index===target||index<0||target<0||index>=items.length||target>=items.length)return;const next=[...items],[item]=next.splice(index,1);next.splice(target,0,item);replace(next);};
+    const move=(index:number,delta:number)=>reorder(index,index+delta);
+    return e('section',{class:'checklist-editor'},e('div',{class:'section-heading'},e('h2',null,'Чек-лист'),items.some(item=>item.done)&&e('button',{onClick:()=>setHideCompleted(!hideCompleted)},hideCompleted?'Показать выполненные':'Скрыть выполненные')),
+      items.map((item,index)=>hideCompleted&&item.done?null:e('div',{class:'checklist-row',key:item.id,onDragOver:(ev:DragEvent)=>ev.preventDefault(),onDrop:(ev:DragEvent)=>{ev.preventDefault();if(draggedChecklistItem.current!==null)reorder(draggedChecklistItem.current,index);draggedChecklistItem.current=null;}},
+        e('input',{type:'checkbox',checked:item.done,'aria-label':'Выполнено',onChange:(ev:Event)=>replace(items.map(current=>current.id===item.id?{...current,done:(ev.target as HTMLInputElement).checked}:current))}),
+        e('button',{class:'drag-handle',draggable:true,'aria-label':'Перетащить пункт',onDragStart:(ev:DragEvent)=>{draggedChecklistItem.current=index;if(ev.dataTransfer)ev.dataTransfer.effectAllowed='move';},onDragEnd:()=>{draggedChecklistItem.current=null;}},'⋮⋮'),
+        e('input',{value:item.text,maxLength:1000,placeholder:'Пункт списка',onInput:(ev:Event)=>replace(items.map(current=>current.id===item.id?{...current,text:(ev.target as HTMLInputElement).value}:current))}),
+        e('button',{disabled:index===0,'aria-label':'Поднять пункт',onClick:()=>move(index,-1)},'↑'),e('button',{disabled:index===items.length-1,'aria-label':'Опустить пункт',onClick:()=>move(index,1)},'↓'),
+        e('button',{class:'icon-danger','aria-label':'Удалить пункт',onClick:()=>replace(items.filter(current=>current.id!==item.id))},'×'))),
+      e('button',{onClick:()=>replace([...items,{id:crypto.randomUUID(),text:'',done:false}])},'+ Добавить пункт'));
   }
   async function finishEditing(){
     await flush();const saved=draftRef.current;
@@ -245,10 +277,17 @@ export function Planner({ user,reminderTarget,onReminderHandled }: { user: User;
       draft.reminder&&e('button',{class:'danger-button',disabled:busy,onClick:()=>void run(async()=>{changeReminder(undefined);setScreen('list');await flush();void sync();})},'Удалить напоминание'));
   }
   if(viewing&&!draft)return e('section',{class:'card note-view'},
-    e('div',{class:'actions note-view-actions'},e('button',{onClick:()=>showViewing(null)},'Назад'),e('button',{class:'primary',onClick:()=>showDraft({...viewing,dirty:false})},'Редактировать')),
+    e('div',{class:'actions note-view-actions'},e('button',{onClick:()=>{showViewing(null);setMenuOpen(false);}},'Назад'),
+      e('div',{class:'actions compact'},e('button',{onClick:()=>setMenuOpen(!menuOpen),'aria-expanded':menuOpen},'Действия'),e('button',{class:'primary',onClick:()=>showDraft({...viewing,dirty:false})},'Редактировать'))),
+    menuOpen&&e('div',{class:'note-action-menu',role:'menu'},
+      e('button',{onClick:()=>{setMenuOpen(false);void run(()=>updateViewing({pinned:!viewing.pinned}));}},viewing.pinned?'Открепить':'Закрепить'),
+      e('button',{onClick:()=>showDraft({...viewing,dirty:false})},'Изменить теги'),
+      e('button',{disabled:busy,onClick:()=>{const current=state?.vaults.find(item=>item.header.id===viewing.vault);if(current)void run(()=>duplicate(current,viewing.revision));}},'Создать копию')),
     e('h1',null,viewing.title||'Без заголовка'),
+    tagChips(viewing.vault,viewing.tagIds).length>0&&e('div',{class:'tag-list'},tagChips(viewing.vault,viewing.tagIds).map(tag=>e('span',{class:'tag-chip',style:{'--tag-color':tag.color},key:tag.id},tag.name))),
     viewing.html?e('div',{class:'note-view-text rich-note-content',dangerouslySetInnerHTML:{__html:sanitizeNoteHtml(viewing.html)}})
       :viewing.text?e('div',{class:'note-view-text'},viewing.text):e('p',{class:'muted'},'В заметке пока нет текста.'),
+    Boolean(viewing.checklist?.length)&&e('section',{class:'checklist-view'},e('h2',null,'Чек-лист'),viewing.checklist!.map(item=>e('label',{class:'checklist-view-row',key:item.id},e('input',{type:'checkbox',checked:item.done,disabled:busy,onChange:(ev:Event)=>void run(()=>updateViewing({checklist:viewing.checklist!.map(current=>current.id===item.id?{...current,done:(ev.target as HTMLInputElement).checked}:current)}))}),e('span',{class:item.done?'completed':''},item.text||'Пустой пункт')))),
     e(Attachments,{items:viewing.attachments??[]}),
     viewing.reminder&&e('section',{class:'reminder-card'},e('h2',null,'Напоминание'),
       e('p',null,new Date(viewing.reminder.local+'Z').toLocaleString('ru-RU',{timeZone:'UTC'}),' · ',
@@ -261,6 +300,11 @@ export function Planner({ user,reminderTarget,onReminderHandled }: { user: User;
     e('label',{class:'editor-label'},'Текст заметки'),
     e(RichTextEditor,{key:draft.object,html:draft.html,text:draft.text,attachments:draft.attachments??[],
       onChange:(html:string,text:string)=>changeContent({html,text}),onAttachmentsChange:(attachments:NonNullable<Note['attachments']>)=>changeContent({attachments}),onError:setError}),
+    checklistEditor(),
+    e('section',{class:'note-tags'},e('div',{class:'section-heading'},e('h2',null,'Теги'),e('button',{onClick:()=>void run(async()=>{await flush();showDraft(null);showViewing(null);setScreen('tags');})},'Редактировать список')),
+      e('div',{class:'tag-picker'},activeTags(draft.vault).map(tag=>e('label',{class:'tag-choice',key:tag.id},e('input',{type:'checkbox',checked:(draft.tagIds??[]).includes(tag.id),onChange:(ev:Event)=>{
+        const checked=(ev.target as HTMLInputElement).checked,current=draftRef.current?.tagIds??[];changeContent({tagIds:checked?[...current,tag.id]:current.filter(id=>id!==tag.id)});}}),e('span',{class:'tag-chip',style:{'--tag-color':tag.color}},tag.name))))),
+    e('label',{class:'check-row pin-control'},e('input',{type:'checkbox',checked:Boolean(draft.pinned),onChange:(ev:Event)=>changeContent({pinned:(ev.target as HTMLInputElement).checked})}),'Закрепить заметку'),
     e('section',{class:'reminder-card'},e('h2',null,'Напоминание'),draft.reminder?
       e('div',null,e('p',null,new Date(draft.reminder.local+'Z').toLocaleString('ru-RU',{timeZone:'UTC'}),' · ',
         draft.reminder.state==='active'?'Активно':draft.reminder.state==='done'?'Выполнено':'Выключено'),
@@ -308,10 +352,36 @@ export function Planner({ user,reminderTarget,onReminderHandled }: { user: User;
         e('span',null,new Date(item.local_at+'Z').toLocaleString('ru-RU',{timeZone:'UTC'})),e('small',null,item.paused?'Приостановлено из-за конфликта':item.seen_at?'Открыто':item.plan_state==='active'?'Активно':'Выключено'),
         state?.vaults.some(v=>v.header.id===item.vault_id&&!v.deleted&&!v.key)&&e('button',{onClick:()=>form('open',item.vault_id)},'Открыть хранилище'))),feedback);
   }
+  if(screen==='tags'&&v?.key){const catalog=activeTags(v.header.id);return e('section',{class:'card planner tag-manager'},
+    e('button',{onClick:()=>{setScreen('list');setEditingTag('');setTagName('');}},'Назад'),e('h1',null,'Теги хранилища'),
+    e('p',{class:'hint'},'Названия и цвета тегов зашифрованы вместе с хранилищем. Удалённый тег исчезнет из заметок, но сами заметки сохранятся.'),
+    e('form',{class:'tag-form',onSubmit:(event:Event)=>{event.preventDefault();void run(async()=>{if(editingTag)await renameTag(user,selected,editingTag,tagName,tagColor);else await createTag(user,selected,tagName,tagColor);setTagName('');setEditingTag('');void sync();});}},
+      e('label',null,editingTag?'Название тега':'Новый тег',e('input',{required:true,maxLength:60,value:tagName,onInput:(ev:Event)=>setTagName((ev.target as HTMLInputElement).value)})),
+      e('label',null,'Цвет',e('input',{type:'color',value:tagColor,onInput:(ev:Event)=>setTagColor((ev.target as HTMLInputElement).value)})),
+      e('button',{class:'primary',disabled:busy},editingTag?'Сохранить':'Добавить'),editingTag&&e('button',{type:'button',onClick:()=>{setEditingTag('');setTagName('');}},'Отмена')),
+    catalog.map(tag=>{const count=heads(v).filter(r=>(notes[r.id]?.tagIds??[]).includes(tag.id)).length;return e('div',{class:'tag-manage-row',key:tag.id},
+      e('span',{class:'tag-chip',style:{'--tag-color':tag.color}},tag.name),e('small',null,count+' заметок'),
+      e('button',{onClick:()=>{setEditingTag(tag.id);setTagName(tag.name);setTagColor(tag.color);}},'Изменить'),
+      e('button',{class:'icon-danger',onClick:()=>{if(confirm('Удалить тег «'+tag.name+'»? Заметки останутся на месте.'))void run(async()=>{await deleteTag(user,selected,tag.id);setSelectedTags(current=>current.filter(id=>id!==tag.id));void sync();});}},'Удалить'));}),feedback);
+  }
+  const normalizedQuery=query.trim().toLocaleLowerCase('ru');
+  const candidates=(normalizedQuery?(state?.vaults??[]).filter(current=>current.key&&!current.deleted&&!current.transfer):v?.key?[v]:[]).flatMap(current=>
+    heads(current).map(revision=>({current,revision,note:notes[revision.id]})).filter(item=>Boolean(item.note)));
+  const visibleItems=candidates.filter(({current,note})=>{
+    if(normalizedQuery){const tagText=tagChips(current.header.id,note!.tagIds).map(tag=>tag.name).join(' '),checklist=(note!.checklist??[]).map(item=>item.text).join(' ');
+      if(![note!.title,note!.text,checklist,tagText].join('\n').toLocaleLowerCase('ru').includes(normalizedQuery))return false;}
+    if(quickFilter==='pinned'&&!note!.pinned||quickFilter==='untagged'&&(note!.tagIds??[]).some(id=>activeTags(current.header.id).some(tag=>tag.id===id))||quickFilter==='reminder'&&!note!.reminder)return false;
+    return (!selectedTags.length||current.header.id===selected)&&selectedTags.every(tagId=>(note!.tagIds??[]).includes(tagId));
+  }).sort((a,b)=>Number(Boolean(b.note!.pinned))-Number(Boolean(a.note!.pinned))||(sort==='title'?a.note!.title.localeCompare(b.note!.title,'ru'):sort==='oldest'?(a.note!.author?.time??0)-(b.note!.author?.time??0):(b.note!.author?.time??0)-(a.note!.author?.time??0)));
   return e('section', { class: 'card planner' },
     e('div', { class: 'card-heading' }, e('h1', null, 'Заметки'), e('button', { disabled: busy, onClick: () => void run(sync) }, 'Синхронизировать')),
     e('label', null, 'Хранилище', e('select', { value: selected, onChange: (ev: Event) => select((ev.target as HTMLSelectElement).value) },
       e('option', { value: '' }, 'Выберите хранилище'), active.map(v => e('option', { value: v.header.id, key: v.header.id }, names[v.header.id] || 'Хранилище')))),
+    e('div',{class:'organization-tools'},e('label',{class:'search-field'},'Поиск во всех открытых хранилищах',e('input',{type:'search',value:query,placeholder:'Заголовок, текст, пункт или тег',onInput:(ev:Event)=>setQuery((ev.target as HTMLInputElement).value)})),
+      e('label',null,'Сортировка',e('select',{value:sort,onChange:(ev:Event)=>setSort((ev.target as HTMLSelectElement).value as typeof sort)},e('option',{value:'newest'},'Сначала новые'),e('option',{value:'oldest'},'Сначала старые'),e('option',{value:'title'},'По заголовку')))),
+    v?.key&&e('div',{class:'filters'},e('div',{class:'quick-filters'},([['all','Все'],['pinned','Закреплённые'],['untagged','Без тегов'],['reminder','С напоминанием']] as const).map(([value,label])=>e('button',{class:quickFilter===value?'filter-chip selected':'filter-chip','aria-pressed':quickFilter===value,onClick:()=>setQuickFilter(value)},label))),
+      e('div',{class:'tag-filter'},activeTags(v.header.id).map(tag=>e('button',{key:tag.id,class:selectedTags.includes(tag.id)?'tag-chip selected':'tag-chip',style:{'--tag-color':tag.color},'aria-pressed':selectedTags.includes(tag.id),onClick:()=>setSelectedTags(current=>current.includes(tag.id)?current.filter(id=>id!==tag.id):[...current,tag.id])},tag.name)),
+        e('button',{onClick:()=>setScreen('tags')},'Управлять тегами'))),
     e('div', { class: 'actions' }, e('button', { disabled: busy, onClick: () => form('create') }, '+ Хранилище'),
       e('button',{disabled:busy,onClick:()=>{setScreen('schedule');void reminderRequest(user,'').then(value=>setServerReminders(value.items)).catch(()=>{});}},'Сегодня'),
       e('button', { onClick: () => setScreen('stash') }, 'Отложенные заметки (' + (state?.stash.length ?? 0) + ')'),
@@ -331,15 +401,18 @@ export function Planner({ user,reminderTarget,onReminderHandled }: { user: User;
       e('div', { class: 'actions' }, e('button', { disabled: busy || Boolean(v.transfer), onClick: () => void run(() => closeVault(user, selected)) }, 'Закрыть хранилище'),
         e('button', { disabled: busy || Boolean(v.transfer), onClick: () => form('transfer', selected) }, 'Забыл фразу · перенести')),
       v.transfer && e('p', { class: 'auth-notice' }, 'Перенос подготовлен. Подключитесь к сети и завершите синхронизацию. Исходник сохранён до подтверждения.'),
-      !heads(v).length && e('div', { class: 'empty-state' }, e('h2', null, 'Пока нет заметок'), e('p', null, 'Создайте первую заметку')),
+      !heads(v).length && !normalizedQuery&&e('div', { class: 'empty-state' }, e('h2', null, 'Пока нет заметок'), e('p', null, 'Создайте первую заметку')),
+      heads(v).length>0&&!visibleItems.length&&e('div',{class:'empty-state'},e('h2',null,'Ничего не найдено'),e('p',null,'Измените запрос или сбросьте фильтры.'),e('button',{onClick:()=>{setQuery('');setSelectedTags([]);setQuickFilter('all');}},'Сбросить фильтры')),
       [...new Set(heads(v).map(r=>r.objectId))].filter(objectId=>heads(v).filter(r=>r.objectId===objectId).length>1).map(objectId=>
         e('button',{disabled:busy||Boolean(v.transfer),onClick:()=>{const versions=heads(v).filter(r=>r.objectId===objectId).map(r=>r.id);
           setComparison({objectId,versions,chosen:versions[0]});setScreen('conflict');}},'Сравнить версии: '+(notes[heads(v).find(r=>r.objectId===objectId)!.id]?.title||'Без заголовка'))),
-      heads(v).map(r => e('div',{class:'note-list-item',key:r.id},e('button', { class: 'note-row', disabled: Boolean(v.transfer), onClick: () => openRevision(v,r) },
-        e('strong', null, notes[r.id]?.title || 'Без заголовка'), e('span', { class: 'note-preview' }, notes[r.id]?.text.slice(0, 140)),
-        notes[r.id]?.reminder&&e('small',null,'Напоминание: '+new Date(notes[r.id].reminder!.local+'Z').toLocaleString('ru-RU',{timeZone:'UTC'})),
+      visibleItems.map(({current,revision:r,note}) => e('div',{class:'note-list-item',key:current.header.id+'.'+r.id},e('button', { class:'note-row'+(note!.pinned?' pinned':''), disabled: Boolean(current.transfer), onClick: () => openRevision(current,r) },
+        e('strong', null,note!.pinned?'📌 '+(note!.title||'Без заголовка'):note!.title||'Без заголовка'),normalizedQuery&&e('small',null,names[current.header.id]||'Хранилище'), e('span', { class: 'note-preview' }, note!.text.slice(0, 140)),
+        tagChips(current.header.id,note!.tagIds).length>0&&e('span',{class:'tag-list'},tagChips(current.header.id,note!.tagIds).map(tag=>e('span',{class:'tag-chip',style:{'--tag-color':tag.color},key:tag.id},tag.name))),
+        note!.checklist?.length&&e('small',null,'Чек-лист: '+note!.checklist.filter(item=>item.done).length+' / '+note!.checklist.length),
+        note!.reminder&&e('small',null,'Напоминание: '+new Date(note!.reminder.local+'Z').toLocaleString('ru-RU',{timeZone:'UTC'})),
         e('small', null, r.pending ? 'Сохранено на устройстве' : 'Синхронизировано'),
-        heads(v).filter(x => x.objectId === r.objectId).length > 1 && e('small', null, 'Есть другая версия — обе сохранены')),
-        e('button',{class:'row-edit-button',disabled:Boolean(v.transfer),onClick:()=>editRevision(v,r),'aria-label':'Редактировать заметку «'+(notes[r.id]?.title||'Без заголовка')+'»'},'Редактировать'))),
+        heads(current).filter(x => x.objectId === r.objectId).length > 1 && e('small', null, 'Есть другая версия — обе сохранены')),
+        e('button',{class:'row-edit-button',disabled:Boolean(current.transfer),onClick:()=>editRevision(current,r),'aria-label':'Редактировать заметку «'+(note!.title||'Без заголовка')+'»'},'Редактировать'))),
       e('button', { class: 'primary', disabled: busy || Boolean(v.transfer), onClick: () => { if (v.key) showDraft({ vault: selected, object: crypto.randomUUID(), revision: null, title: '', text: '', dirty: false, key: v.key }); } }, '+ Новая заметка'))), feedback);
 }
