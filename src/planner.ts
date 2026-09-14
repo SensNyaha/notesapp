@@ -7,18 +7,31 @@ import { createAccess, signAccess } from './crypto/access.ts';
 import { validPlan } from '../shared/reminders.mjs';
 import type { ReminderPlan } from '../shared/reminders.mjs';
 import { reminderRequest } from './reminders.ts';
-export interface Note { title: string; text: string; reminder?:ReminderPlan; author?:{name:string;time:number} }
+export interface NoteAttachment { id:string;name:string;type:string;size:number;data:string }
+export interface Note { title: string; text: string; html?:string;attachments?:NoteAttachment[];reminder?:ReminderPlan; author?:{name:string;time:number} }
 const id = () => crypto.randomUUID();
 export const heads = (v: Vault) => { const parents = new Set(v.records.flatMap(r => [r.parent,...(r.resolves??[])])); return v.records.filter(r => !parents.has(r.id)); };
 export const context = (user: string, v: Header, objectId: string, revisionId: string): Context =>
   ({ accountId: user, vaultId: v.id, keyId: v.keyId, objectId, revisionId });
+function validAttachment(item:unknown):item is NoteAttachment{
+  return Boolean(item&&typeof item==='object'&&'id'in item&&typeof item.id==='string'
+    &&'name'in item&&typeof item.name==='string'&&item.name.length<=200&&'type'in item&&typeof item.type==='string'&&item.type.length<=100
+    &&'size'in item&&typeof item.size==='number'&&Number.isSafeInteger(item.size)&&item.size>=0&&item.size<=512*1024&&'data'in item&&typeof item.data==='string'
+    &&item.data.length<=700000&&/^data:[^;,]{1,100};base64,[A-Za-z0-9+/=]+$/.test(item.data));
+}
 function note(value: unknown): Note {
   if (!value || typeof value !== 'object' || !('title' in value) || typeof value.title !== 'string'
     || !('text' in value) || typeof value.text !== 'string') throw Error('Повреждённая заметка');
   const author='author' in value?value.author:undefined;
   const reminder='reminder'in value?value.reminder:undefined;
+  const html='html'in value?value.html:undefined;
+  const attachments='attachments'in value?value.attachments:undefined;
   if(reminder!==undefined&&!validPlan(reminder))throw Error('Повреждено напоминание');
-  return { title: value.title, text: value.text, ...(reminder?{reminder}:{}), ...(author&&typeof author==='object'&&'name'in author&&typeof author.name==='string'&&'time'in author&&Number.isSafeInteger(author.time)
+  if(html!==undefined&&typeof html!=='string')throw Error('Повреждено форматирование заметки');
+  if(attachments!==undefined&&(!Array.isArray(attachments)||attachments.length>15||!attachments.every(validAttachment)
+    ||attachments.reduce((sum,item)=>sum+item.size,0)>512*1024))throw Error('Повреждены вложения заметки');
+  return { title: value.title, text: value.text, ...(html!==undefined?{html}:{}), ...(attachments?{attachments:attachments as NoteAttachment[]}:{}),
+    ...(reminder?{reminder}:{}), ...(author&&typeof author==='object'&&'name'in author&&typeof author.name==='string'&&'time'in author&&Number.isSafeInteger(author.time)
     ?{author:author as {name:string;time:number}}:{}) };
 }
 export async function readNote(user: string, v: Vault, r: Revision): Promise<Note> {

@@ -8,8 +8,10 @@ import { createVault, openVault, closeVault, saveNote, readNote, vaultName, head
 import { localTime } from '../../shared/reminders.mjs';
 import type { ReminderPlan } from '../../shared/reminders.mjs';
 import { reminderRequest, type ReminderStatus, type ReminderTarget } from '../reminders';
+import { Attachments, RichTextEditor, sanitizeNoteHtml } from './RichTextEditor';
 
 interface Draft extends Note { vault: string; object: string; revision: string | null; dirty: boolean; key: CryptoKey }
+interface OpenedNote extends Note { vault: string; object: string; revision: string; key: CryptoKey }
 export function Planner({ user,reminderTarget,onReminderHandled }: { user: User;reminderTarget?:ReminderTarget;onReminderHandled:()=>void }) {
   const [state, setState] = useState<State>();
   const [names, setNames] = useState<Record<string, string>>({});
@@ -31,9 +33,10 @@ export function Planner({ user,reminderTarget,onReminderHandled }: { user: User;
   const [confirmed, setConfirmed] = useState(false);
   const [target, setTarget] = useState('');
   const [draft, setDraft] = useState<Draft | null>(null); const draftRef = useRef<Draft | null>(null);
+  const [viewing,setViewing]=useState<OpenedNote|null>(null);const viewingRef=useRef<OpenedNote|null>(null);
   const zone=Intl.DateTimeFormat().resolvedOptions().timeZone||'UTC';
   const [reminderDate,setReminderDate]=useState(''),[reminderClock,setReminderClock]=useState('');
-  const [reminderMode,setReminderMode]=useState<'neutral'|'custom'>('neutral'),[reminderText,setReminderText]=useState('');
+  const [reminderMode,setReminderMode]=useState<'neutral'|'custom'|'title'>('neutral'),[reminderText,setReminderText]=useState('');
   const [reminderConsent,setReminderConsent]=useState(false);
   const [serverReminders,setServerReminders]=useState<ReminderStatus[]>([]);
   const [status, setStatus] = useState(''); const [error, setError] = useState(''); const [busy, setBusy] = useState(false);
@@ -41,6 +44,7 @@ export function Planner({ user,reminderTarget,onReminderHandled }: { user: User;
   const syncRunning = useRef(false), alive = useRef(true), generation = useRef(0);
   const acknowledgedTarget=useRef('');
   function showDraft(d: Draft | null) { draftRef.current = d; setDraft(d); }
+  function showViewing(note:OpenedNote|null){viewingRef.current=note;setViewing(note);}
   async function load() {
     const g = ++generation.current, s = await readState(user.id);
     if (!s) { if (alive.current && g === generation.current) { setState(undefined); setNames({}); setNotes({}); setStash({}); showDraft(null); } return; }
@@ -60,14 +64,17 @@ export function Planner({ user,reminderTarget,onReminderHandled }: { user: User;
     if (d && !s.vaults.some(v => v.header.id === d.vault && v.key && !v.deleted)) {
       if (d.dirty) await flush(); showDraft(null); setStatus('Хранилище закрыто или удалено. Черновик сохранён зашифрованным; стеш используется только при удалении источника.');
     }
+    const opened=viewingRef.current;
+    if(opened&&!s.vaults.some(v=>v.header.id===opened.vault&&v.key&&!v.deleted))showViewing(null);
   }
   async function flush() {
     if (timer.current) clearTimeout(timer.current);
     const task = (saving.current ?? Promise.resolve()).catch(() => {}).then(async () => {
       while (draftRef.current?.dirty) {
       const snapshot = { ...draftRef.current };
-      const result = await saveNote(user, snapshot.vault, snapshot.object, snapshot.revision,
-        { title: snapshot.title, text: snapshot.text,...(snapshot.reminder?{reminder:snapshot.reminder}:{}) }, snapshot.key);
+       const result = await saveNote(user, snapshot.vault, snapshot.object, snapshot.revision,
+        { title: snapshot.title, text: snapshot.text,...(snapshot.html!==undefined?{html:snapshot.html}:{}),
+          ...(snapshot.attachments?.length?{attachments:snapshot.attachments}:{}),...(snapshot.reminder?{reminder:snapshot.reminder}:{}) }, snapshot.key);
       const latest = draftRef.current;
       if (latest && latest.object === snapshot.object) {
         const unchanged = latest.title === snapshot.title && latest.text === snapshot.text&&JSON.stringify(latest.reminder)===JSON.stringify(snapshot.reminder);
@@ -118,13 +125,13 @@ export function Planner({ user,reminderTarget,onReminderHandled }: { user: User;
     const versions=heads(targetVault).filter(r=>r.objectId===reminderTarget.objectId);
     if(versions.length>1){setComparison({objectId:reminderTarget.objectId,versions:versions.map(r=>r.id),chosen:versions[0].id});setScreen('conflict');onReminderHandled();return;}
     const revision=versions[0],value=revision&&notes[revision.id];
-    if(value){showDraft({...value,vault:targetVault.header.id,object:revision.objectId,revision:revision.id,dirty:false,key:targetVault.key});setScreen('list');onReminderHandled();}
+    if(value){showDraft(null);showViewing({...value,vault:targetVault.header.id,object:revision.objectId,revision:revision.id,key:targetVault.key});setScreen('list');onReminderHandled();}
     else{setStatus('Заметка из уведомления загружается.');void sync();}
   },[reminderTarget?.configId,state,notes,selected,screen]);
   const v = state?.vaults.find(v => v.header.id === selected);
   const active = state?.vaults.filter(v => !v.deleted) ?? [];
   const opened = active.filter(v => v.key && !v.transfer);
-  function form(next: typeof screen, vid = '') { select(vid); setName(''); setPhrase(''); setRepeat(''); setPassword(''); setConfirmed(false); setError(''); setScreen(next); }
+  function form(next: typeof screen, vid = '') { showViewing(null);select(vid); setName(''); setPhrase(''); setRepeat(''); setPassword(''); setConfirmed(false); setError(''); setScreen(next); }
   async function submit(event: Event) {
     event.preventDefault(); await run(async () => {
       if (screen === 'open') await openVault(user, selected, phrase);
@@ -138,9 +145,19 @@ export function Planner({ user,reminderTarget,onReminderHandled }: { user: User;
   }
   function change(field: 'title' | 'text', value: string) {
     const d = draftRef.current; if (!d) return;
-    showDraft({ ...d, [field]: value, dirty: true }); setStatus('Сохраняем…');
+    const reminder=field==='title'&&d.reminder?.mode==='title'
+      ?{...d.reminder,id:crypto.randomUUID(),text:Array.from(value).slice(0,200).join('')}:d.reminder;
+    showDraft({ ...d, [field]: value,...(reminder?{reminder}:{}),dirty: true }); setStatus('Сохраняем…');
     if (timer.current) clearTimeout(timer.current);
     timer.current = setTimeout(() => { void flush().catch(() => setError('Не удалось сохранить. Не закрывайте страницу; повторите сохранение.')); }, 350);
+  }
+  function changeContent(patch:Pick<Note,'text'|'html'>|{attachments:NonNullable<Note['attachments']>}){
+    const d=draftRef.current;if(!d)return;const next={...d,...patch,dirty:true};
+    if(new TextEncoder().encode(JSON.stringify({title:next.title,text:next.text,html:next.html,attachments:next.attachments,reminder:next.reminder})).length>900*1024){
+      setError('Заметка достигла локального лимита 900 КБ. Удалите часть текста или вложений.');return;
+    }
+    showDraft(next);setError('');setStatus('Сохраняем…');if(timer.current)clearTimeout(timer.current);
+    timer.current=setTimeout(()=>{void flush().catch(()=>setError('Не удалось сохранить. Не закрывайте страницу; повторите сохранение.'));},350);
   }
   function changeReminder(plan:ReminderPlan|undefined){
     const d=draftRef.current;if(!d)return;
@@ -155,8 +172,18 @@ export function Planner({ user,reminderTarget,onReminderHandled }: { user: User;
   }
   function openRevision(current:NonNullable<State['vaults'][number]>,revision:ReturnType<typeof heads>[number]){
     const value=notes[revision.id];if(!value||!current.key)return;
-    showDraft({...value,vault:current.header.id,object:revision.objectId,revision:revision.id,dirty:false,key:current.key});
+    showDraft(null);showViewing({...value,vault:current.header.id,object:revision.objectId,revision:revision.id,key:current.key});
     if(value.reminder)void acknowledgeReminder(user,{vaultId:current.header.id,objectId:revision.objectId,configId:value.reminder.id});
+  }
+  function editRevision(current:NonNullable<State['vaults'][number]>,revision:ReturnType<typeof heads>[number]){
+    openRevision(current,revision);const value=notes[revision.id];if(!value||!current.key)return;
+    showDraft({...value,vault:current.header.id,object:revision.objectId,revision:revision.id,dirty:false,key:current.key});
+  }
+  async function finishEditing(){
+    await flush();const saved=draftRef.current;
+    if(saved?.revision)showViewing({...saved,vault:saved.vault,object:saved.object,revision:saved.revision,key:saved.key});
+    else showViewing(null);
+    showDraft(null);void sync();
   }
   const feedback = e('div', { 'aria-live': 'polite' }, error && e('p', { class: 'error', role: 'alert' }, error),
     status && e('p', { class: 'hint' }, status));
@@ -195,32 +222,49 @@ export function Planner({ user,reminderTarget,onReminderHandled }: { user: User;
       e('form',{onSubmit:(event:Event)=>{event.preventDefault();void run(async()=>{
         const local=reminderDate+'T'+reminderClock;
         if(!/^\d{4}-\d\d-\d\dT\d\d:\d\d$/.test(local))throw Error('Укажите дату и время');
-        if(reminderMode==='custom'&&!reminderConsent)throw Error('Подтвердите отправку собственного текста через push-службу');
-        if(reminderMode==='custom'&&(!reminderText.trim()||Array.from(reminderText).length>200))throw Error('Собственный текст: от 1 до 200 символов');
-        changeReminder({id:crypto.randomUUID(),state:'active',local,mode:reminderMode,text:reminderMode==='custom'?reminderText:''});
+        if(reminderMode!=='neutral'&&!reminderConsent)throw Error('Подтвердите отправку текста через push-службу');
+        const pushText=reminderMode==='title'?Array.from(draft.title).slice(0,200).join(''):reminderText;
+        if(reminderMode==='custom'&&(!pushText.trim()||Array.from(pushText).length>200))throw Error('Собственный текст: от 1 до 200 символов');
+        changeReminder({id:crypto.randomUUID(),state:'active',local,mode:reminderMode,text:reminderMode==='neutral'?'':pushText});
         setScreen('list');await flush();void sync();
       });}},
         e('div',{class:'reminder-fields'},e('label',null,'Дата',e('input',{type:'date',required:true,value:reminderDate,onInput:(ev:Event)=>setReminderDate((ev.target as HTMLInputElement).value)})),
           e('label',null,'Время',e('input',{type:'time',required:true,value:reminderClock,onInput:(ev:Event)=>setReminderClock((ev.target as HTMLInputElement).value)}))),
         e('fieldset',null,e('legend',null,'Текст уведомления'),
           e('label',{class:'check-row'},e('input',{type:'radio',name:'reminder-mode',checked:reminderMode==='neutral',onChange:()=>setReminderMode('neutral')}),'Нейтральный: «У вас запланировано напоминание»'),
-          e('label',{class:'check-row'},e('input',{type:'radio',name:'reminder-mode',checked:reminderMode==='custom',onChange:()=>setReminderMode('custom')}),'Свой текст')),
+          e('label',{class:'check-row'},e('input',{type:'radio',name:'reminder-mode',checked:reminderMode==='custom',onChange:()=>setReminderMode('custom')}),'Свой текст'),
+          e('button',{type:'button',class:reminderMode==='title'?'title-push-button selected':'title-push-button','aria-pressed':reminderMode==='title',
+            onClick:()=>{setReminderMode('title');setReminderText('');}},'Взять заголовок как текст сообщения')),
         reminderMode==='custom'&&e('div',null,e('label',null,'Текст push',e('textarea',{rows:3,maxLength:200,required:true,value:reminderText,onInput:(ev:Event)=>setReminderText((ev.target as HTMLTextAreaElement).value)})),
-          e('small',null,Array.from(reminderText).length+' / 200'),
-          e('label',{class:'check-row'},e('input',{type:'checkbox',checked:reminderConsent,required:true,onChange:(ev:Event)=>setReminderConsent((ev.target as HTMLInputElement).checked)}),'Разрешаю передать этот текст серверу и push-службе. Он не будет защищён ключом хранилища.')),
-        e('div',{class:'reminder-preview','aria-label':'Предпросмотр уведомления'},e('strong',null,'Tasks'),e('p',null,reminderMode==='custom'?(reminderText||'Введите свой текст'):'У вас запланировано напоминание')),
+          e('small',null,Array.from(reminderText).length+' / 200')),
+        reminderMode==='title'&&e('div',{class:'title-push-value'},e('strong',null,'Текущий текст push'),e('p',null,Array.from(draft.title).slice(0,200).join('')||'Сначала укажите заголовок заметки'),
+          Array.from(draft.title).length>200&&e('small',null,'В push попадут первые 200 символов. Текст будет обновляться вместе с заголовком.')),
+        reminderMode!=='neutral'&&e('label',{class:'check-row'},e('input',{type:'checkbox',checked:reminderConsent,required:true,onChange:(ev:Event)=>setReminderConsent((ev.target as HTMLInputElement).checked)}),'Разрешаю передать этот текст серверу и push-службе. Он не будет защищён ключом хранилища.'),
+        e('div',{class:'reminder-preview','aria-label':'Предпросмотр уведомления'},e('strong',null,'Tasks'),e('p',null,reminderMode==='custom'?(reminderText||'Введите свой текст'):reminderMode==='title'?(Array.from(draft.title).slice(0,200).join('')||'Сначала укажите заголовок заметки'):'У вас запланировано напоминание')),
         feedback,e('button',{class:'primary',disabled:busy,type:'submit'},busy?'Сохраняем…':'Сохранить напоминание')),
       draft.reminder&&e('button',{class:'danger-button',disabled:busy,onClick:()=>void run(async()=>{changeReminder(undefined);setScreen('list');await flush();void sync();})},'Удалить напоминание'));
   }
+  if(viewing&&!draft)return e('section',{class:'card note-view'},
+    e('div',{class:'actions note-view-actions'},e('button',{onClick:()=>showViewing(null)},'Назад'),e('button',{class:'primary',onClick:()=>showDraft({...viewing,dirty:false})},'Редактировать')),
+    e('h1',null,viewing.title||'Без заголовка'),
+    viewing.html?e('div',{class:'note-view-text rich-note-content',dangerouslySetInnerHTML:{__html:sanitizeNoteHtml(viewing.html)}})
+      :viewing.text?e('div',{class:'note-view-text'},viewing.text):e('p',{class:'muted'},'В заметке пока нет текста.'),
+    e(Attachments,{items:viewing.attachments??[]}),
+    viewing.reminder&&e('section',{class:'reminder-card'},e('h2',null,'Напоминание'),
+      e('p',null,new Date(viewing.reminder.local+'Z').toLocaleString('ru-RU',{timeZone:'UTC'}),' · ',
+        viewing.reminder.state==='active'?'Активно':viewing.reminder.state==='done'?'Выполнено':'Выключено'),
+      e('p',{class:'hint'},viewing.reminder.mode==='custom'?'Для push разрешён отдельный собственный текст.':viewing.reminder.mode==='title'?'Текст push автоматически повторяет заголовок заметки.':'Push не содержит названия хранилища и текста заметки.')));
   if (draft) return e('section', { class: 'card note-editor' },
-    e('div', { class: 'actions' }, e('button', { disabled: busy, onClick: () => void run(async () => { await flush(); showDraft(null); void sync(); }) }, 'Назад'),
-      e('button', { class: 'primary', disabled: busy, onClick: () => void run(async () => { await flush(); showDraft(null); void sync(); }) }, 'Готово')),
+    e('div', { class: 'actions' }, e('button', { disabled: busy, onClick: () => void run(finishEditing) }, 'Назад'),
+      e('button', { class: 'primary', disabled: busy, onClick: () => void run(finishEditing) }, 'Готово')),
     e('label', null, 'Заголовок', e('input', { value: draft.title, maxLength: 500, onInput: (ev: Event) => change('title', (ev.target as HTMLInputElement).value) })),
-    e('label', null, 'Текст заметки', e('textarea', { value: draft.text, rows: 16, onInput: (ev: Event) => change('text', (ev.target as HTMLTextAreaElement).value) })),
+    e('label',{class:'editor-label'},'Текст заметки'),
+    e(RichTextEditor,{key:draft.object,html:draft.html,text:draft.text,attachments:draft.attachments??[],
+      onChange:(html:string,text:string)=>changeContent({html,text}),onAttachmentsChange:(attachments:NonNullable<Note['attachments']>)=>changeContent({attachments}),onError:setError}),
     e('section',{class:'reminder-card'},e('h2',null,'Напоминание'),draft.reminder?
       e('div',null,e('p',null,new Date(draft.reminder.local+'Z').toLocaleString('ru-RU',{timeZone:'UTC'}),' · ',
         draft.reminder.state==='active'?'Активно':draft.reminder.state==='done'?'Выполнено':'Выключено'),
-        e('p',{class:'hint'},draft.reminder.mode==='custom'?'Push отправит сохранённый собственный текст.':'Push не содержит названия хранилища и текста заметки.'),
+        e('p',{class:'hint'},draft.reminder.mode==='custom'?'Push отправит сохранённый собственный текст.':draft.reminder.mode==='title'?'Текст push автоматически повторяет заголовок заметки.':'Push не содержит названия хранилища и текста заметки.'),
         e('div',{class:'actions compact'},e('button',{onClick:openReminderForm},'Изменить'),
           draft.reminder.state==='active'&&e('button',{disabled:busy,onClick:()=>void run(async()=>{changeReminder({...draft.reminder!,id:crypto.randomUUID(),state:'done'});await flush();void sync();})},'Выполнено')))
       :e('button',{onClick:openReminderForm},'Напомнить')),
@@ -290,10 +334,11 @@ export function Planner({ user,reminderTarget,onReminderHandled }: { user: User;
       [...new Set(heads(v).map(r=>r.objectId))].filter(objectId=>heads(v).filter(r=>r.objectId===objectId).length>1).map(objectId=>
         e('button',{disabled:busy||Boolean(v.transfer),onClick:()=>{const versions=heads(v).filter(r=>r.objectId===objectId).map(r=>r.id);
           setComparison({objectId,versions,chosen:versions[0]});setScreen('conflict');}},'Сравнить версии: '+(notes[heads(v).find(r=>r.objectId===objectId)!.id]?.title||'Без заголовка'))),
-      heads(v).map(r => e('button', { class: 'note-row', disabled: Boolean(v.transfer), key: r.id, onClick: () => openRevision(v,r) },
+      heads(v).map(r => e('div',{class:'note-list-item',key:r.id},e('button', { class: 'note-row', disabled: Boolean(v.transfer), onClick: () => openRevision(v,r) },
         e('strong', null, notes[r.id]?.title || 'Без заголовка'), e('span', { class: 'note-preview' }, notes[r.id]?.text.slice(0, 140)),
         notes[r.id]?.reminder&&e('small',null,'Напоминание: '+new Date(notes[r.id].reminder!.local+'Z').toLocaleString('ru-RU',{timeZone:'UTC'})),
         e('small', null, r.pending ? 'Сохранено на устройстве' : 'Синхронизировано'),
-        heads(v).filter(x => x.objectId === r.objectId).length > 1 && e('small', null, 'Есть другая версия — обе сохранены'))),
+        heads(v).filter(x => x.objectId === r.objectId).length > 1 && e('small', null, 'Есть другая версия — обе сохранены')),
+        e('button',{class:'row-edit-button',disabled:Boolean(v.transfer),onClick:()=>editRevision(v,r),'aria-label':'Редактировать заметку «'+(notes[r.id]?.title||'Без заголовка')+'»'},'Редактировать'))),
       e('button', { class: 'primary', disabled: busy || Boolean(v.transfer), onClick: () => { if (v.key) showDraft({ vault: selected, object: crypto.randomUUID(), revision: null, title: '', text: '', dirty: false, key: v.key }); } }, '+ Новая заметка'))), feedback);
 }

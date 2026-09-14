@@ -1,4 +1,4 @@
-export interface ReminderPlan { id:string;state:'active'|'off'|'done';local:string;mode:'neutral'|'custom';text:string }
+export interface ReminderPlan { id:string;state:'active'|'off'|'done';local:string;mode:'neutral'|'custom'|'title';text:string }
 export const intervals:number[];
 export function validZone(zone:unknown):boolean;
 export function localTime(ms:number,zone:string):string;

@@ -71,7 +71,8 @@ test('vault persistence, offline queue, conflicts, deletion and encrypted stash 
     return send(path,{method:'POST',headers:{'content-type':'application/json','x-csrf-token':csrf},body:JSON.stringify(body)});
   };
   const user=(await post('/api/auth/login',credentials)).json().user;
-  const secret={title:'PRIVATE TITLE 98765',text:'PRIVATE BODY 54321'};
+  const secret={title:'PRIVATE TITLE 98765',text:'PRIVATE BODY 54321',html:'<p><strong>PRIVATE BODY 54321</strong></p>',
+    attachments:[{id:randomUUID(),name:'private.txt',type:'text/plain',size:6,data:'data:text/plain;base64,c2VjcmV0'}]};
   let source, target, base, deviceB;
   await t.test('creates multiple vaults, retains CryptoKey through IndexedDB, wrong phrase changes nothing',async()=>{
     source=await createVault(user,'PRIVATE VAULT 87654','      ');

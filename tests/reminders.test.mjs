@@ -71,6 +71,16 @@ test('one-time reminders reach every subscribed session, repeat at the account i
   assert.equal((await a.request('/api/reminders/settings',{nudgeHours:0})).statusCode,200);
 });
 
+test('title reminder mode exposes synchronized title text and falls back to neutral while the title is empty',async t=>{
+  const f=await fixture(t),a=f.a,v=header(),objectId=randomUUID(),base=record(objectId);await a.request('/api/vaults/create',v);await a.request('/api/vaults/record',{vaultId:v.id,record:base});
+  const plan={id:randomUUID(),state:'active',local:'2026-09-13T10:10',mode:'title',text:'Заголовок заметки'};
+  assert.equal((await a.request('/api/reminders/set',{vaultId:v.id,objectId,recordId:base.id,plan})).statusCode,200);
+  assert.equal(f.db.prepare('SELECT body FROM reminders').get().body,'Заголовок заметки');
+  const next=record(objectId,base.id);await a.request('/api/vaults/record',{vaultId:v.id,record:next});
+  assert.equal((await a.request('/api/reminders/set',{vaultId:v.id,objectId,recordId:next.id,plan:{...plan,id:randomUUID(),text:''}})).statusCode,200);
+  assert.equal(f.db.prepare('SELECT body FROM reminders').get().body,null);
+});
+
 test('timezone conversion rejects DST gaps and chooses the first instant of a repeated local time',()=>{
   assert.equal(zonedTime('2026-03-29T02:30','Europe/Berlin'),null);
   assert.equal(zonedTime('2026-10-25T02:30','Europe/Berlin'),Date.parse('2026-10-25T00:30:00Z'));

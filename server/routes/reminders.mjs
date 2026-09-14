@@ -31,7 +31,7 @@ export function registerReminders(app,db,{action,guard,own,permit,clock}){
   app.get('/api/reminders',action((_req,user)=>({settings:settings(user),items:db.prepare(`SELECT r.id,r.vault_id,r.object_id,r.config_id,r.record_id,r.local_at,r.due_at,r.plan_state,r.paused,r.fired_at,r.seen_at,
     (SELECT status FROM reminder_deliveries d WHERE d.reminder_id=r.id ORDER BY d.cycle DESC,d.due_at DESC LIMIT 1) delivery
     FROM reminders r WHERE r.user_id=?`).all(user.id)})));
-  const plan=obj({id:uuid,state:{enum:['active','off','done']},local:{type:'string',maxLength:16},mode:{enum:['neutral','custom']},text:{type:'string',maxLength:400}});
+  const plan=obj({id:uuid,state:{enum:['active','off','done']},local:{type:'string',maxLength:16},mode:{enum:['neutral','custom','title']},text:{type:'string',maxLength:400}});
   post('set',obj({vaultId:uuid,objectId:uuid,recordId:uuid,plan:{anyOf:[plan,{type:'null'}]}}),(req,user)=>{
     const {vaultId,objectId,recordId,plan:p}=req.body;permit(req,own(user,vaultId));
     const heads=reminderHeads(db,vaultId,objectId);
@@ -39,7 +39,7 @@ export function registerReminders(app,db,{action,guard,own,permit,clock}){
     const old=db.prepare('SELECT * FROM reminders WHERE vault_id=? AND object_id=?').get(vaultId,objectId);
     if(!p){db.prepare('DELETE FROM reminders WHERE vault_id=? AND object_id=?').run(vaultId,objectId);return{ok:true};}
     if(!validPlan(p))fail('invalid_reminder',400);
-    const pref=settings(user),due=zonedTime(p.local,pref.zone),body=p.state==='active'&&p.mode==='custom'?p.text:null;
+    const pref=settings(user),due=zonedTime(p.local,pref.zone),body=p.state==='active'&&p.mode!=='neutral'&&p.text?p.text:null;
     if(p.state==='active'&&due===null)fail('invalid_local_time',400);
     if(!old&&db.prepare('SELECT count(*) n FROM reminders WHERE user_id=?').get(user.id).n>=1000)fail('reminder_limit',409);
     if(old&&old.config_id===p.id){

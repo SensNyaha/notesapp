@@ -223,7 +223,7 @@ function App() {
     e('header', null,
       e('a', { class: 'brand', href: '/', 'aria-label': 'Tasks, главная' },
         e('img', { src: '/icon.svg', width: 40, height: 40, alt: '' }), 'Tasks'),
-      e('span', { class: 'stage' }, 'Этап 09')),
+      e('span', { class: 'stage' }, 'Этап 10')),
     e('div', { class: 'account-bar' }, e('p', null, user.login, ' · ', user.role === 'admin' ? 'Администратор' : 'Пользователь'),
       e('button', { disabled: loggingOut, onClick: logout }, loggingOut ? 'Выходим…' : 'Выйти')),
     authError && e('p', { class: 'error', role: 'alert' }, authError),

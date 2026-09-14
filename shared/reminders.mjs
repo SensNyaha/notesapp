@@ -17,6 +17,6 @@ export function zonedTime(local,zone) {
 export function validPlan(p) {
   return p&&typeof p==='object'&&JSON.stringify(Object.keys(p).sort())==='["id","local","mode","state","text"]'
     &&/^[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}$/.test(p.id)&&['active','off','done'].includes(p.state)
-    &&['neutral','custom'].includes(p.mode)&&typeof p.local==='string'&&zonedTime(p.local,'UTC')!==null
-    &&typeof p.text==='string'&&Array.from(p.text).length<=200&&(p.mode==='custom'?Boolean(p.text.trim()):p.text==='');
+    &&['neutral','custom','title'].includes(p.mode)&&typeof p.local==='string'&&zonedTime(p.local,'UTC')!==null
+    &&typeof p.text==='string'&&Array.from(p.text).length<=200&&(p.mode==='neutral'?p.text==='':p.mode==='custom'?Boolean(p.text.trim()):true);
 }
