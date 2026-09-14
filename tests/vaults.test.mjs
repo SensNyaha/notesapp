@@ -13,7 +13,8 @@ import { seal, unseal } from '../src/crypto/records.ts';
 import { signAccess } from '../src/crypto/access.ts';
 import { createVault, openVault, closeVault, saveNote, readNote, heads, synchronize, transferVault,
   readStash, moveStash, discardStash, edit, closeAllVault, resolveConflict, renameDevice, acknowledgeReminder, context, vaultName,
-  readTags,createTag,renameTag,deleteTag,copyNote,readVaultPushMode,setVaultPushMode } from '../src/planner.ts';
+  readTags,createTag,renameTag,deleteTag,copyNote,readVaultPushMode,setVaultPushMode,archiveNote,restoreArchivedNote,trashNote,
+  restoreTrashedNote,permanentlyDeleteNote,restoreNoteVersion,noteHistory,noteLifecycle } from '../src/planner.ts';
 import { readState, writeState, changes } from '../src/storage.ts';
 
 test('record v2 interoperates with OpenSSL AES-KW/GCM and authenticates context, parent and payload', async () => {
@@ -191,7 +192,7 @@ test('vault persistence, offline queue, conflicts, deletion and encrypted stash 
     const wire=JSON.stringify(db.prepare('SELECT * FROM vaults').all())+JSON.stringify(db.prepare('SELECT * FROM records').all());
     for(const plain of [secret.title,secret.text,'PRIVATE VAULT 87654','Forgotten offline edit'])assert.ok(!wire.includes(plain));
     const before=db.prepare('SELECT * FROM installation').get();
-    assert.equal(db.prepare('PRAGMA user_version').get().user_version,9);db.close();
+    assert.equal(db.prepare('PRAGMA user_version').get().user_version,10);db.close();
     const {createBackup}=await import('../server/cli/backup.mjs');const file=join(dir,'copy.sqlite');
     await createBackup(join(dir,'tasks.sqlite'),file);const bytes=await readFile(file);assert.ok(!bytes.includes(Buffer.from(secret.text)));
     assert.ok(before.installation_id);
@@ -324,6 +325,31 @@ test('vault persistence, offline queue, conflicts, deletion and encrypted stash 
     await writeState(beforeConcurrent);await renameTag(user,vid,tagId,'Старая офлайн-правка','#654321');offline=false;await synchronize(user);
     await writeState(deletedOnDevice);await synchronize(user);s=await readState(user.id);v=s.vaults.find(item=>item.header.id===vid);
     assert.equal((await readTags(user.id,v)).find(tag=>tag.id===tagId).deleted,true);assert.deepEqual((await readNote(user.id,v,heads(v)[0])).tagIds,[tagId]);
+  });
+  await t.test('archive, trash, encrypted history and permanent purge survive offline synchronization',async()=>{
+    const vid=await createVault(user,'Жизненный цикл','abcdef'),oid=randomUUID(),reminder={id:randomUUID(),state:'active',local:'2027-03-20T10:00',mode:'neutral',text:''};
+    const first=await saveNote(user,vid,oid,null,{title:'Первая версия',text:'Секретная история',reminder});await synchronize(user);
+    let s=await readState(user.id),v=s.vaults.find(item=>item.header.id===vid),base=heads(v)[0];
+    await saveNote(user,vid,oid,base.id,{...(await readNote(user.id,v,base)),title:'Вторая версия'});await archiveNote(user,vid,oid);await synchronize(user);
+    s=await readState(user.id);v=s.vaults.find(item=>item.header.id===vid);let head=heads(v)[0],value=await readNote(user.id,v,head);
+    assert.equal(noteLifecycle(v,head,value),'archived');assert.equal(value.reminder.state,'off');
+    await restoreArchivedNote(user,vid,oid,true);await synchronize(user);s=await readState(user.id);v=s.vaults.find(item=>item.header.id===vid);head=heads(v)[0];value=await readNote(user.id,v,head);
+    assert.equal(noteLifecycle(v,head,value),'active');assert.equal(value.reminder.state,'active');
+    const beforeRestore=v.records.length;await restoreNoteVersion(user,vid,oid,first.id);s=await readState(user.id);v=s.vaults.find(item=>item.header.id===vid);head=heads(v)[0];value=await readNote(user.id,v,head);
+    assert.equal(value.title,'Первая версия');assert.equal(value.reminder.state,'off');assert.equal(v.records.length,beforeRestore+1);assert.ok((await noteHistory(user.id,v,oid)).length>=5);
+    await synchronize(user);const stale=await readState(user.id);await trashNote(user,vid,oid);await synchronize(user);
+    s=await readState(user.id);v=s.vaults.find(item=>item.header.id===vid);head=heads(v)[0];value=await readNote(user.id,v,head);
+    assert.equal(noteLifecycle(v,head,value),'trashed');assert.equal(v.objectStates[oid].state,'trash');assert.equal(v.objectStates[oid].purgeAfter-v.objectStates[oid].trashedAt,30*86400000);
+    let probe=new DatabaseSync(join(dir,'tasks.sqlite'),{readOnly:true});assert.equal(probe.prepare('SELECT plan_state FROM reminders WHERE vault_id=? AND object_id=?').get(vid,oid).plan_state,'off');probe.close();
+    await restoreTrashedNote(user,vid,oid);await synchronize(user);s=await readState(user.id);v=s.vaults.find(item=>item.header.id===vid);assert.equal(v.objectStates[oid].state,'active');
+    await trashNote(user,vid,oid);await synchronize(user);await permanentlyDeleteNote(user,vid,oid);await synchronize(user);
+    probe=new DatabaseSync(join(dir,'tasks.sqlite'),{readOnly:true});assert.equal(probe.prepare('SELECT count(*) n FROM records WHERE vault_id=? AND object_id=?').get(vid,oid).n,0);assert.equal(probe.prepare('SELECT state FROM note_lifecycle WHERE vault_id=? AND object_id=?').get(vid,oid).state,'purged');probe.close();
+    const automatic=randomUUID();await saveNote(user,vid,automatic,null,{title:'Автоочистка',text:'30 дней'});await synchronize(user);await trashNote(user,vid,automatic);await synchronize(user);
+    probe=new DatabaseSync(join(dir,'tasks.sqlite'));probe.prepare('UPDATE note_lifecycle SET purge_after=? WHERE vault_id=? AND object_id=?').run(now,vid,automatic);probe.close();await synchronize(user);
+    probe=new DatabaseSync(join(dir,'tasks.sqlite'),{readOnly:true});assert.equal(probe.prepare('SELECT state FROM note_lifecycle WHERE vault_id=? AND object_id=?').get(vid,automatic).state,'purged');assert.equal(probe.prepare('SELECT count(*) n FROM records WHERE vault_id=? AND object_id=?').get(vid,automatic).n,0);probe.close();
+    await writeState(stale);offline=true;const staleVault=(await readState(user.id)).vaults.find(item=>item.header.id===vid),staleHead=heads(staleVault)[0];await saveNote(user,vid,oid,staleHead.id,{...(await readNote(user.id,staleVault,staleHead)),title:'Офлайн после удаления'});offline=false;await synchronize(user);
+    s=await readState(user.id);v=s.vaults.find(item=>item.header.id===vid);assert.equal(v.records.some(record=>record.objectId===oid),false);
+    const rescued=await Promise.all(s.stash.map(item=>readStash(s,item.id)));assert.ok(rescued.some(note=>note.title==='Офлайн после удаления'));
   });
   await t.test('legacy names backfill from an unlocked device and reach a fresh locked device',async()=>{
     const vid=await createVault(user,'Узнаваемое хранилище','abcdef');await synchronize(user);

@@ -3,10 +3,14 @@ import type { WrappedKey } from './crypto/vault';
 import type { Sealed } from './crypto/records';
 import type { AccessPack } from './crypto/access';
 export interface Header { id: string; keyId: string; revisionId: string; wrapper: WrappedKey; name: Sealed }
-export interface Revision { id: string; objectId: string; parent: string | null; sealed: Sealed; pending?: boolean; reminderPending?:boolean; resolves?:string[] }
+export interface LifecyclePending { state:'active'|'trash';expected:string|null }
+export interface ObjectState { state:'active'|'trash'|'purged';recordId:string;trashedAt?:number;purgeAfter?:number }
+export interface Revision { id: string; objectId: string; parent: string | null; sealed: Sealed; pending?: boolean; reminderPending?:boolean; resolves?:string[];
+  lifecyclePending?:LifecyclePending }
 export interface Vault { header: Header; displayName?:string; key?: CryptoKey; pending?: boolean; deleted?: boolean; records: Revision[];
   transfer?: { target: string; revisions: string[] }; epoch?:number; access?:AccessPack; grant?:string;
-  needsGrant?:boolean; closeOperation?:string; closeBaseEpoch?:number; syncError?:string }
+  needsGrant?:boolean; closeOperation?:string; closeBaseEpoch?:number; syncError?:string;
+  objectStates?:Record<string,ObjectState>;purgePending?:string[];purgedObjects?:string[] }
 export interface Stashed { id: string; sealed: Sealed; source: string }
 export interface ReminderSeen { vaultId:string;objectId:string;configId:string;occurrenceId?:string }
 export interface State { user: User; vaults: Vault[]; stash: Stashed[]; stashKey?: CryptoKey; deviceId?:string; deviceName?:string; lastVaultId?:string;

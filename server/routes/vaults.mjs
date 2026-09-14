@@ -14,6 +14,18 @@ const record = obj({ id: uuid, objectId: uuid, parent: { anyOf: [uuid, { type: '
 record.properties.resolves = { type:'array',minItems:1,maxItems:100,uniqueItems:true,items:uuid };
 
 export function registerVaults(app, db, { guard, accessOf, clock }) {
+  const purgeExpired=()=>{
+    const expired=db.prepare("SELECT vault_id,object_id,record_id FROM note_lifecycle WHERE state='trash' AND purge_after<=?").all(clock());
+    for(const item of expired){
+      db.prepare('DELETE FROM reminders WHERE vault_id=? AND object_id=?').run(item.vault_id,item.object_id);
+      db.prepare('DELETE FROM records WHERE vault_id=? AND object_id=?').run(item.vault_id,item.object_id);
+      db.prepare("UPDATE note_lifecycle SET state='purged',changed_at=?,purge_after=NULL WHERE vault_id=? AND object_id=?").run(clock(),item.vault_id,item.object_id);
+    }
+    return expired.length;
+  };
+  purgeExpired();
+  const cleanup=setInterval(()=>{try{db.exec('BEGIN IMMEDIATE');purgeExpired();db.exec('COMMIT');}catch(error){db.exec('ROLLBACK');app.log.error(error);}},3600000);
+  cleanup.unref();app.addHook('onClose',async()=>clearInterval(cleanup));
   function own(user, id, active = true) {
     const row = db.prepare('SELECT * FROM vaults WHERE id=? AND user_id=?').get(id, user.id);
     if (!row) fail('not_found', 404);
@@ -43,6 +55,11 @@ export function registerVaults(app, db, { guard, accessOf, clock }) {
     const rows = db.prepare('SELECT rowid,payload FROM records WHERE vault_id=? AND rowid>? ORDER BY rowid LIMIT 5').all(req.params.id, Number(req.query.after ?? 0));
     return { records: rows.map(r => JSON.parse(r.payload)), next: rows.length === 5 ? rows.at(-1).rowid : null };
   }));
+  app.get('/api/vaults/:id/objects',{schema:{params:obj({id:uuid})}},action((req,user)=>{
+    permit(req,own(user,req.params.id));purgeExpired();
+    return{objects:db.prepare('SELECT object_id,state,record_id,changed_at,purge_after FROM note_lifecycle WHERE vault_id=? ORDER BY object_id').all(req.params.id)
+      .map(row=>({objectId:row.object_id,state:row.state,recordId:row.record_id,changedAt:row.changed_at,...(row.state==='trash'?{trashedAt:row.changed_at,purgeAfter:row.purge_after}:{} )}))};
+  }));
   post('create', { ...header, properties: { ...header.properties, transferSource: uuid, displayName } }, (req, user) => {
     const { transferSource, displayName:label, ...value } = req.body;
     if (transferSource) permit(req,own(user, transferSource));
@@ -66,6 +83,7 @@ export function registerVaults(app, db, { guard, accessOf, clock }) {
   });
   post('record', obj({ vaultId: uuid, record }), (req, user) => {
     const { vaultId, record: r } = req.body; permit(req,own(user, vaultId));
+    if(db.prepare("SELECT 1 FROM note_lifecycle WHERE vault_id=? AND object_id=? AND state='purged'").get(vaultId,r.objectId))fail('object_deleted',410);
     const text = JSON.stringify(r), old = db.prepare('SELECT * FROM records WHERE id=?').get(r.id);
     if (old) {
       if (old.vault_id !== vaultId || old.payload !== text) fail('id_conflict', 409);
@@ -83,6 +101,33 @@ export function registerVaults(app, db, { guard, accessOf, clock }) {
     if (db.prepare('SELECT coalesce(sum(length(payload)),0) n FROM records WHERE vault_id=?').get(vaultId).n + text.length > 64 * 1024 * 1024) fail('record_limit', 409);
     db.prepare('INSERT INTO records(id,vault_id,object_id,parent_id,payload) VALUES(?,?,?,?,?)').run(r.id, vaultId, r.objectId, r.parent, text);
     return { ok: true };
+  });
+  post('object-state',obj({vaultId:uuid,objectId:uuid,recordId:uuid,expected:{anyOf:[uuid,{type:'null'}]},state:{enum:['active','trash']}}),(req,user)=>{
+    const {vaultId,objectId,recordId,expected,state}=req.body;permit(req,own(user,vaultId));purgeExpired();
+    if(!db.prepare('SELECT 1 FROM records WHERE id=? AND vault_id=? AND object_id=?').get(recordId,vaultId,objectId))fail('missing_parent',409);
+    const current=db.prepare('SELECT * FROM note_lifecycle WHERE vault_id=? AND object_id=?').get(vaultId,objectId);
+    if(current?.state==='purged')fail('object_deleted',410);
+    if(current?.record_id===recordId&&current.state===state)return{ok:true,object:{objectId,state,recordId,...(state==='trash'?{trashedAt:current.changed_at,purgeAfter:current.purge_after}:{})}};
+    if((current?.record_id??null)!==expected)fail('object_state_conflict',409);
+    const now=clock(),purgeAfter=state==='trash'?now+30*86400000:null;
+    db.prepare(`INSERT INTO note_lifecycle(vault_id,object_id,state,record_id,changed_at,purge_after) VALUES(?,?,?,?,?,?)
+      ON CONFLICT(vault_id,object_id) DO UPDATE SET state=excluded.state,record_id=excluded.record_id,changed_at=excluded.changed_at,purge_after=excluded.purge_after`)
+      .run(vaultId,objectId,state,recordId,now,purgeAfter);
+    if(state==='trash'){
+      db.prepare("UPDATE reminders SET plan_state='off',paused=0 WHERE vault_id=? AND object_id=?").run(vaultId,objectId);
+      db.prepare('DELETE FROM reminder_deliveries WHERE reminder_id IN(SELECT id FROM reminders WHERE vault_id=? AND object_id=?)').run(vaultId,objectId);
+    }
+    return{ok:true,object:{objectId,state,recordId,...(state==='trash'?{trashedAt:now,purgeAfter}:{})}};
+  });
+  post('purge-object',obj({vaultId:uuid,objectId:uuid,expected:uuid,confirmed:{const:true}}),(req,user)=>{
+    const {vaultId,objectId,expected}=req.body;permit(req,own(user,vaultId));purgeExpired();
+    const current=db.prepare('SELECT * FROM note_lifecycle WHERE vault_id=? AND object_id=?').get(vaultId,objectId);
+    if(current?.state==='purged')return{ok:true};
+    if(!current||current.state!=='trash'||current.record_id!==expected)fail('object_state_conflict',409);
+    db.prepare('DELETE FROM reminders WHERE vault_id=? AND object_id=?').run(vaultId,objectId);
+    db.prepare('DELETE FROM records WHERE vault_id=? AND object_id=?').run(vaultId,objectId);
+    db.prepare("UPDATE note_lifecycle SET state='purged',changed_at=?,purge_after=NULL WHERE vault_id=? AND object_id=?").run(clock(),vaultId,objectId);
+    return{ok:true};
   });
   post('transfer', obj({ source: uuid, target: uuid, revisions: { type: 'array', maxItems: 10000, uniqueItems: true, items: uuid }, confirmed: { const: true } }), (req, user) => {
     const { source, target, revisions } = req.body;

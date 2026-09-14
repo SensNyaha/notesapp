@@ -1,6 +1,6 @@
 {
   "name": "tasks",
-  "version": "0.12.0",
+  "version": "0.13.0",
   "private": true,
   "allowScripts": {
     "argon2@0.45.1": true

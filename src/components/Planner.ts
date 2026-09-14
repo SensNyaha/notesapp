@@ -1,11 +1,12 @@
 import { h as e } from 'preact';
 import { useEffect, useRef, useState } from 'preact/hooks';
 import type { User } from '../types/auth';
-import { readState, changes, type State } from '../storage';
+import { readState, changes, type State, type Revision } from '../storage';
 import { createVault, openVault, closeVault, saveNote, readNote, vaultName, heads, synchronize, transferVault,
-  readStash, moveStash, discardStash, registerDraftFlush, edit, hasUnsaved, closeAllVault, resolveConflict, renameDevice,
+  readStash, moveStash, discardStash, discardPurgedObjects, registerDraftFlush, edit, hasUnsaved, closeAllVault, resolveConflict, renameDevice,
   acknowledgeReminder, readTags, createTag, renameTag, deleteTag, copyNote, readVaultPushMode, setVaultPushMode,
-  type Note, type TagDefinition, type VaultPushMode } from '../planner';
+  archiveNote,restoreArchivedNote,trashNote,restoreTrashedNote,permanentlyDeleteNote,noteHistory,restoreNoteVersion,noteLifecycle,
+  type Note, type TagDefinition, type VaultPushMode, type NoteLifecycleState } from '../planner';
 import { localTime } from '../../shared/reminders.mjs';
 import type { ReminderPlan,ReminderRepeat,ReminderEnd } from '../../shared/reminders.mjs';
 import { reminderRequest, type ReminderSettings, type ReminderStatus, type ReminderTarget } from '../reminders';
@@ -14,6 +15,7 @@ import { noteSearchScore } from '../search';
 
 interface Draft extends Note { vault: string; object: string; revision: string | null; dirty: boolean; key: CryptoKey }
 interface OpenedNote extends Note { vault: string; object: string; revision: string; key: CryptoKey }
+interface HistoryState {vault:string;objectId:string;back:'list'|'archive'|'trash';selected:string;entries:{revision:Revision;note:Note}[]}
 export function Planner({ user,reminderTarget,onReminderHandled }: { user: User;reminderTarget?:ReminderTarget;onReminderHandled:()=>void }) {
   const [state, setState] = useState<State>();
   const [names, setNames] = useState<Record<string, string>>({});
@@ -31,7 +33,7 @@ export function Planner({ user,reminderTarget,onReminderHandled }: { user: User;
       if (s.vaults.some(v => v.header.id === vid && !v.deleted)) s.lastVaultId = vid;
     }).catch(() => setError('Не удалось запомнить выбранное хранилище'));
   }
-  const [screen, setScreen] = useState<'list' | 'create' | 'open' | 'transfer' | 'stash' | 'close-all' | 'conflict' | 'device'|'reminder'|'schedule'|'tags'>('list');
+  const [screen, setScreen] = useState<'list' | 'create' | 'open' | 'transfer' | 'stash' | 'close-all' | 'conflict' | 'device'|'reminder'|'schedule'|'tags'|'archive'|'trash'|'history'>('list');
   const [password,setPassword]=useState('');
   const [comparison,setComparison]=useState<{objectId:string;versions:string[];chosen:string}>();
   const [name, setName] = useState(''); const [phrase, setPhrase] = useState(''); const [repeat, setRepeat] = useState('');
@@ -54,6 +56,7 @@ export function Planner({ user,reminderTarget,onReminderHandled }: { user: User;
   const [quickFilter,setQuickFilter]=useState<'all'|'pinned'|'untagged'|'reminder'>('all'),[sort,setSort]=useState<'newest'|'oldest'|'title'>('newest');
   const [searchSort,setSearchSort]=useState<'relevance'|'newest'|'oldest'>('relevance');
   const [hideCompleted,setHideCompleted]=useState(false),[menuOpen,setMenuOpen]=useState(false);
+  const [history,setHistory]=useState<HistoryState|null>(null);
   const [tagName,setTagName]=useState(''),[tagColor,setTagColor]=useState('#356AE6'),[editingTag,setEditingTag]=useState('');
   const [status, setStatus] = useState(''); const [error, setError] = useState(''); const [busy, setBusy] = useState(false);
   const timer = useRef<ReturnType<typeof setTimeout>>(); const saving = useRef<Promise<void> | null>(null);
@@ -92,10 +95,11 @@ export function Planner({ user,reminderTarget,onReminderHandled }: { user: User;
       const result = await saveNote(user, snapshot.vault, snapshot.object, snapshot.revision,
         { title: snapshot.title, text: snapshot.text,...(snapshot.html!==undefined?{html:snapshot.html}:{}),
           ...(snapshot.attachments?.length?{attachments:snapshot.attachments}:{}),...(snapshot.checklist?.length?{checklist:snapshot.checklist}:{}),
-          ...(snapshot.tagIds?.length?{tagIds:snapshot.tagIds}:{}),...(snapshot.pinned?{pinned:true}:{}),...(snapshot.reminder?{reminder:snapshot.reminder}:{}) }, snapshot.key);
+          ...(snapshot.tagIds?.length?{tagIds:snapshot.tagIds}:{}),...(snapshot.pinned?{pinned:true}:{}),...(snapshot.reminder?{reminder:snapshot.reminder}:{}),
+          ...(snapshot.lifecycle?{lifecycle:snapshot.lifecycle}:{}) }, snapshot.key);
       const latest = draftRef.current;
       if (latest && latest.object === snapshot.object) {
-        const comparable=(value:Note)=>JSON.stringify({title:value.title,text:value.text,html:value.html,attachments:value.attachments??[],checklist:value.checklist??[],tagIds:value.tagIds??[],pinned:Boolean(value.pinned),reminder:value.reminder});
+        const comparable=(value:Note)=>JSON.stringify({title:value.title,text:value.text,html:value.html,attachments:value.attachments??[],checklist:value.checklist??[],tagIds:value.tagIds??[],pinned:Boolean(value.pinned),reminder:value.reminder,lifecycle:value.lifecycle});
         const unchanged = comparable(latest)===comparable(snapshot);
         showDraft({ ...latest, revision: result.id, dirty: !unchanged });
       }
@@ -208,6 +212,28 @@ export function Planner({ user,reminderTarget,onReminderHandled }: { user: User;
   async function duplicate(current:NonNullable<State['vaults'][number]>,revision:string){
     await flush();await copyNote(user,current.header.id,revision);showViewing(null);setMenuOpen(false);setStatus('Копия создана и сохранена на устройстве.');void sync();
   }
+  function statusOf(current:NonNullable<State['vaults'][number]>,revision:Revision,value:Note):NoteLifecycleState{return noteLifecycle(current,revision,value);}
+  async function openHistory(current:NonNullable<State['vaults'][number]>,objectId:string,back:'list'|'archive'|'trash'){
+    const entries=(await noteHistory(user.id,current,objectId)).sort((a,b)=>(b.note.author?.time??0)-(a.note.author?.time??0));
+    const currentRevision=heads(current).find(item=>item.objectId===objectId)?.id??entries[0]?.revision.id??'';
+    showViewing(null);setMenuOpen(false);setHistory({vault:current.header.id,objectId,back,selected:currentRevision,entries});setScreen('history');
+  }
+  async function archiveCurrent(current:NonNullable<State['vaults'][number]>,objectId:string){
+    await archiveNote(user,current.header.id,objectId);showViewing(null);setMenuOpen(false);setStatus('Заметка перемещена в архив. Напоминание приостановлено.');void sync();
+  }
+  async function restoreArchive(current:NonNullable<State['vaults'][number]>,revision:Revision,value:Note){
+    const resume=Boolean(value.reminder)&&confirm('У заметки сохранено напоминание. Возобновить его сейчас? Нажмите «Отмена», чтобы вернуть заметку с приостановленным напоминанием.');
+    await restoreArchivedNote(user,current.header.id,revision.objectId,resume);showViewing(null);setMenuOpen(false);setStatus(resume?'Заметка восстановлена, напоминание возобновлено.':value.reminder?'Заметка восстановлена. Напоминание осталось приостановленным.':'Заметка восстановлена.');void sync();
+  }
+  async function trashCurrent(current:NonNullable<State['vaults'][number]>,objectId:string){
+    await trashNote(user,current.header.id,objectId);showViewing(null);setMenuOpen(false);setStatus('Заметка перемещена в корзину на 30 дней.');void sync();
+  }
+  async function restoreTrash(current:NonNullable<State['vaults'][number]>,objectId:string){
+    await restoreTrashedNote(user,current.header.id,objectId);showViewing(null);setMenuOpen(false);setStatus('Заметка восстановлена. Напоминание осталось приостановленным.');void sync();
+  }
+  async function purgeCurrent(current:NonNullable<State['vaults'][number]>,objectId:string){
+    await permanentlyDeleteNote(user,current.header.id,objectId);showViewing(null);setMenuOpen(false);setStatus('Окончательное удаление поставлено в очередь синхронизации.');void sync();
+  }
   async function updateViewing(patch:Partial<Note>){
     const current=viewingRef.current;if(!current)return;showDraft({...current,...patch,dirty:true});await flush();const saved=draftRef.current;
     if(saved?.revision)showViewing({...saved,revision:saved.revision});showDraft(null);void sync();
@@ -307,13 +333,36 @@ export function Planner({ user,reminderTarget,onReminderHandled }: { user: User;
         feedback,e('button',{class:'primary',disabled:busy,type:'submit'},busy?'Сохраняем…':'Сохранить напоминание')),
       draft.reminder&&e('button',{class:'danger-button',disabled:busy,onClick:()=>void run(async()=>{changeReminder(undefined);setScreen('list');await flush();void sync();})},'Удалить напоминание'));
   }
-  if(viewing&&!draft)return e('section',{class:'card note-view'},
+  if(screen==='history'&&history){
+    const currentVault=state?.vaults.find(item=>item.header.id===history.vault),currentId=currentVault&&heads(currentVault).find(item=>item.objectId===history.objectId)?.id;
+    const selectedVersion=history.entries.find(item=>item.revision.id===history.selected),currentVersion=history.entries.find(item=>item.revision.id===currentId)??history.entries[0];
+    const preview=(entry:typeof selectedVersion,label:string)=>entry&&e('article',{class:'version-preview'},e('p',{class:'eyebrow'},label),e('h2',null,entry.note.title||'Без заголовка'),
+      entry.note.html?e('div',{class:'rich-note-content',dangerouslySetInnerHTML:{__html:sanitizeNoteHtml(entry.note.html)}}):e('p',{class:'note-preview'},entry.note.text||'Нет текста'),
+      Boolean(entry.note.checklist?.length)&&e('p',{class:'hint'},'Чек-лист: '+entry.note.checklist!.filter(item=>item.done).length+' / '+entry.note.checklist!.length),
+      Boolean(entry.note.attachments?.length)&&e('p',{class:'hint'},'Вложения: '+entry.note.attachments!.length));
+    return e('section',{class:'card planner history-screen'},e('button',{onClick:()=>{setHistory(null);setScreen(history.back);}},'Назад'),e('h1',null,'История версий'),
+      e('p',{class:'hint'},'Все версии расшифровываются только на этом устройстве. Восстановление создаёт новую версию и сохраняет текущую в истории.'),
+      e('div',{class:'version-layout'},e('div',{class:'version-list'},history.entries.map(entry=>e('button',{key:entry.revision.id,class:history.selected===entry.revision.id?'version-row selected':'version-row',onClick:()=>setHistory({...history,selected:entry.revision.id})},
+        e('strong',null,entry.revision.id===currentId?'Текущая версия':entry.note.author?new Date(entry.note.author.time).toLocaleString('ru-RU'):'Время неизвестно'),
+        e('small',null,(entry.note.author?.name??'Источник неизвестен')+(entry.note.lifecycle?.state==='archived'?' · Архив':entry.note.lifecycle?.state==='trashed'?' · Корзина':''))))),
+        e('div',{class:'version-comparison'},preview(currentVersion,'ТЕКУЩАЯ'),selectedVersion?.revision.id!==currentVersion?.revision.id&&preview(selectedVersion,'ВЫБРАННАЯ'))),
+      selectedVersion&&selectedVersion.revision.id!==currentId&&e('button',{class:'primary',disabled:busy,onClick:()=>{if(confirm('Восстановить выбранное содержимое как новую версию? Старое напоминание останется выключенным.'))void run(async()=>{await restoreNoteVersion(user,history.vault,history.objectId,history.selected);const back=history.back;setHistory(null);setScreen(back);setStatus('Выбранная версия восстановлена как новая.');void sync();});}},'Восстановить эту версию'),
+      feedback);
+  }
+  if(viewing&&!draft){const current=state?.vaults.find(item=>item.header.id===viewing.vault),revision=current&&heads(current).find(item=>item.id===viewing.revision),lifecycle=current&&revision?statusOf(current,revision,viewing):'active';return e('section',{class:'card note-view'},
     e('div',{class:'actions note-view-actions'},e('button',{onClick:()=>{showViewing(null);setMenuOpen(false);}},'Назад'),
-      e('div',{class:'actions compact'},e('button',{onClick:()=>setMenuOpen(!menuOpen),'aria-expanded':menuOpen},'Действия'),e('button',{class:'primary',onClick:()=>showDraft({...viewing,dirty:false})},'Редактировать'))),
+      e('div',{class:'actions compact'},e('button',{onClick:()=>setMenuOpen(!menuOpen),'aria-expanded':menuOpen},'Действия'),lifecycle==='active'&&e('button',{class:'primary',onClick:()=>showDraft({...viewing,dirty:false})},'Редактировать'))),
     menuOpen&&e('div',{class:'note-action-menu',role:'menu'},
-      e('button',{onClick:()=>{setMenuOpen(false);void run(()=>updateViewing({pinned:!viewing.pinned}));}},viewing.pinned?'Открепить':'Закрепить'),
-      e('button',{onClick:()=>showDraft({...viewing,dirty:false})},'Изменить теги'),
-      e('button',{disabled:busy,onClick:()=>{const current=state?.vaults.find(item=>item.header.id===viewing.vault);if(current)void run(()=>duplicate(current,viewing.revision));}},'Создать копию')),
+      lifecycle==='active'&&e('button',{onClick:()=>{setMenuOpen(false);void run(()=>updateViewing({pinned:!viewing.pinned}));}},viewing.pinned?'Открепить':'Закрепить'),
+      lifecycle==='active'&&e('button',{onClick:()=>showDraft({...viewing,dirty:false})},'Изменить теги'),
+      lifecycle==='active'&&e('button',{disabled:busy,onClick:()=>{if(current)void run(()=>duplicate(current,viewing.revision));}},'Создать копию'),
+      current&&e('button',{disabled:busy,onClick:()=>void run(()=>openHistory(current,viewing.object,lifecycle==='archived'?'archive':lifecycle==='trashed'?'trash':'list'))},'История версий'),
+      lifecycle==='active'&&current&&e('button',{disabled:busy,onClick:()=>void run(()=>archiveCurrent(current,viewing.object))},'Архивировать'),
+      lifecycle==='archived'&&current&&revision&&e('button',{disabled:busy,onClick:()=>void run(()=>restoreArchive(current,revision,viewing))},'Вернуть из архива'),
+      lifecycle!=='trashed'&&current&&e('button',{class:'menu-danger',disabled:busy,onClick:()=>{if(confirm('Переместить заметку в корзину? Она будет окончательно удалена через 30 дней.'))void run(()=>trashCurrent(current,viewing.object));}},'Удалить'),
+      lifecycle==='trashed'&&current&&e('button',{disabled:busy,onClick:()=>void run(()=>restoreTrash(current,viewing.object))},'Восстановить'),
+      lifecycle==='trashed'&&current&&e('button',{class:'menu-danger',disabled:busy,onClick:()=>{if(confirm('Удалить заметку и всю историю навсегда? Восстановить её средствами приложения будет невозможно.'))void run(()=>purgeCurrent(current,viewing.object));}},'Удалить навсегда')),
+    lifecycle!=='active'&&e('p',{class:lifecycle==='trashed'?'lifecycle-banner trash':'lifecycle-banner'},lifecycle==='archived'?'Заметка находится в архиве. Напоминание приостановлено.':'Заметка находится в корзине. Она будет удалена автоматически через 30 дней.'),
     e('h1',null,viewing.title||'Без заголовка'),
     tagChips(viewing.vault,viewing.tagIds).length>0&&e('div',{class:'tag-list'},tagChips(viewing.vault,viewing.tagIds).map(tag=>e('span',{class:'tag-chip',style:{'--tag-color':tag.color},key:tag.id},tag.name))),
     viewing.html?e('div',{class:'note-view-text rich-note-content',dangerouslySetInnerHTML:{__html:sanitizeNoteHtml(viewing.html)}})
@@ -323,7 +372,7 @@ export function Planner({ user,reminderTarget,onReminderHandled }: { user: User;
     viewing.reminder&&e('section',{class:'reminder-card'},e('h2',null,'Напоминание'),
       e('p',null,new Date(viewing.reminder.local+'Z').toLocaleString('ru-RU',{timeZone:'UTC'}),' · ',
         viewing.reminder.state==='active'?'Активно':viewing.reminder.state==='done'?'Выполнено':'Выключено'),
-      e('p',{class:'hint'},viewing.reminder.mode==='custom'?'Для push разрешён отдельный собственный текст.':viewing.reminder.mode==='title'?'Текст push автоматически повторяет заголовок заметки.':'Push не содержит названия хранилища и текста заметки.')));
+      e('p',{class:'hint'},viewing.reminder.mode==='custom'?'Для push разрешён отдельный собственный текст.':viewing.reminder.mode==='title'?'Текст push автоматически повторяет заголовок заметки.':'Push не содержит названия хранилища и текста заметки.')));}
   if (draft) return e('section', { class: 'card note-editor' },
     e('div', { class: 'actions' }, e('button', { disabled: busy, onClick: () => void run(finishEditing) }, 'Назад'),
       e('button', { class: 'primary', disabled: busy, onClick: () => void run(finishEditing) }, 'Готово')),
@@ -369,10 +418,11 @@ export function Planner({ user,reminderTarget,onReminderHandled }: { user: User;
     !state?.stash.length && e('p', null, 'Отложенных заметок нет'), feedback,
     e('button', { onClick: () => setScreen('list') }, 'Оставить на потом'));
   if(screen==='schedule'){
-    const localNotes=(state?.vaults??[]).flatMap(current=>current.key&&!current.deleted?heads(current).map(revision=>({current,revision,note:notes[revision.id]})):[]).filter(item=>Boolean(item.note));
+    const localNotes=(state?.vaults??[]).flatMap(current=>current.key&&!current.deleted?heads(current).map(revision=>({current,revision,note:notes[revision.id]})):[])
+      .filter(item=>Boolean(item.note)&&statusOf(item.current,item.revision,item.note!)==='active');
     const findLocal=(item:ReminderStatus)=>localNotes.find(local=>local.current.header.id===item.vault_id&&local.revision.objectId===item.object_id);
     const nowLocal=localTime(Date.now(),zone),today=nowLocal.slice(0,10),tomorrowDate=new Date(Date.parse(today+'T00:00:00Z')+86400000).toISOString().slice(0,10);
-    const activeStatuses=new Set(['scheduled','fired','seen','missed']),visible=serverReminders.filter(item=>showReminderHistory||activeStatuses.has(item.occurrence_status)).filter(item=>{
+    const activeStatuses=new Set(['scheduled','fired','seen','missed']),visible=serverReminders.filter(item=>item.plan_state==='active'&&(showReminderHistory||activeStatuses.has(item.occurrence_status))).filter(item=>{
       if(!selectedTags.length)return true;const local=findLocal(item);return Boolean(local&&local.current.header.id===selected&&selectedTags.every(tagId=>(local.note!.tagIds??[]).includes(tagId)));
     });
     const itemLocal=(item:ReminderStatus)=>item.snooze_local??item.scheduled_local;
@@ -437,9 +487,29 @@ export function Planner({ user,reminderTarget,onReminderHandled }: { user: User;
       e('button',{onClick:()=>{setEditingTag(tag.id);setTagName(tag.name);setTagColor(tag.color);}},'Изменить'),
       e('button',{class:'icon-danger',onClick:()=>{if(confirm('Удалить тег «'+tag.name+'»? Заметки останутся на месте.'))void run(async()=>{await deleteTag(user,selected,tag.id);setSelectedTags(current=>current.filter(id=>id!==tag.id));void sync();});}},'Удалить'));}),feedback);
   }
+  if((screen==='archive'||screen==='trash')&&v?.key){const wanted=screen==='archive'?'archived':'trashed',normalized=query.trim().toLocaleLowerCase('ru');
+    const items=heads(v).map(revision=>({revision,note:notes[revision.id]})).filter((item):item is {revision:Revision;note:Note}=>Boolean(item.note))
+      .filter(item=>statusOf(v,item.revision,item.note)===wanted&&!(screen==='trash'&&v.purgePending?.includes(item.revision.objectId)))
+      .map(item=>({...item,score:normalized?noteSearchScore(query,{note:item.note,tags:tagChips(v.header.id,item.note.tagIds)}):0})).filter(item=>!normalized||item.score)
+      .sort((a,b)=>normalized?b.score-a.score:sort==='title'?a.note.title.localeCompare(b.note.title,'ru'):sort==='oldest'?(a.note.author?.time??0)-(b.note.author?.time??0):(b.note.author?.time??0)-(a.note.author?.time??0));
+    const all=heads(v).map(revision=>({revision,note:notes[revision.id]})).filter((item):item is {revision:Revision;note:Note}=>Boolean(item.note)&&statusOf(v,item.revision,item.note)===wanted&&!v.purgePending?.includes(item.revision.objectId));
+    return e('section',{class:'card planner lifecycle-screen'},
+      e('div',{class:'card-heading'},e('button',{onClick:()=>{setQuery('');setScreen('list');}},'Назад'),e('h1',null,screen==='archive'?'Архив':'Корзина'),
+        screen==='trash'&&Boolean(all.length)&&e('button',{class:'danger-button',disabled:busy,onClick:()=>{if(confirm('Окончательно удалить все заметки из корзины и всю их историю?'))void run(async()=>{for(const item of all)await permanentlyDeleteNote(user,v.header.id,item.revision.objectId);setStatus('Очистка корзины поставлена в очередь синхронизации.');void sync();});}},'Очистить корзину'))),
+      e('div',{class:screen==='archive'?'lifecycle-info':'lifecycle-info trash'},screen==='archive'?'Архивные заметки не удалены. Их можно восстановить в любое время; напоминания приостановлены.':'Заметки автоматически удаляются через 30 дней. До этого их можно восстановить.'),
+      e('div',{class:'organization-tools'},e('label',{class:'search-field'},'Поиск',e('input',{type:'search',value:query,placeholder:'Найти заметку',onInput:(event:Event)=>setQuery((event.target as HTMLInputElement).value)})),
+        e('label',null,'Сортировка',e('select',{value:sort,onChange:(event:Event)=>setSort((event.target as HTMLSelectElement).value as typeof sort)},e('option',{value:'newest'},'Сначала новые'),e('option',{value:'oldest'},'Сначала старые'),e('option',{value:'title'},'По заголовку')))),
+      !items.length&&e('div',{class:'empty-state'},e('h2',null,normalized?'Ничего не найдено':screen==='archive'?'Архив пуст':'Корзина пуста'),e('p',null,normalized?'Измените поисковый запрос.':screen==='archive'?'Архивированные заметки появятся здесь.':'Удалённые заметки будут храниться здесь 30 дней.')),
+      items.map(item=>{const expiry=v.objectStates?.[item.revision.objectId]?.purgeAfter;return e('article',{class:'lifecycle-row',key:item.revision.id},e('button',{class:'note-row',onClick:()=>openRevision(v,item.revision)},
+        e('strong',null,item.note.title||'Без заголовка'),e('span',{class:'note-preview'},item.note.text.slice(0,140)),tagChips(v.header.id,item.note.tagIds).length>0&&e('span',{class:'tag-list'},tagChips(v.header.id,item.note.tagIds).map(tag=>e('span',{class:'tag-chip',style:{'--tag-color':tag.color},key:tag.id},tag.name))),
+        e('small',null,screen==='trash'?(expiry?'Удаление '+new Date(expiry).toLocaleDateString('ru-RU'):'Ожидает синхронизации срока удаления'):new Date(item.note.lifecycle?.changedAt??item.note.author?.time??0).toLocaleString('ru-RU'))),
+        e('div',{class:'actions compact'},screen==='archive'?e('button',{disabled:busy,onClick:()=>void run(()=>restoreArchive(v,item.revision,item.note))},'Восстановить'):e('button',{disabled:busy,onClick:()=>void run(()=>restoreTrash(v,item.revision.objectId))},'Восстановить'),
+          e('button',{disabled:busy,onClick:()=>void run(()=>openHistory(v,item.revision.objectId,screen))},'История'),
+          screen==='trash'&&e('button',{class:'danger-button',disabled:busy,onClick:()=>{if(confirm('Удалить заметку и всю историю навсегда?'))void run(()=>purgeCurrent(v,item.revision.objectId));}},'Удалить навсегда')));}),feedback);
+  }
   const normalizedQuery=query.trim().toLocaleLowerCase('ru');
   const candidates=(normalizedQuery?(state?.vaults??[]).filter(current=>current.key&&!current.deleted&&!current.transfer):v?.key?[v]:[]).flatMap(current=>
-    heads(current).map(revision=>({current,revision,note:notes[revision.id]})).filter(item=>Boolean(item.note)));
+    heads(current).map(revision=>({current,revision,note:notes[revision.id]})).filter(item=>Boolean(item.note)&&statusOf(current,item.revision,item.note!)==='active'));
   const visibleItems=candidates.map(item=>({...item,score:normalizedQuery?noteSearchScore(query,{note:item.note!,tags:tagChips(item.current.header.id,item.note!.tagIds)}):0})).filter(({current,note,score})=>{
     if(normalizedQuery&&!score)return false;
     if(quickFilter==='pinned'&&!note!.pinned||quickFilter==='untagged'&&(note!.tagIds??[]).some(id=>activeTags(current.header.id).some(tag=>tag.id===id))||quickFilter==='reminder'&&!note!.reminder)return false;
@@ -458,6 +528,8 @@ export function Planner({ user,reminderTarget,onReminderHandled }: { user: User;
         e('button',{onClick:()=>setScreen('tags')},'Управлять тегами'))),
     e('div', { class: 'actions' }, e('button', { disabled: busy, onClick: () => form('create') }, '+ Хранилище'),
       e('button',{disabled:busy,onClick:()=>{setScreen('schedule');setSelectedOccurrence('');setSelectedTags([]);void reminderRequest(user,'').then(value=>{setServerReminders(value.items);setReminderSettings(value.settings);}).catch(()=>{});}},'Сегодня'),
+      e('button',{disabled:!v?.key,onClick:()=>{setQuery('');setScreen('archive');}},'Архив'+(v?.key?' ('+heads(v).filter(r=>notes[r.id]&&statusOf(v,r,notes[r.id])==='archived').length+')':'')),
+      e('button',{disabled:!v?.key,onClick:()=>{setQuery('');setScreen('trash');}},'Корзина'+(v?.key?' ('+heads(v).filter(r=>notes[r.id]&&statusOf(v,r,notes[r.id])==='trashed'&&!v.purgePending?.includes(r.objectId)).length+')':'')),
       e('button', { onClick: () => setScreen('stash') }, 'Отложенные заметки (' + (state?.stash.length ?? 0) + ')'),
       e('button',{onClick:()=>{setName(state?.deviceName??'Устройство');setScreen('device');}},'Это устройство: '+(state?.deviceName??'Устройство'))),
     v&&!v.deleted&&e('div',null,
@@ -470,14 +542,18 @@ export function Planner({ user,reminderTarget,onReminderHandled }: { user: User;
       e('button', { onClick: () => { if (confirm('Удалить локальные изменения удалённого хранилища без возможности восстановления?')) void run(async () => {
         await edit(user, async s => { s.vaults = s.vaults.filter(x => x.header.id !== v.header.id); });
       }); } }, 'Удалить локальную копию'))),
+    state?.vaults.filter(v=>!v.deleted&&Boolean(v.purgedObjects?.length)).map(v=>e('div',{class:'auth-notice',key:'purged-'+v.header.id},
+      e('p',null,'На этом устройстве остались несинхронизированные версии окончательно удалённых заметок из «'+(names[v.header.id]||'закрытого хранилища')+'». Откройте хранилище прежней фразой, чтобы перенести их в отложенные заметки.'),
+      e('button',{onClick:()=>form('open',v.header.id)},'Открыть и сохранить'),
+      e('button',{onClick:()=>{if(confirm('Удалить эти локальные версии с устройства без возможности восстановления?'))void run(()=>discardPurgedObjects(user,v.header.id));}},'Удалить локальные версии'))),
     !active.length && e('div', { class: 'empty-state' }, e('h2', null, 'Пока нет хранилищ'), e('p', null, 'Создайте первое хранилище и задайте его фразу.')),
     v && !v.deleted && (!v.key ? e('button', { class: 'primary', onClick: () => form('open', selected) }, 'Открыть хранилище') : e('div', null,
       e('div', { class: 'actions' }, e('button', { disabled: busy || Boolean(v.transfer), onClick: () => void run(() => closeVault(user, selected)) }, 'Закрыть хранилище'),
         e('button', { disabled: busy || Boolean(v.transfer), onClick: () => form('transfer', selected) }, 'Забыл фразу · перенести')),
       v.transfer && e('p', { class: 'auth-notice' }, 'Перенос подготовлен. Подключитесь к сети и завершите синхронизацию. Исходник сохранён до подтверждения.'),
-      !heads(v).length && !normalizedQuery&&e('div', { class: 'empty-state' }, e('h2', null, 'Пока нет заметок'), e('p', null, 'Создайте первую заметку')),
-      heads(v).length>0&&!visibleItems.length&&e('div',{class:'empty-state'},e('h2',null,'Ничего не найдено'),e('p',null,'Измените запрос или сбросьте фильтры.'),e('button',{onClick:()=>{setQuery('');setSelectedTags([]);setQuickFilter('all');}},'Сбросить фильтры')),
-      [...new Set(heads(v).map(r=>r.objectId))].filter(objectId=>heads(v).filter(r=>r.objectId===objectId).length>1).map(objectId=>
+      !heads(v).some(r=>notes[r.id]&&statusOf(v,r,notes[r.id])==='active') && !normalizedQuery&&e('div', { class: 'empty-state' }, e('h2', null, 'Пока нет заметок'), e('p', null, 'Создайте первую заметку или верните заметку из архива.')),
+      heads(v).some(r=>notes[r.id]&&statusOf(v,r,notes[r.id])==='active')&&!visibleItems.length&&e('div',{class:'empty-state'},e('h2',null,'Ничего не найдено'),e('p',null,'Измените запрос или сбросьте фильтры.'),e('button',{onClick:()=>{setQuery('');setSelectedTags([]);setQuickFilter('all');}},'Сбросить фильтры')),
+      [...new Set(heads(v).map(r=>r.objectId))].filter(objectId=>{const versions=heads(v).filter(r=>r.objectId===objectId);return versions.length>1&&versions.some(r=>notes[r.id]&&statusOf(v,r,notes[r.id])==='active');}).map(objectId=>
         e('button',{disabled:busy||Boolean(v.transfer),onClick:()=>{const versions=heads(v).filter(r=>r.objectId===objectId).map(r=>r.id);
           setComparison({objectId,versions,chosen:versions[0]});setScreen('conflict');}},'Сравнить версии: '+(notes[heads(v).find(r=>r.objectId===objectId)!.id]?.title||'Без заголовка'))),
       visibleItems.map(({current,revision:r,note}) => e('div',{class:'note-list-item',key:current.header.id+'.'+r.id},e('button', { class:'note-row'+(note!.pinned?' pinned':''), disabled: Boolean(current.transfer), onClick: () => openRevision(current,r) },

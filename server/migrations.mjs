@@ -1,6 +1,6 @@
 import { randomUUID } from 'node:crypto';
 
-export const SCHEMA_VERSION = 9;
+export const SCHEMA_VERSION = 10;
 
 export function migrate(db) {
   db.exec('BEGIN IMMEDIATE');
@@ -120,6 +120,18 @@ export function migrate(db) {
           CASE WHEN plan_state='done' THEN 'done' WHEN seen_at IS NOT NULL THEN 'seen' WHEN fired_at IS NOT NULL THEN 'fired' ELSE 'scheduled' END,
           fired_at,seen_at,CASE WHEN plan_state='done' THEN coalesce(seen_at,fired_at,due_at) END,next_nudge,cycle FROM reminders;
       UPDATE reminder_deliveries SET occurrence_id=reminder_id WHERE occurrence_id IS NULL;
+    `);
+    if(version<10)db.exec(`
+      CREATE TABLE note_lifecycle(
+        vault_id TEXT NOT NULL REFERENCES vaults(id) ON DELETE CASCADE,
+        object_id TEXT NOT NULL,
+        state TEXT NOT NULL CHECK(state IN('active','trash','purged')),
+        record_id TEXT NOT NULL,
+        changed_at INTEGER NOT NULL,
+        purge_after INTEGER,
+        PRIMARY KEY(vault_id,object_id)
+      ) STRICT;
+      CREATE INDEX note_lifecycle_cleanup ON note_lifecycle(state,purge_after);
     `);
     db.exec(`PRAGMA user_version = ${SCHEMA_VERSION}`);
     db.exec('COMMIT');

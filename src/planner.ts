@@ -1,6 +1,6 @@
 import { generateVaultKey, wrapWithPhrase, unwrapWithPhrase, type Context } from './crypto/vault.ts';
 import { seal, unseal, rememberKey } from './crypto/records.ts';
-import { readState, writeState, exclusive, announce, type State, type Vault, type Header, type Revision } from './storage.ts';
+import { readState, writeState, exclusive, announce, type State, type Vault, type Header, type Revision, type ObjectState } from './storage.ts';
 import { session } from './auth.ts';
 import type { User } from './types/auth';
 import { createAccess, signAccess } from './crypto/access.ts';
@@ -11,7 +11,10 @@ export interface NoteAttachment { id:string;name:string;type:string;size:number;
 export interface ChecklistItem { id:string;text:string;done:boolean }
 export interface TagDefinition { id:string;name:string;color:string;deleted:boolean;op:string }
 export type VaultPushMode='neutral'|'title';
-export interface Note { title: string; text: string; html?:string;attachments?:NoteAttachment[];checklist?:ChecklistItem[];tagIds?:string[];pinned?:boolean;reminder?:ReminderPlan; author?:{name:string;time:number} }
+export type NoteLifecycleState='active'|'archived'|'trashed';
+export interface NoteLifecycle { state:NoteLifecycleState;changedAt:number }
+export interface Note { title: string; text: string; html?:string;attachments?:NoteAttachment[];checklist?:ChecklistItem[];tagIds?:string[];pinned?:boolean;reminder?:ReminderPlan;
+  lifecycle?:NoteLifecycle;author?:{name:string;time:number} }
 interface TagCatalog { kind:'tag-catalog';title:string;text:string;tags:TagDefinition[];push?:{mode:VaultPushMode;op:string} }
 const id = () => crypto.randomUUID();
 const allHeads = (v: Vault) => { const parents = new Set(v.records.flatMap(r => [r.parent,...(r.resolves??[])])); return v.records.filter(r => !parents.has(r.id)); };
@@ -42,6 +45,7 @@ function note(value: unknown): Note {
   const checklist='checklist'in value?value.checklist:undefined;
   const tagIds='tagIds'in value?value.tagIds:undefined;
   const pinned='pinned'in value?value.pinned:undefined;
+  const lifecycle='lifecycle'in value?value.lifecycle:undefined;
   if(reminder!==undefined&&!validPlan(reminder))throw Error('Повреждено напоминание');
   if(html!==undefined&&typeof html!=='string')throw Error('Повреждено форматирование заметки');
   if(attachments!==undefined&&(!Array.isArray(attachments)||attachments.length>15||!attachments.every(validAttachment)
@@ -52,9 +56,11 @@ function note(value: unknown): Note {
   if(tagIds!==undefined&&(!Array.isArray(tagIds)||tagIds.length>100||!tagIds.every(item=>typeof item==='string'&&item.length<=100)
     ||new Set(tagIds).size!==tagIds.length))throw Error('Повреждены теги заметки');
   if(pinned!==undefined&&typeof pinned!=='boolean')throw Error('Повреждён признак закрепления заметки');
+  if(lifecycle!==undefined&&(!lifecycle||typeof lifecycle!=='object'||!('state'in lifecycle)||!['active','archived','trashed'].includes(String(lifecycle.state))
+    ||!('changedAt'in lifecycle)||!Number.isSafeInteger(lifecycle.changedAt)))throw Error('Повреждён жизненный цикл заметки');
   return { title: value.title, text: value.text, ...(html!==undefined?{html}:{}), ...(attachments?{attachments:attachments as NoteAttachment[]}:{}),
     ...(checklist?{checklist:checklist as ChecklistItem[]}:{}),...(tagIds?{tagIds:tagIds as string[]}:{}),...(pinned!==undefined?{pinned}:{}),
-    ...(reminder?{reminder}:{}), ...(author&&typeof author==='object'&&'name'in author&&typeof author.name==='string'&&'time'in author&&Number.isSafeInteger(author.time)
+    ...(reminder?{reminder}:{}),...(lifecycle?{lifecycle:lifecycle as NoteLifecycle}:{}), ...(author&&typeof author==='object'&&'name'in author&&typeof author.name==='string'&&'time'in author&&Number.isSafeInteger(author.time)
     ?{author:author as {name:string;time:number}}:{}) };
 }
 export async function readNote(user: string, v: Vault, r: Revision): Promise<Note> {
@@ -126,7 +132,7 @@ export const openVault = (user: User, vid: string, phrase: string) => edit(user,
     v.displayName=await vaultName(user.id, v);
   } catch { delete v.key; throw Error('Неверная фраза или повреждённые данные.'); }
   if (v.deleted) await stashDeleted(s, v);
-  else v.needsGrant=true;
+  else {for(const objectId of v.purgedObjects??[])await stashPurgedObject(s,v,objectId);v.purgedObjects=[];v.needsGrant=true;}
 });
 export const closeVault = (user: User, vid: string) => edit(user, async s => {
   const v = vault(s, vid); if (v.transfer) throw Error('Сначала завершите перенос');
@@ -137,6 +143,58 @@ async function addRevision(user: string, v: Vault, objectId: string, parent: str
   const rid = id(), r: Revision = { id: rid, objectId, parent, sealed: await seal(v.key, context(user, v.header, objectId, rid), parent, value), pending: true, reminderPending:true };
   v.records.push(r); return r;
 }
+function oneHead(v:Vault,objectId:string){
+  const versions=heads(v).filter(r=>r.objectId===objectId);if(versions.length!==1)throw Error('Сначала разрешите конфликт версий заметки.');return versions[0];
+}
+function lifecycleExpected(v:Vault,objectId:string){
+  const pending=v.records.filter(r=>r.objectId===objectId&&r.lifecyclePending).at(-1);return pending?.id??v.objectStates?.[objectId]?.recordId??null;
+}
+export const noteLifecycle=(v:Vault,r:Revision,value:Note):NoteLifecycleState=>{
+  if(v.purgePending?.includes(r.objectId)||v.purgedObjects?.includes(r.objectId))return'trashed';
+  const pending=v.records.filter(item=>item.objectId===r.objectId&&item.lifecyclePending).at(-1)?.lifecyclePending;
+  if(pending)return pending.state==='trash'?'trashed':'active';
+  if(v.objectStates?.[r.objectId]?.state==='trash')return'trashed';
+  return value.lifecycle?.state??'active';
+};
+export const archiveNote=(user:User,vid:string,objectId:string)=>edit(user,async s=>{
+  const v=vault(s,vid),current=oneHead(v,objectId),value=await readNote(user.id,v,current);
+  if(noteLifecycle(v,current,value)!=='active')throw Error('Заметка уже перемещена.');
+  const reminder=value.reminder?{...value.reminder,state:'off' as const}:undefined;
+  await addRevision(user.id,v,objectId,current.id,{...value,lifecycle:{state:'archived',changedAt:Date.now()},reminder,author:{name:s.deviceName??'Устройство',time:Date.now()}});
+});
+export const restoreArchivedNote=(user:User,vid:string,objectId:string,resumeReminder:boolean)=>edit(user,async s=>{
+  const v=vault(s,vid),current=oneHead(v,objectId),value=await readNote(user.id,v,current);
+  if(noteLifecycle(v,current,value)!=='archived')throw Error('Заметка не находится в архиве.');
+  const reminder=value.reminder?{...value.reminder,state:resumeReminder?'active' as const:'off' as const}:undefined;
+  await addRevision(user.id,v,objectId,current.id,{...value,lifecycle:{state:'active',changedAt:Date.now()},reminder,author:{name:s.deviceName??'Устройство',time:Date.now()}});
+});
+export const trashNote=(user:User,vid:string,objectId:string)=>edit(user,async s=>{
+  const v=vault(s,vid),current=oneHead(v,objectId),value=await readNote(user.id,v,current);
+  if(noteLifecycle(v,current,value)==='trashed')throw Error('Заметка уже находится в корзине.');
+  const reminder=value.reminder?{...value.reminder,state:'off' as const}:undefined,expected=lifecycleExpected(v,objectId);
+  const created=await addRevision(user.id,v,objectId,current.id,{...value,lifecycle:{state:'trashed',changedAt:Date.now()},reminder,author:{name:s.deviceName??'Устройство',time:Date.now()}});
+  created.lifecyclePending={state:'trash',expected};
+});
+export const restoreTrashedNote=(user:User,vid:string,objectId:string)=>edit(user,async s=>{
+  const v=vault(s,vid),current=oneHead(v,objectId),value=await readNote(user.id,v,current);
+  if(noteLifecycle(v,current,value)!=='trashed')throw Error('Заметка не находится в корзине.');
+  const expected=lifecycleExpected(v,objectId),reminder=value.reminder?{...value.reminder,state:'off' as const}:undefined;
+  const created=await addRevision(user.id,v,objectId,current.id,{...value,lifecycle:{state:'active',changedAt:Date.now()},reminder,author:{name:s.deviceName??'Устройство',time:Date.now()}});
+  created.lifecyclePending={state:'active',expected};v.purgePending=(v.purgePending??[]).filter(id=>id!==objectId);
+});
+export const permanentlyDeleteNote=(user:User,vid:string,objectId:string)=>edit(user,async s=>{
+  const v=vault(s,vid),current=oneHead(v,objectId),value=await readNote(user.id,v,current);
+  if(noteLifecycle(v,current,value)!=='trashed')throw Error('Сначала переместите заметку в корзину.');
+  v.purgePending??=[];if(!v.purgePending.includes(objectId))v.purgePending.push(objectId);
+});
+export const noteHistory=async(user:string,v:Vault,objectId:string)=>Promise.all(v.records.filter(r=>r.objectId===objectId).map(async revision=>({revision,note:await readNote(user,v,revision)})));
+export const restoreNoteVersion=(user:User,vid:string,objectId:string,revisionId:string)=>edit(user,async s=>{
+  const v=vault(s,vid),current=oneHead(v,objectId),selected=v.records.find(r=>r.objectId===objectId&&r.id===revisionId);
+  if(!selected)throw Error('Версия больше не доступна.');const previous=await readNote(user.id,v,selected),present=await readNote(user.id,v,current);
+  const {author:_,lifecycle:__,reminder:oldReminder,...contents}=previous;
+  const reminder=oldReminder?{...oldReminder,id:id(),state:'off' as const}:undefined;
+  await addRevision(user.id,v,objectId,current.id,{...contents,...(reminder?{reminder}:{}),lifecycle:present.lifecycle??{state:'active',changedAt:Date.now()},author:{name:s.deviceName??'Устройство',time:Date.now()}});
+});
 async function writeCatalog(user:string,v:Vault,tags:TagDefinition[],push:{mode:VaultPushMode;op:string}){
   if(!v.key||v.deleted||v.transfer)throw Error('Хранилище недоступно для записи');
   const versions=catalogHeads(v),parent=versions[0]?.id??null,resolves=versions.slice(1).map(r=>r.id),rid=id();
@@ -178,7 +236,7 @@ export const saveNote = (user: User, vid: string, objectId: string, parent: stri
 });
 export const copyNote=(user:User,vid:string,revisionId:string)=>edit(user,async s=>{
   const v=vault(s,vid),revision=heads(v).find(r=>r.id===revisionId);if(!revision)throw Error('Версия заметки изменилась');
-  const source=await readNote(user.id,v,revision),reminder=source.reminder?{...source.reminder,id:id(),state:'off' as const}:undefined,{author:_,...contents}=source;
+  const source=await readNote(user.id,v,revision),reminder=source.reminder?{...source.reminder,id:id(),state:'off' as const}:undefined,{author:_,lifecycle:__,...contents}=source;
   const created=await addRevision(user.id,v,id(),null,{...contents,title:source.title?source.title+' — копия':'Копия заметки',pinned:false,reminder});return created.id;
 });
 function stashContext(s: State, sid: string): Context {
@@ -197,12 +255,25 @@ async function stashDeleted(s: State, v: Vault) {
   for (const r of heads(v).filter(r => r.pending)) await addStash(s, v.header.id, await readNote(s.user.id, v, r));
   v.records = []; delete v.key; delete v.transfer;
 }
+async function stashPurgedObject(s:State,v:Vault,objectId:string){
+  if(!v.key){
+    if(v.records.some(r=>r.objectId===objectId&&r.pending)){v.purgedObjects??=[];if(!v.purgedObjects.includes(objectId))v.purgedObjects.push(objectId);}
+    else v.records=v.records.filter(r=>r.objectId!==objectId);
+    v.purgePending=(v.purgePending??[]).filter(id=>id!==objectId);delete v.objectStates?.[objectId];return;
+  }
+  for(const r of heads(v).filter(r=>r.objectId===objectId&&r.pending))await addStash(s,v.header.id,await readNote(s.user.id,v,r));
+  v.records=v.records.filter(r=>r.objectId!==objectId);v.purgePending=(v.purgePending??[]).filter(id=>id!==objectId);delete v.objectStates?.[objectId];
+  v.purgedObjects=(v.purgedObjects??[]).filter(id=>id!==objectId);
+}
 export const moveStash = (user: User, sid: string, target: string) => edit(user, async s => {
-  const value=await readStash(s,sid);
-  await addRevision(user.id,vault(s,target),id(),null,{...value,...(value.reminder?{reminder:{...value.reminder,id:id(),state:'off' as const}}:{})});
+  const value=await readStash(s,sid),{lifecycle:_,author:__,...contents}=value;
+  await addRevision(user.id,vault(s,target),id(),null,{...contents,...(value.reminder?{reminder:{...value.reminder,id:id(),state:'off' as const}}:{})});
   s.stash = s.stash.filter(r => r.id !== sid);
 });
 export const discardStash = (user: User, sid: string) => edit(user, async s => { s.stash = s.stash.filter(r => r.id !== sid); });
+export const discardPurgedObjects=(user:User,vid:string)=>edit(user,async s=>{
+  const v=vault(s,vid,false),objects=new Set(v.purgedObjects??[]);v.records=v.records.filter(r=>!objects.has(r.objectId));v.purgedObjects=[];
+});
 export const renameDevice=(user:User,name:string)=>edit(user,async s=>{
   if(!name.trim()||name.length>80)throw Error('Название устройства: от 1 до 80 символов');s.deviceName=name.trim();
 });
@@ -237,6 +308,7 @@ class APIError extends Error {
       missing_parent: 'Предыдущая версия пока не найдена на сервере. Локальные данные сохранены.',
       vault_locked:'Хранилище закрыто на всех устройствах. Введите фразу заново для синхронизации.',
       wrong_password:'Неверный пароль аккаунта.',access_not_ready:'Сначала откройте хранилище и синхронизируйте его.',
+      object_deleted:'Заметка окончательно удалена на другом устройстве.',object_state_conflict:'Состояние заметки изменилось на другом устройстве. Синхронизируйте и повторите действие.',
     } as Record<string, string>)[code] ?? 'Не удалось синхронизировать данные (' + code + '). Локальная копия сохранена.');
     this.code = code;
   }
@@ -257,7 +329,7 @@ async function vaultRequest(account: string, path: string, body?: unknown, crede
 async function commit(user:User,fn:(s:State)=>Promise<void>){
   await exclusive(async()=>{const s=await readState(user.id);if(!s)throw Error('Локальный аккаунт закрыт');await fn(s);await writeState(s);announce();});
 }
-const wire=(r:Revision)=>{const{pending:_,reminderPending:__,...value}=r;return value;};
+const wire=(r:Revision)=>{const{pending:_,reminderPending:__,lifecyclePending:___,...value}=r;return value;};
 function lock(v:Vault,epoch?:number){delete v.key;delete v.grant;v.needsGrant=false;if(epoch!==undefined)v.epoch=epoch;}
 const accessContext=(user:string,v:Vault)=>context(user,v.header,v.header.keyId,v.header.keyId);
 export async function closeAllVault(user:User,vid:string,password:string){
@@ -296,6 +368,13 @@ export async function synchronize(user:User){
         records.push(...page.records);if(page.next===null)return records;
         if(!Number.isSafeInteger(page.next)||page.next<=after)throw Error('Некорректная страница данных');after=page.next;
       }
+    }
+    async function fetchObjectStates(vid:string):Promise<Record<string,ObjectState>>{
+      const result=await api('/'+vid+'/objects',undefined,[vid]);if(!Array.isArray(result.objects)||result.objects.length>10000)throw Error('Некорректные состояния заметок');
+      const states:Record<string,ObjectState>={};for(const item of result.objects){
+        if(!item||!['active','trash','purged'].includes(item.state)||typeof item.objectId!=='string'||typeof item.recordId!=='string')throw Error('Некорректное состояние заметки');
+        states[item.objectId]={state:item.state,recordId:item.recordId,...(Number.isSafeInteger(item.trashedAt)?{trashedAt:item.trashedAt}:{}),...(Number.isSafeInteger(item.purgeAfter)?{purgeAfter:item.purgeAfter}:{})};
+      }return states;
     }
     const failures:string[]=[];
     const remote=await api('');
@@ -354,6 +433,10 @@ export async function synchronize(user:User){
         await api('/label',{vaultId:vid,displayName},[vid]);
         await commit(user,async state=>{vault(state,vid,false).displayName=displayName;});
       }
+      const remoteStates=await fetchObjectStates(vid);
+      await commit(user,async state=>{const current=vault(state,vid,false);current.objectStates??={};
+        for(const [objectId,item] of Object.entries(remoteStates)){if(item.state==='purged')await stashPurgedObject(state,current,objectId);else current.objectStates[objectId]=item;}
+      });
       const incoming=await fetchRecords(vid);
       await commit(user,async state=>{
         const current=vault(state,vid,false);if(current.deleted)return;
@@ -366,6 +449,18 @@ export async function synchronize(user:User){
         const latest=(await snapshot(vid)).v;if(latest.transfer||latest.deleted)break;
         await api('/record',{vaultId:vid,record:wire(r)},[vid]);
         await commit(user,async state=>{const local=vault(state,vid,false).records.find(x=>x.id===r.id);if(local)local.pending=false;});
+      }
+      ({v}=await snapshot(vid));
+      for(const r of v.records.filter(r=>r.lifecyclePending)){
+        const pending=r.lifecyclePending!;const result=await api('/object-state',{vaultId:vid,objectId:r.objectId,recordId:r.id,expected:pending.expected,state:pending.state},[vid]);
+        await commit(user,async state=>{const current=vault(state,vid,false),local=current.records.find(item=>item.id===r.id);if(local)delete local.lifecyclePending;
+          current.objectStates??={};current.objectStates[r.objectId]={state:result.object.state,recordId:result.object.recordId,...(Number.isSafeInteger(result.object.trashedAt)?{trashedAt:result.object.trashedAt}:{}),...(Number.isSafeInteger(result.object.purgeAfter)?{purgeAfter:result.object.purgeAfter}:{})};});
+      }
+      ({v}=await snapshot(vid));
+      for(const objectId of v.purgePending??[]){const objectState=v.objectStates?.[objectId];if(!objectState)continue;
+        if(objectState.state!=='purged')await api('/purge-object',{vaultId:vid,objectId,expected:objectState.recordId,confirmed:true},[vid]);
+        await commit(user,async state=>{const current=vault(state,vid,false);current.records=current.records.filter(r=>r.objectId!==objectId);current.purgePending=(current.purgePending??[]).filter(id=>id!==objectId);
+          current.objectStates??={};current.objectStates[objectId]={state:'purged',recordId:objectState.recordId};state.reminderSeen=(state.reminderSeen??[]).filter(item=>item.vaultId!==vid||item.objectId!==objectId);});
       }
       ({v}=await snapshot(vid));
       if(v.key){
@@ -403,7 +498,7 @@ export async function synchronize(user:User){
     if(failures.length)throw Error([...new Set(failures)].join(' · '));
   });
 }
-export const hasUnsaved = (s: State) => Boolean(s.reminderSeen?.length)||s.stash.length > 0 || s.vaults.some(v => v.pending || v.transfer || v.records.some(r => r.pending||r.reminderPending));
+export const hasUnsaved = (s: State) => Boolean(s.reminderSeen?.length)||s.stash.length > 0 || s.vaults.some(v => v.pending || v.transfer || Boolean(v.purgePending?.length)||Boolean(v.purgedObjects?.length)||v.records.some(r => r.pending||r.reminderPending||r.lifecyclePending));
 let flushHandler: (() => Promise<void>) | undefined;
 export function registerDraftFlush(fn?: () => Promise<void>) { flushHandler = fn; }
 export async function flushDraft() { await flushHandler?.(); }
