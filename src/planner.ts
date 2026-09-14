@@ -237,7 +237,7 @@ export const saveNote = (user: User, vid: string, objectId: string, parent: stri
 export const copyNote=(user:User,vid:string,revisionId:string)=>edit(user,async s=>{
   const v=vault(s,vid),revision=heads(v).find(r=>r.id===revisionId);if(!revision)throw Error('Версия заметки изменилась');
   const source=await readNote(user.id,v,revision),reminder=source.reminder?{...source.reminder,id:id(),state:'off' as const}:undefined,{author:_,lifecycle:__,...contents}=source;
-  const created=await addRevision(user.id,v,id(),null,{...contents,title:source.title?source.title+' — копия':'Копия заметки',pinned:false,reminder});return created.id;
+  const created=await addRevision(user.id,v,id(),null,{...contents,title:source.title?source.title+' — копия':'Копия заметки',pinned:false,reminder,author:{name:s.deviceName??'Устройство',time:Date.now()}});return created.id;
 });
 function stashContext(s: State, sid: string): Context {
   return { accountId: s.user.id, vaultId: s.user.id, keyId: s.user.id, objectId: sid, revisionId: sid };
@@ -286,14 +286,14 @@ export const resolveConflict=(user:User,vid:string,objectId:string,expected:stri
   const rid=id(),value=await readNote(user.id,v,selected);
   v.records.push({id:rid,objectId,parent:chosen,resolves,pending:true,reminderPending:true,
     sealed:await seal(v.key!,context(user.id,v.header,objectId,rid),chosen,{...value,author,resolves})});
-  if(keepBoth)for(const r of others){const copy=await readNote(user.id,v,r);
-    await addRevision(user.id,v,id(),null,{...copy,...(copy.reminder?{reminder:{...copy.reminder,id:id(),state:'off' as const}}:{}),author});}
+  if(keepBoth)for(const r of others){const copy=await readNote(user.id,v,r),{lifecycle:_,author:__,...contents}=copy;
+    await addRevision(user.id,v,id(),null,{...contents,...(copy.reminder?{reminder:{...copy.reminder,id:id(),state:'off' as const}}:{}),author});}
 });
 export const transferVault = (user: User, source: string, name: string, phrase: string) => edit(user, async s => {
   const v = vault(s, source); if (v.deleted || v.transfer) throw Error('Перенос уже начат или хранилище удалено');
   const target = await makeVault(user.id, name, phrase);
-  for (const r of heads(v)){const copy=await readNote(user.id,v,r);
-    await addRevision(user.id,target,id(),null,{...copy,...(copy.reminder?{reminder:{...copy.reminder,id:id(),state:'off' as const}}:{})});}
+  for (const r of heads(v)){const copy=await readNote(user.id,v,r),created=await addRevision(user.id,target,id(),null,{...copy,...(copy.reminder?{reminder:{...copy.reminder,id:id(),state:'off' as const}}:{})});
+    if(copy.lifecycle?.state==='trashed')created.lifecyclePending={state:'trash',expected:null};}
   if(catalogHeads(v).length){const catalog=await readCatalog(user.id,v);await writeCatalog(user.id,target,catalog.tags,catalog.push);}
   s.vaults.push(target); v.transfer = { target: target.header.id, revisions: target.records.map(r => r.id) };
   return target.header.id;

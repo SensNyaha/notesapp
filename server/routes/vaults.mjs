@@ -104,6 +104,7 @@ export function registerVaults(app, db, { guard, accessOf, clock }) {
   });
   post('object-state',obj({vaultId:uuid,objectId:uuid,recordId:uuid,expected:{anyOf:[uuid,{type:'null'}]},state:{enum:['active','trash']}}),(req,user)=>{
     const {vaultId,objectId,recordId,expected,state}=req.body;permit(req,own(user,vaultId));purgeExpired();
+    if(objectId===vaultId)fail('invalid_request',400);
     if(!db.prepare('SELECT 1 FROM records WHERE id=? AND vault_id=? AND object_id=?').get(recordId,vaultId,objectId))fail('missing_parent',409);
     const current=db.prepare('SELECT * FROM note_lifecycle WHERE vault_id=? AND object_id=?').get(vaultId,objectId);
     if(current?.state==='purged')fail('object_deleted',410);
@@ -121,6 +122,7 @@ export function registerVaults(app, db, { guard, accessOf, clock }) {
   });
   post('purge-object',obj({vaultId:uuid,objectId:uuid,expected:uuid,confirmed:{const:true}}),(req,user)=>{
     const {vaultId,objectId,expected}=req.body;permit(req,own(user,vaultId));purgeExpired();
+    if(objectId===vaultId)fail('invalid_request',400);
     const current=db.prepare('SELECT * FROM note_lifecycle WHERE vault_id=? AND object_id=?').get(vaultId,objectId);
     if(current?.state==='purged')return{ok:true};
     if(!current||current.state!=='trash'||current.record_id!==expected)fail('object_state_conflict',409);

@@ -488,24 +488,36 @@ export function Planner({ user,reminderTarget,onReminderHandled }: { user: User;
       e('button',{class:'icon-danger',onClick:()=>{if(confirm('Удалить тег «'+tag.name+'»? Заметки останутся на месте.'))void run(async()=>{await deleteTag(user,selected,tag.id);setSelectedTags(current=>current.filter(id=>id!==tag.id));void sync();});}},'Удалить'));}),feedback);
   }
   if((screen==='archive'||screen==='trash')&&v?.key){const wanted=screen==='archive'?'archived':'trashed',normalized=query.trim().toLocaleLowerCase('ru');
+    const conflictObjects=[...new Set(heads(v).map(revision=>revision.objectId))].filter(objectId=>{const versions=heads(v).filter(revision=>revision.objectId===objectId);return versions.length>1&&versions.some(revision=>notes[revision.id]&&statusOf(v,revision,notes[revision.id])===wanted);});
     const items=heads(v).map(revision=>({revision,note:notes[revision.id]})).filter((item):item is {revision:Revision;note:Note}=>Boolean(item.note))
-      .filter(item=>statusOf(v,item.revision,item.note)===wanted&&!(screen==='trash'&&v.purgePending?.includes(item.revision.objectId)))
+      .filter(item=>!conflictObjects.includes(item.revision.objectId)&&statusOf(v,item.revision,item.note)===wanted&&!(screen==='trash'&&v.purgePending?.includes(item.revision.objectId))&&selectedTags.every(tagId=>(item.note.tagIds??[]).includes(tagId)))
       .map(item=>({...item,score:normalized?noteSearchScore(query,{note:item.note,tags:tagChips(v.header.id,item.note.tagIds)}):0})).filter(item=>!normalized||item.score)
-      .sort((a,b)=>normalized?b.score-a.score:sort==='title'?a.note.title.localeCompare(b.note.title,'ru'):sort==='oldest'?(a.note.author?.time??0)-(b.note.author?.time??0):(b.note.author?.time??0)-(a.note.author?.time??0));
+      .sort((a,b)=>normalized?(searchSort==='relevance'?b.score-a.score:searchSort==='oldest'?(a.note.author?.time??0)-(b.note.author?.time??0):(b.note.author?.time??0)-(a.note.author?.time??0))
+        :sort==='title'?a.note.title.localeCompare(b.note.title,'ru'):sort==='oldest'?(a.note.author?.time??0)-(b.note.author?.time??0):(b.note.author?.time??0)-(a.note.author?.time??0));
     const all=heads(v).map(revision=>({revision,note:notes[revision.id]})).filter((item):item is {revision:Revision;note:Note}=>Boolean(item.note)&&statusOf(v,item.revision,item.note)===wanted&&!v.purgePending?.includes(item.revision.objectId));
     return e('section',{class:'card planner lifecycle-screen'},
-      e('div',{class:'card-heading'},e('button',{onClick:()=>{setQuery('');setScreen('list');}},'Назад'),e('h1',null,screen==='archive'?'Архив':'Корзина'),
-        screen==='trash'&&Boolean(all.length)&&e('button',{class:'danger-button',disabled:busy,onClick:()=>{if(confirm('Окончательно удалить все заметки из корзины и всю их историю?'))void run(async()=>{for(const item of all)await permanentlyDeleteNote(user,v.header.id,item.revision.objectId);setStatus('Очистка корзины поставлена в очередь синхронизации.');void sync();});}},'Очистить корзину'))),
+      e('div',{class:'card-heading'},e('button',{onClick:()=>{setQuery('');setSelectedTags([]);setScreen('list');}},'Назад'),e('h1',null,screen==='archive'?'Архив':'Корзина'),
+        screen==='trash'&&Boolean(all.length)&&e('button',{class:'danger-button',disabled:busy,onClick:()=>{if(confirm('Окончательно удалить все заметки из корзины и всю их историю?'))void run(async()=>{for(const item of all)await permanentlyDeleteNote(user,v.header.id,item.revision.objectId);setStatus('Очистка корзины поставлена в очередь синхронизации.');void sync();});}},'Очистить корзину')),
       e('div',{class:screen==='archive'?'lifecycle-info':'lifecycle-info trash'},screen==='archive'?'Архивные заметки не удалены. Их можно восстановить в любое время; напоминания приостановлены.':'Заметки автоматически удаляются через 30 дней. До этого их можно восстановить.'),
       e('div',{class:'organization-tools'},e('label',{class:'search-field'},'Поиск',e('input',{type:'search',value:query,placeholder:'Найти заметку',onInput:(event:Event)=>setQuery((event.target as HTMLInputElement).value)})),
-        e('label',null,'Сортировка',e('select',{value:sort,onChange:(event:Event)=>setSort((event.target as HTMLSelectElement).value as typeof sort)},e('option',{value:'newest'},'Сначала новые'),e('option',{value:'oldest'},'Сначала старые'),e('option',{value:'title'},'По заголовку')))),
+        normalized?e('label',null,'Сортировка результатов',e('select',{value:searchSort,onChange:(event:Event)=>setSearchSort((event.target as HTMLSelectElement).value as typeof searchSort)},e('option',{value:'relevance'},'По релевантности'),e('option',{value:'newest'},'Сначала новые'),e('option',{value:'oldest'},'Сначала старые')))
+          :e('label',null,'Сортировка',e('select',{value:sort,onChange:(event:Event)=>setSort((event.target as HTMLSelectElement).value as typeof sort)},e('option',{value:'newest'},'Сначала новые'),e('option',{value:'oldest'},'Сначала старые'),e('option',{value:'title'},'По заголовку')))),
+      activeTags(v.header.id).length>0&&e('div',{class:'tag-filter'},e('button',{class:selectedTags.length?'filter-chip':'filter-chip selected',onClick:()=>setSelectedTags([])},'Все'),activeTags(v.header.id).map(tag=>e('button',{key:tag.id,class:selectedTags.includes(tag.id)?'tag-chip selected':'tag-chip',style:{'--tag-color':tag.color},'aria-pressed':selectedTags.includes(tag.id),onClick:()=>setSelectedTags(current=>current.includes(tag.id)?current.filter(id=>id!==tag.id):[...current,tag.id])},tag.name))),
+      conflictObjects.map(objectId=>e('button',{class:'conflict-notice',disabled:busy,key:'conflict-'+objectId,onClick:()=>{const versions=heads(v).filter(revision=>revision.objectId===objectId).map(revision=>revision.id);setComparison({objectId,versions,chosen:versions[0]});setScreen('conflict');}},'Разрешить конфликт версий: '+(notes[heads(v).find(revision=>revision.objectId===objectId)!.id]?.title||'Без заголовка'))),
       !items.length&&e('div',{class:'empty-state'},e('h2',null,normalized?'Ничего не найдено':screen==='archive'?'Архив пуст':'Корзина пуста'),e('p',null,normalized?'Измените поисковый запрос.':screen==='archive'?'Архивированные заметки появятся здесь.':'Удалённые заметки будут храниться здесь 30 дней.')),
-      items.map(item=>{const expiry=v.objectStates?.[item.revision.objectId]?.purgeAfter;return e('article',{class:'lifecycle-row',key:item.revision.id},e('button',{class:'note-row',onClick:()=>openRevision(v,item.revision)},
-        e('strong',null,item.note.title||'Без заголовка'),e('span',{class:'note-preview'},item.note.text.slice(0,140)),tagChips(v.header.id,item.note.tagIds).length>0&&e('span',{class:'tag-list'},tagChips(v.header.id,item.note.tagIds).map(tag=>e('span',{class:'tag-chip',style:{'--tag-color':tag.color},key:tag.id},tag.name))),
-        e('small',null,screen==='trash'?(expiry?'Удаление '+new Date(expiry).toLocaleDateString('ru-RU'):'Ожидает синхронизации срока удаления'):new Date(item.note.lifecycle?.changedAt??item.note.author?.time??0).toLocaleString('ru-RU'))),
-        e('div',{class:'actions compact'},screen==='archive'?e('button',{disabled:busy,onClick:()=>void run(()=>restoreArchive(v,item.revision,item.note))},'Восстановить'):e('button',{disabled:busy,onClick:()=>void run(()=>restoreTrash(v,item.revision.objectId))},'Восстановить'),
-          e('button',{disabled:busy,onClick:()=>void run(()=>openHistory(v,item.revision.objectId,screen))},'История'),
-          screen==='trash'&&e('button',{class:'danger-button',disabled:busy,onClick:()=>{if(confirm('Удалить заметку и всю историю навсегда?'))void run(()=>purgeCurrent(v,item.revision.objectId));}},'Удалить навсегда')));}),feedback);
+      items.map(item=>{
+        const expiry=v.objectStates?.[item.revision.objectId]?.purgeAfter;
+        return e('article',{class:'lifecycle-row',key:item.revision.id},
+          e('button',{class:'note-row',onClick:()=>openRevision(v,item.revision)},e('strong',null,item.note.title||'Без заголовка'),
+            e('span',{class:'note-preview'},item.note.text.slice(0,140)),
+            tagChips(v.header.id,item.note.tagIds).length>0&&e('span',{class:'tag-list'},tagChips(v.header.id,item.note.tagIds).map(tag=>e('span',{class:'tag-chip',style:{'--tag-color':tag.color},key:tag.id},tag.name))),
+            e('small',null,screen==='trash'?(expiry?'Удаление '+new Date(expiry).toLocaleDateString('ru-RU'):'Ожидает синхронизации срока удаления'):new Date(item.note.lifecycle?.changedAt??item.note.author?.time??0).toLocaleString('ru-RU'))),
+          e('div',{class:'actions compact'},
+            screen==='archive'?e('button',{disabled:busy,onClick:()=>void run(()=>restoreArchive(v,item.revision,item.note))},'Восстановить'):e('button',{disabled:busy,onClick:()=>void run(()=>restoreTrash(v,item.revision.objectId))},'Восстановить'),
+            e('button',{disabled:busy,onClick:()=>void run(()=>openHistory(v,item.revision.objectId,screen))},'История'),
+            screen==='trash'&&e('button',{class:'danger-button',disabled:busy,onClick:()=>{if(confirm('Удалить заметку и всю историю навсегда?'))void run(()=>purgeCurrent(v,item.revision.objectId));}},'Удалить навсегда'))
+        );
+      }),feedback);
   }
   const normalizedQuery=query.trim().toLocaleLowerCase('ru');
   const candidates=(normalizedQuery?(state?.vaults??[]).filter(current=>current.key&&!current.deleted&&!current.transfer):v?.key?[v]:[]).flatMap(current=>
@@ -528,8 +540,8 @@ export function Planner({ user,reminderTarget,onReminderHandled }: { user: User;
         e('button',{onClick:()=>setScreen('tags')},'Управлять тегами'))),
     e('div', { class: 'actions' }, e('button', { disabled: busy, onClick: () => form('create') }, '+ Хранилище'),
       e('button',{disabled:busy,onClick:()=>{setScreen('schedule');setSelectedOccurrence('');setSelectedTags([]);void reminderRequest(user,'').then(value=>{setServerReminders(value.items);setReminderSettings(value.settings);}).catch(()=>{});}},'Сегодня'),
-      e('button',{disabled:!v?.key,onClick:()=>{setQuery('');setScreen('archive');}},'Архив'+(v?.key?' ('+heads(v).filter(r=>notes[r.id]&&statusOf(v,r,notes[r.id])==='archived').length+')':'')),
-      e('button',{disabled:!v?.key,onClick:()=>{setQuery('');setScreen('trash');}},'Корзина'+(v?.key?' ('+heads(v).filter(r=>notes[r.id]&&statusOf(v,r,notes[r.id])==='trashed'&&!v.purgePending?.includes(r.objectId)).length+')':'')),
+      e('button',{disabled:!v?.key,onClick:()=>{setQuery('');setSelectedTags([]);setScreen('archive');}},'Архив'+(v?.key?' ('+heads(v).filter(r=>notes[r.id]&&statusOf(v,r,notes[r.id])==='archived').length+')':'')),
+      e('button',{disabled:!v?.key,onClick:()=>{setQuery('');setSelectedTags([]);setScreen('trash');}},'Корзина'+(v?.key?' ('+heads(v).filter(r=>notes[r.id]&&statusOf(v,r,notes[r.id])==='trashed'&&!v.purgePending?.includes(r.objectId)).length+')':'')),
       e('button', { onClick: () => setScreen('stash') }, 'Отложенные заметки (' + (state?.stash.length ?? 0) + ')'),
       e('button',{onClick:()=>{setName(state?.deviceName??'Устройство');setScreen('device');}},'Это устройство: '+(state?.deviceName??'Устройство'))),
     v&&!v.deleted&&e('div',null,
