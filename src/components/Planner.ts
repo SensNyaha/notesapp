@@ -9,6 +9,7 @@ import { localTime } from '../../shared/reminders.mjs';
 import type { ReminderPlan } from '../../shared/reminders.mjs';
 import { reminderRequest, type ReminderStatus, type ReminderTarget } from '../reminders';
 import { Attachments, RichTextEditor, sanitizeNoteHtml } from './RichTextEditor';
+import { noteSearchScore } from '../search';
 
 interface Draft extends Note { vault: string; object: string; revision: string | null; dirty: boolean; key: CryptoKey }
 interface OpenedNote extends Note { vault: string; object: string; revision: string; key: CryptoKey }
@@ -43,6 +44,7 @@ export function Planner({ user,reminderTarget,onReminderHandled }: { user: User;
   const [serverReminders,setServerReminders]=useState<ReminderStatus[]>([]);
   const [query,setQuery]=useState(''),[selectedTags,setSelectedTags]=useState<string[]>([]);
   const [quickFilter,setQuickFilter]=useState<'all'|'pinned'|'untagged'|'reminder'>('all'),[sort,setSort]=useState<'newest'|'oldest'|'title'>('newest');
+  const [searchSort,setSearchSort]=useState<'relevance'|'newest'|'oldest'>('relevance');
   const [hideCompleted,setHideCompleted]=useState(false),[menuOpen,setMenuOpen]=useState(false);
   const [tagName,setTagName]=useState(''),[tagColor,setTagColor]=useState('#356AE6'),[editingTag,setEditingTag]=useState('');
   const [status, setStatus] = useState(''); const [error, setError] = useState(''); const [busy, setBusy] = useState(false);
@@ -367,18 +369,19 @@ export function Planner({ user,reminderTarget,onReminderHandled }: { user: User;
   const normalizedQuery=query.trim().toLocaleLowerCase('ru');
   const candidates=(normalizedQuery?(state?.vaults??[]).filter(current=>current.key&&!current.deleted&&!current.transfer):v?.key?[v]:[]).flatMap(current=>
     heads(current).map(revision=>({current,revision,note:notes[revision.id]})).filter(item=>Boolean(item.note)));
-  const visibleItems=candidates.filter(({current,note})=>{
-    if(normalizedQuery){const tagText=tagChips(current.header.id,note!.tagIds).map(tag=>tag.name).join(' '),checklist=(note!.checklist??[]).map(item=>item.text).join(' ');
-      if(![note!.title,note!.text,checklist,tagText].join('\n').toLocaleLowerCase('ru').includes(normalizedQuery))return false;}
+  const visibleItems=candidates.map(item=>({...item,score:normalizedQuery?noteSearchScore(query,{note:item.note!,tags:tagChips(item.current.header.id,item.note!.tagIds)}):0})).filter(({current,note,score})=>{
+    if(normalizedQuery&&!score)return false;
     if(quickFilter==='pinned'&&!note!.pinned||quickFilter==='untagged'&&(note!.tagIds??[]).some(id=>activeTags(current.header.id).some(tag=>tag.id===id))||quickFilter==='reminder'&&!note!.reminder)return false;
     return (!selectedTags.length||current.header.id===selected)&&selectedTags.every(tagId=>(note!.tagIds??[]).includes(tagId));
-  }).sort((a,b)=>Number(Boolean(b.note!.pinned))-Number(Boolean(a.note!.pinned))||(sort==='title'?a.note!.title.localeCompare(b.note!.title,'ru'):sort==='oldest'?(a.note!.author?.time??0)-(b.note!.author?.time??0):(b.note!.author?.time??0)-(a.note!.author?.time??0)));
+  }).sort((a,b)=>normalizedQuery?(searchSort==='relevance'?b.score-a.score||(b.note!.author?.time??0)-(a.note!.author?.time??0):searchSort==='oldest'?(a.note!.author?.time??0)-(b.note!.author?.time??0):(b.note!.author?.time??0)-(a.note!.author?.time??0))
+    :Number(Boolean(b.note!.pinned))-Number(Boolean(a.note!.pinned))||(sort==='title'?a.note!.title.localeCompare(b.note!.title,'ru'):sort==='oldest'?(a.note!.author?.time??0)-(b.note!.author?.time??0):(b.note!.author?.time??0)-(a.note!.author?.time??0)));
   return e('section', { class: 'card planner' },
     e('div', { class: 'card-heading' }, e('h1', null, 'Заметки'), e('button', { disabled: busy, onClick: () => void run(sync) }, 'Синхронизировать')),
     e('label', null, 'Хранилище', e('select', { value: selected, onChange: (ev: Event) => select((ev.target as HTMLSelectElement).value) },
       e('option', { value: '' }, 'Выберите хранилище'), active.map(v => e('option', { value: v.header.id, key: v.header.id }, names[v.header.id] || 'Хранилище')))),
-    e('div',{class:'organization-tools'},e('label',{class:'search-field'},'Поиск во всех открытых хранилищах',e('input',{type:'search',value:query,placeholder:'Заголовок, текст, пункт или тег',onInput:(ev:Event)=>setQuery((ev.target as HTMLInputElement).value)})),
-      e('label',null,'Сортировка',e('select',{value:sort,onChange:(ev:Event)=>setSort((ev.target as HTMLSelectElement).value as typeof sort)},e('option',{value:'newest'},'Сначала новые'),e('option',{value:'oldest'},'Сначала старые'),e('option',{value:'title'},'По заголовку')))),
+    e('div',{class:'organization-tools'},e('label',{class:'search-field'},'Поиск во всех открытых хранилищах',e('input',{type:'search',value:query,placeholder:'Слова, часть слова или фраза',onInput:(ev:Event)=>setQuery((ev.target as HTMLInputElement).value)})),
+      normalizedQuery?e('label',null,'Сортировка результатов',e('select',{value:searchSort,onChange:(ev:Event)=>setSearchSort((ev.target as HTMLSelectElement).value as typeof searchSort)},e('option',{value:'relevance'},'По релевантности'),e('option',{value:'newest'},'Сначала новые'),e('option',{value:'oldest'},'Сначала старые')))
+        :e('label',null,'Сортировка',e('select',{value:sort,onChange:(ev:Event)=>setSort((ev.target as HTMLSelectElement).value as typeof sort)},e('option',{value:'newest'},'Сначала новые'),e('option',{value:'oldest'},'Сначала старые'),e('option',{value:'title'},'По заголовку')))),
     v?.key&&e('div',{class:'filters'},e('div',{class:'quick-filters'},([['all','Все'],['pinned','Закреплённые'],['untagged','Без тегов'],['reminder','С напоминанием']] as const).map(([value,label])=>e('button',{class:quickFilter===value?'filter-chip selected':'filter-chip','aria-pressed':quickFilter===value,onClick:()=>setQuickFilter(value)},label))),
       e('div',{class:'tag-filter'},activeTags(v.header.id).map(tag=>e('button',{key:tag.id,class:selectedTags.includes(tag.id)?'tag-chip selected':'tag-chip',style:{'--tag-color':tag.color},'aria-pressed':selectedTags.includes(tag.id),onClick:()=>setSelectedTags(current=>current.includes(tag.id)?current.filter(id=>id!==tag.id):[...current,tag.id])},tag.name)),
         e('button',{onClick:()=>setScreen('tags')},'Управлять тегами'))),
