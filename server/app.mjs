@@ -24,7 +24,7 @@ function listPublicFiles(root, directory = root) {
 }
 
 export async function createApp({ dataDir = resolve('data'), staticDir = resolve('dist'), logger = true,
-  auth = { origin: 'http://localhost:3100', secure: false }, clock = Date.now, push = {} } = {}) {
+  auth = { origin: 'http://localhost:3100', rpId: 'localhost', secure: false }, clock = Date.now, push = {}, webauthn = {} } = {}) {
   const db = openDatabase(dataDir);
   const app = Fastify({ logger, bodyLimit: 4096, ajv: { customOptions: { coerceTypes: false, removeAdditional: false } },
     logController: new LogController({ disableRequestLogging: true }) });
@@ -54,7 +54,7 @@ export async function createApp({ dataDir = resolve('data'), staticDir = resolve
       serverTime: new Date().toISOString(),
     };
   });
-  try { await registerAuth(app, db, auth, clock, push, dataDir); }
+  try { await registerAuth(app, db, auth, clock, push, dataDir, webauthn); }
   catch (error) { await app.close(); throw error; }
   for (const file of listPublicFiles(staticDir)) {
     const body = readFileSync(file.path);

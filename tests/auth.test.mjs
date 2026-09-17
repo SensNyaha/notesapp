@@ -68,6 +68,23 @@ test('first login confirms administrator; server enforces input, CSRF and one-ti
   assert.equal((await f.post('login', { login: 'testadmin', password: 'Incorrect1' })).statusCode, 401);
 });
 
+test('device sessions are listed, renamed and revoked without ending the current session', async t => {
+  const f=await fixture(t);await f.post('bootstrap',credentials);
+  assert.equal((await f.post('devices/register',{deviceId:'11111111-1111-4111-8111-111111111111',deviceName:'Windows · браузер',clientKind:'browser'})).statusCode,200);
+  const other=new Map(),cookie=()=>[...other].map(([k,v])=>`${k}=${v}`).join('; '),absorb=r=>{for(const c of r.cookies){if(c.value)other.set(c.name,c.value);else other.delete(c.name);}return r;};
+  const otherPost=async(path,body={})=>{const csrf=absorb(await f.app().inject({url:'/api/auth/csrf',headers:{cookie:cookie()}})).json().csrf;
+    return absorb(await f.app().inject({method:'POST',url:'/api/auth/'+path,payload:body,headers:{origin:'http://localhost:3100',cookie:cookie(),'x-csrf-token':csrf}}));};
+  assert.equal((await otherPost('login',{login:credentials.login,password:credentials.password})).statusCode,200);
+  assert.equal((await otherPost('devices/register',{deviceId:'22222222-2222-4222-8222-222222222222',deviceName:'iPhone · PWA',clientKind:'pwa'})).statusCode,200);
+  let list=(await f.get('devices')).json().devices;assert.equal(list.filter(x=>!x.revoked).length,2);assert.equal(list.filter(x=>x.current).length,1);
+  const second=list.find(x=>!x.current&&!x.revoked);assert(second);assert.equal(second.deviceName,'iPhone · PWA');
+  assert.equal((await f.post('devices/rename',{id:second.id,deviceName:'Мой iPhone'})).statusCode,200);
+  assert.equal((await otherPost('devices/register',{deviceId:'22222222-2222-4222-8222-222222222222',deviceName:'старое имя',clientKind:'pwa'})).json().deviceName,'Мой iPhone');
+  assert.equal((await f.post('devices/revoke',{id:second.id})).statusCode,200);
+  assert.equal((await f.app().inject({url:'/api/auth/session',headers:{cookie:cookie()}})).statusCode,401);assert.equal((await f.get('session')).statusCode,200);
+  assert.equal((await f.post('devices/revoke-others',{})).statusCode,200);list=(await f.get('devices')).json().devices;assert.equal(list.filter(x=>x.current&&!x.revoked).length,1);
+});
+
 test('concurrent initial requests create exactly one administrator', async t => {
   const f = await fixture(t);
   const csrf = (await f.get('csrf')).json().csrf;

@@ -14,7 +14,7 @@ import { signAccess } from '../src/crypto/access.ts';
 import { createVault, openVault, closeVault, saveNote, readNote, heads, synchronize, transferVault,
   readStash, moveStash, discardStash, edit, closeAllVault, resolveConflict, renameDevice, acknowledgeReminder, context, vaultName,
   readTags,createTag,renameTag,deleteTag,copyNote,readVaultPushMode,setVaultPushMode,archiveNote,restoreArchivedNote,trashNote,
-  restoreTrashedNote,permanentlyDeleteNote,restoreNoteVersion,noteHistory,noteLifecycle } from '../src/planner.ts';
+  restoreTrashedNote,permanentlyDeleteNote,restoreNoteVersion,noteHistory,noteLifecycle,requireOutboxReview,outboxReviewItems,decideOutboxReview,OutboxReviewRequired } from '../src/planner.ts';
 import { readState, writeState, changes } from '../src/storage.ts';
 
 test('record v2 interoperates with OpenSSL AES-KW/GCM and authenticates context, parent and payload', async () => {
@@ -192,7 +192,7 @@ test('vault persistence, offline queue, conflicts, deletion and encrypted stash 
     const wire=JSON.stringify(db.prepare('SELECT * FROM vaults').all())+JSON.stringify(db.prepare('SELECT * FROM records').all());
     for(const plain of [secret.title,secret.text,'PRIVATE VAULT 87654','Forgotten offline edit'])assert.ok(!wire.includes(plain));
     const before=db.prepare('SELECT * FROM installation').get();
-    assert.equal(db.prepare('PRAGMA user_version').get().user_version,10);db.close();
+    assert.equal(db.prepare('PRAGMA user_version').get().user_version,12);db.close();
     const {createBackup}=await import('../server/cli/backup.mjs');const file=join(dir,'copy.sqlite');
     await createBackup(join(dir,'tasks.sqlite'),file);const bytes=await readFile(file);assert.ok(!bytes.includes(Buffer.from(secret.text)));
     assert.ok(before.installation_id);
@@ -365,5 +365,18 @@ test('vault persistence, offline queue, conflicts, deletion and encrypted stash 
     const second=await readState(user.id),locked=second.vaults.find(v=>v.header.id===vid);
     assert.equal(locked.key,undefined);assert.equal(await vaultName(user.id,locked),'Узнаваемое хранилище (закрыто)');
     await writeState(first);
+  });
+  await t.test('re-login review blocks the outbox until each local note is accepted or rejected',async()=>{
+    const vid=await createVault(user,'Проверка очереди','abcdef'),oid=randomUUID();await saveNote(user,vid,oid,null,{title:'Серверная версия',text:'До офлайна'});await synchronize(user);
+    let s=await readState(user.id),v=s.vaults.find(item=>item.header.id===vid),head=heads(v)[0];
+    await requireOutboxReview(user);await saveNote(user,vid,oid,head.id,{title:'Отклоняемая версия',text:'Локально после отзыва'});
+    await assert.rejects(synchronize(user),error=>error instanceof OutboxReviewRequired);assert.equal((await send('/api/vaults/'+vid)).json().records.length,1);
+    let review=await outboxReviewItems(user);assert.equal(review.length,1);assert.equal(review[0].server.title,'Серверная версия');assert.equal(review[0].local.title,'Отклоняемая версия');
+    assert.equal(await decideOutboxReview(user,review[0].key,false),true);await synchronize(user);assert.equal((await send('/api/vaults/'+vid)).json().records.length,1);
+    s=await readState(user.id);v=s.vaults.find(item=>item.header.id===vid);head=heads(v)[0];assert.equal((await readNote(user.id,v,head)).title,'Серверная версия');
+    await requireOutboxReview(user);await saveNote(user,vid,oid,head.id,{title:'Принятая версия',text:'Отправить после подтверждения'});
+    await assert.rejects(synchronize(user),error=>error instanceof OutboxReviewRequired);review=await outboxReviewItems(user);assert.equal(review[0].local.title,'Принятая версия');
+    assert.equal(await decideOutboxReview(user,review[0].key,true),true);await synchronize(user);assert.equal((await send('/api/vaults/'+vid)).json().records.length,2);
+    s=await readState(user.id);v=s.vaults.find(item=>item.header.id===vid);head=heads(v)[0];assert.equal((await readNote(user.id,v,head)).title,'Принятая версия');assert.equal(head.pending,false);
   });
 });

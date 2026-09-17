@@ -5,10 +5,11 @@ import { registerPush } from './push.mjs';
 import { randomBytes, timingSafeEqual } from 'node:crypto';
 import { hashPassword, verifyPassword, normalizeLogin, validPassword } from '../auth/password.mjs';
 import { bootstrapFromEnvironment, insertFirstAdmin, needsSetup } from '../auth/users.mjs';
-import { createSession, currentUser, rotateSession, revokeSession, token, validToken } from '../auth/sessions.mjs';
+import { createSession, currentUser, rotateSession, revokeSession, sessionByAccess, token, validToken } from '../auth/sessions.mjs';
 import { AccountError, publicUser, accountRow, requireUser, createAccount, resetAccount, changePassword } from '../auth/accounts.mjs';
+import { registerWebAuthn } from '../auth/webauthn.mjs';
 
-export async function registerAuth(app, db, config, clock = Date.now, push = {}, dataDir) {
+export async function registerAuth(app, db, config, clock = Date.now, push = {}, dataDir, webauthn = {}) {
   await bootstrapFromEnvironment(db, config.bootstrap, clock());
   const dummyHash = await hashPassword('Aa1' + randomBytes(32).toString('base64url'));
   await app.register(cookie);
@@ -126,15 +127,18 @@ export async function registerAuth(app, db, config, clock = Date.now, push = {},
     });
   }
   const passwordField = { type: 'string', maxLength: 256 };
+  const uuidField = { type:'string', pattern:'^[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}$' };
+  const deviceNameField = { type:'string', minLength:1, maxLength:80 };
   const objectBody = (properties, required = Object.keys(properties)) => ({ type: 'object', additionalProperties: false, properties, required });
   function accessOf(request) { return request.cookies[names.access]; }
+  registerWebAuthn(app, db, { guard, accessOf, clock, config, writeCookies, cookieNames: names, implementations: webauthn });
   registerVaults(app, db, { guard, accessOf, clock });
   registerPush(app, db, { guard, accessOf, clock, config, ...push });
-  function accountAction(action, { hash = true, passwordChange = false } = {}) {
+  function accountAction(action, { hash = true, passwordChange = false, admin = !passwordChange } = {}) {
     return async (request, reply) => {
       try {
         // Check authorization before spending hash capacity or disclosing account existence.
-        const actor = requireUser(db, accessOf(request), clock(), { admin: !passwordChange, allowTemporary: passwordChange });
+        const actor = requireUser(db, accessOf(request), clock(), { admin, allowTemporary: passwordChange });
         if (hash && (hashesInFlight >= 2 || limited('account:' + request.ip, 20, 60_000))) return rateError(reply);
         if (passwordChange && limited('password:' + actor.id, 10, 15 * 60_000)) return rateError(reply);
         if (hash) hashesInFlight++;
@@ -147,6 +151,32 @@ export async function registerAuth(app, db, config, clock = Date.now, push = {},
     };
   }
   const authorizeAdmin = request => () => requireUser(db, accessOf(request), clock(), { admin: true });
+  app.get('/api/auth/devices', accountAction(async request => {
+    const actor=requireUser(db,accessOf(request),clock());const current=sessionByAccess(db,accessOf(request));
+    const devices=db.prepare(`SELECT id,device_id,device_name,client_kind,created_at,last_seen,revoked,absolute_expires,refresh_expires
+      FROM sessions WHERE user_id=? ORDER BY revoked ASC,last_seen DESC`).all(actor.id).map(row=>({
+      id:row.id,deviceId:row.device_id,deviceName:row.device_name??'Неизвестное устройство',clientKind:row.client_kind??'browser',
+      createdAt:row.created_at,lastSeen:row.last_seen,revoked:Boolean(row.revoked),expiresAt:Math.min(row.absolute_expires,row.refresh_expires),current:row.id===current?.id,
+      pushActive:Boolean(db.prepare('SELECT 1 FROM push_subscriptions WHERE session_id=? LIMIT 1').get(row.id))
+    }));return{devices};
+  },{hash:false,admin:false}));
+  app.post('/api/auth/devices/register',{preHandler:guard,schema:{body:objectBody({deviceId:uuidField,deviceName:deviceNameField,clientKind:{type:'string',enum:['pwa','browser']},rename:{type:'boolean'}},['deviceId','deviceName','clientKind'])}},accountAction(async request=>{
+    const actor=requireUser(db,accessOf(request),clock());const current=sessionByAccess(db,accessOf(request));if(!current||current.user_id!==actor.id)throw new AccountError('unauthorized',401);
+    const deviceName=request.body.rename||!current.device_name?request.body.deviceName.trim():current.device_name;
+    db.prepare('UPDATE sessions SET device_id=?,device_name=?,client_kind=?,last_seen=? WHERE id=?').run(request.body.deviceId,deviceName,request.body.clientKind,clock(),current.id);return{ok:true,deviceName};
+  },{hash:false,admin:false}));
+  app.post('/api/auth/devices/rename',{preHandler:guard,schema:{body:objectBody({id:{type:'string',maxLength:64},deviceName:deviceNameField})}},accountAction(async request=>{
+    const actor=requireUser(db,accessOf(request),clock());const row=db.prepare('SELECT user_id FROM sessions WHERE id=?').get(request.body.id);if(!row||row.user_id!==actor.id)throw new AccountError('device_not_found',404);
+    db.prepare('UPDATE sessions SET device_name=? WHERE id=?').run(request.body.deviceName.trim(),request.body.id);return{ok:true};
+  },{hash:false,admin:false}));
+  app.post('/api/auth/devices/revoke',{preHandler:guard,schema:{body:objectBody({id:{type:'string',maxLength:64}})}},accountAction(async request=>{
+    const actor=requireUser(db,accessOf(request),clock());const current=sessionByAccess(db,accessOf(request));if(request.body.id===current?.id)throw new AccountError('current_session',409);
+    const result=db.prepare('UPDATE sessions SET revoked=1 WHERE id=? AND user_id=?').run(request.body.id,actor.id);if(!result.changes)throw new AccountError('device_not_found',404);return{ok:true};
+  },{hash:false,admin:false}));
+  app.post('/api/auth/devices/revoke-others',{preHandler:guard,schema:{body:{type:'object',additionalProperties:false}}},accountAction(async request=>{
+    const actor=requireUser(db,accessOf(request),clock());const current=sessionByAccess(db,accessOf(request));if(!current)throw new AccountError('unauthorized',401);
+    const result=db.prepare('UPDATE sessions SET revoked=1 WHERE user_id=? AND id<>? AND revoked=0').run(actor.id,current.id);return{revoked:result.changes};
+  },{hash:false,admin:false}));
   app.get('/api/auth/diagnostics',accountAction(async()=>({disk:diskUsage(dataDir)}),{hash:false}));
   app.get('/api/auth/users', accountAction(async () => ({ users: db.prepare('SELECT * FROM users ORDER BY login').all().map(accountRow) }), { hash: false }));
   app.post('/api/auth/users/create', { preHandler: guard, schema: { body: loginSchema } }, accountAction(async request =>

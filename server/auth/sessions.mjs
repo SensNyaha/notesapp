@@ -10,26 +10,29 @@ export const validToken = value => typeof value === 'string' && /^[\w-]{43}$/.te
 const successor = (old, nonce, kind) => createHmac('sha256', old).update(`tasks:${kind}:${nonce}`).digest('base64url');
 const alive = (s, now) => s && !s.revoked && s.absolute_expires > now && s.refresh_expires > now;
 
-export function createSession(db, userId, now) {
+export function createSession(db, userId, now, device = {}) {
   // Tokens from expired families are no longer useful for reuse detection.
   db.prepare('DELETE FROM sessions WHERE absolute_expires <= ? OR refresh_expires <= ?').run(now, now);
   const access = token();
   const refresh = token();
   const id = randomUUID();
   db.prepare(`INSERT INTO sessions
-    (id, user_id, access_hash, access_expires, refresh_hash, refresh_expires, absolute_expires)
-    VALUES (?, ?, ?, ?, ?, ?, ?)`)
-    .run(id, userId, digest(access), now + ACCESS_MS, digest(refresh), now + REFRESH_MS, now + ABSOLUTE_MS);
+    (id, user_id, access_hash, access_expires, refresh_hash, refresh_expires, absolute_expires, device_id, device_name, client_kind, created_at, last_seen)
+    VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)`)
+    .run(id, userId, digest(access), now + ACCESS_MS, digest(refresh), now + REFRESH_MS, now + ABSOLUTE_MS,
+      device.deviceId ?? null, device.deviceName ?? null, device.clientKind ?? null, now, now);
   return { access, refresh, accessExpires: now + ACCESS_MS, refreshExpires: now + REFRESH_MS };
 }
 
 export function currentUser(db, access, now) {
   if (!validToken(access)) return null;
+  const hash = digest(access);
   const row = db.prepare(`SELECT u.id, u.login, u.role, u.must_change_password, u.temporary_expires
     FROM sessions s JOIN users u ON u.id = s.user_id
     WHERE s.access_hash = ? AND s.revoked = 0 AND s.access_expires > ? AND s.absolute_expires > ? AND s.refresh_expires > ?
     AND (u.must_change_password=0 OR u.temporary_expires>?)`)
-    .get(digest(access), now, now, now, now);
+    .get(hash, now, now, now, now);
+  if (row) db.prepare('UPDATE sessions SET last_seen=? WHERE access_hash=?').run(now, hash);
   return row ? { id: row.id, login: row.login, role: row.role,
     mustChangePassword: Boolean(row.must_change_password), temporaryExpires: row.temporary_expires } : null;
 }
@@ -80,6 +83,11 @@ export function rotateSession(db, refresh, now) {
     db.exec('COMMIT');
     return result;
   } catch (error) { db.exec('ROLLBACK'); throw error; }
+}
+
+export function sessionByAccess(db, access) {
+  if (!validToken(access)) return null;
+  return db.prepare('SELECT * FROM sessions WHERE access_hash=?').get(digest(access)) ?? null;
 }
 
 export function revokeSession(db, access, refresh) {

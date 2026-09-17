@@ -1,6 +1,6 @@
 {
   "name": "tasks",
-  "version": "0.13.0",
+  "version": "0.14.0",
   "private": true,
   "allowScripts": {
     "argon2@0.45.1": true
@@ -21,6 +21,8 @@
   },
   "dependencies": {
     "@fastify/cookie": "11.1.2",
+    "@simplewebauthn/browser": "^14.0.0",
+    "@simplewebauthn/server": "^14.0.2",
     "argon2": "0.45.1",
     "fastify": "5.12.3",
     "preact": "10.29.8",

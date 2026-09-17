@@ -1,7 +1,10 @@
 import { generateVaultKey, wrapWithPhrase, unwrapWithPhrase, type Context } from './crypto/vault.ts';
 import { seal, unseal, rememberKey } from './crypto/records.ts';
-import { readState, writeState, exclusive, announce, type State, type Vault, type Header, type Revision, type ObjectState } from './storage.ts';
-import { session } from './auth.ts';
+import { readState, writeState, exclusive, announce, setRuntimeVaultKey, clearRuntimeVaultKey, clearRuntimeVaultKeys,
+  type State, type Vault, type Header, type Revision, type ObjectState } from './storage.ts';
+import { session, accountRequest, listPasskeys } from './auth.ts';
+import { createSystemUnlockWrapper, generatePrfSalt, unlockSystemWrapper, updateSystemUnlockAutoLock, type AutoLockMs } from './crypto/system-unlock.ts';
+import { evaluateVaultPrf, webAuthnPrfPossible } from './webauthn-prf.ts';
 import type { User } from './types/auth';
 import { createAccess, signAccess } from './crypto/access.ts';
 import { validPlan } from '../shared/reminders.mjs';
@@ -17,6 +20,12 @@ export interface Note { title: string; text: string; html?:string;attachments?:N
   lifecycle?:NoteLifecycle;author?:{name:string;time:number} }
 interface TagCatalog { kind:'tag-catalog';title:string;text:string;tags:TagDefinition[];push?:{mode:VaultPushMode;op:string} }
 const id = () => crypto.randomUUID();
+function automaticDeviceName(){
+  const ua=navigator.userAgent;const platform=/iPhone/.test(ua)?'iPhone':/iPad/.test(ua)?'iPad':/Android/.test(ua)?'Android':/Windows/.test(ua)?'Windows':/Macintosh/.test(ua)?'Mac':'Устройство';
+  const standalone=Boolean(globalThis.matchMedia?.('(display-mode: standalone)').matches)||Boolean((navigator as Navigator&{standalone?:boolean}).standalone);
+  return platform==='Устройство'&&!globalThis.matchMedia?'Устройство':platform+' · '+(standalone?'PWA':'браузер');
+}
+function clientKind(): 'pwa'|'browser' {return Boolean(globalThis.matchMedia?.('(display-mode: standalone)').matches)||Boolean((navigator as Navigator&{standalone?:boolean}).standalone)?'pwa':'browser';}
 const allHeads = (v: Vault) => { const parents = new Set(v.records.flatMap(r => [r.parent,...(r.resolves??[])])); return v.records.filter(r => !parents.has(r.id)); };
 export const heads = (v: Vault) => allHeads(v).filter(r=>r.objectId!==v.header.id);
 const catalogHeads=(v:Vault)=>allHeads(v).filter(r=>r.objectId===v.header.id);
@@ -136,8 +145,50 @@ export const openVault = (user: User, vid: string, phrase: string) => edit(user,
 });
 export const closeVault = (user: User, vid: string) => edit(user, async s => {
   const v = vault(s, vid); if (v.transfer) throw Error('Сначала завершите перенос');
-  if (v.deleted) await stashDeleted(s, v); delete v.key;delete v.grant;v.needsGrant=false;
+  if (v.deleted) await stashDeleted(s, v);
+  clearRuntimeVaultKey(user.id,vid);delete v.key;delete v.systemUnlock;delete v.grant;v.needsGrant=false;
 });
+export const lockVault = (user:User,vid:string) => edit(user,async s=>{
+  const v=vault(s,vid,false);if(!v.systemUnlock)throw Error('Системная разблокировка не включена');
+  clearRuntimeVaultKey(user.id,vid);delete v.key;
+});
+export const forgetSystemUnlock = (user:User,vid:string) => edit(user,async s=>{
+  const v=vault(s,vid,false);if(!v.systemUnlock)return;
+  clearRuntimeVaultKey(user.id,vid);delete v.key;delete v.systemUnlock;
+});
+const systemContext=(userId:string,v:Vault)=>({accountId:userId,vaultId:v.header.id,keyId:v.header.keyId});
+export async function enableSystemUnlock(user:User,vid:string,phrase:string,autoLockMs:AutoLockMs=900_000){
+  phraseCheck(phrase);if(!webAuthnPrfPossible())throw Error('Системная WebAuthn-разблокировка недоступна в этом браузере.');
+  const initial=await readState(user.id),v=initial?.vaults.find(v=>v.header.id===vid);if(!v||v.deleted)throw Error('Хранилище не найдено');
+  let root:CryptoKey;try{root=await unwrapWithPhrase(context(user.id,v.header,v.header.keyId,v.header.revisionId),phrase,v.header.wrapper);}
+  catch{throw Error('Неверная фраза или повреждённые данные.');}
+  const passkeys=await listPasskeys();if(!passkeys.length)throw Error('Сначала добавьте ключ доступа в настройках аккаунта.');
+  const prfSalt=generatePrfSalt(),evaluation=await evaluateVaultPrf(passkeys,prfSalt);
+  try{
+    const wrapper=await createSystemUnlockWrapper(root,systemContext(user.id,v),evaluation.credentialId,prfSalt,evaluation.output,v.epoch??0,autoLockMs);
+    const runtime=await rememberKey(root);
+    await edit(user,async s=>{const current=vault(s,vid,false);if(current.header.keyId!==v.header.keyId||current.header.revisionId!==v.header.revisionId||(current.epoch??0)!==(v.epoch??0))throw Error('Хранилище изменилось. Повторите включение.');
+      current.systemUnlock=wrapper;current.key=runtime;setRuntimeVaultKey(user.id,vid,runtime);});
+  }finally{evaluation.output.fill(0);}
+}
+export async function unlockVaultSystem(user:User,vid:string){
+  const state=await readState(user.id),v=state?.vaults.find(v=>v.header.id===vid);if(!v?.systemUnlock)throw Error('Системная разблокировка не настроена.');
+  if(v.systemUnlock.lockEpoch!==(v.epoch??0))throw Error('Локальная системная разблокировка отозвана. Введите фразу хранилища.');
+  const wrapper=v.systemUnlock,evaluation=await evaluateVaultPrf([{credentialId:wrapper.credentialId}],wrapper.prfSalt);
+  try{if(evaluation.credentialId!==wrapper.credentialId)throw Error('Использован другой ключ доступа.');
+    const key=await unlockSystemWrapper(systemContext(user.id,v),wrapper,evaluation.output,v.epoch??0);
+    await edit(user,async s=>{const current=vault(s,vid,false);if(JSON.stringify(current.systemUnlock)!==JSON.stringify(wrapper)||(current.epoch??0)!==(v.epoch??0))throw Error('Настройки хранилища изменились.');
+      current.key=key;setRuntimeVaultKey(user.id,vid,key);if(!current.deleted){current.needsGrant=true;for(const objectId of current.purgedObjects??[])await stashPurgedObject(s,current,objectId);current.purgedObjects=[];}});
+  }finally{evaluation.output.fill(0);}
+}
+export async function setSystemAutoLock(user:User,vid:string,value:AutoLockMs){
+  const state=await readState(user.id),v=state?.vaults.find(v=>v.header.id===vid);if(!v?.systemUnlock)throw Error('Системная разблокировка не включена');
+  const wrapper=v.systemUnlock,evaluation=await evaluateVaultPrf([{credentialId:wrapper.credentialId}],wrapper.prfSalt);
+  try{if(evaluation.credentialId!==wrapper.credentialId)throw Error('Использован другой ключ доступа.');
+    const updated=await updateSystemUnlockAutoLock(systemContext(user.id,v),wrapper,evaluation.output,v.epoch??0,value);
+    await edit(user,async s=>{const current=vault(s,vid,false);if(JSON.stringify(current.systemUnlock)!==JSON.stringify(wrapper)||(current.epoch??0)!==(v.epoch??0))throw Error('Настройки хранилища изменились.');current.systemUnlock=updated;});
+  }finally{evaluation.output.fill(0);}
+}
 async function addRevision(user: string, v: Vault, objectId: string, parent: string | null, value: Note) {
   if (!v.key || v.deleted || v.transfer) throw Error('Хранилище недоступно для записи');
   const rid = id(), r: Revision = { id: rid, objectId, parent, sealed: await seal(v.key, context(user, v.header, objectId, rid), parent, value), pending: true, reminderPending:true };
@@ -275,7 +326,7 @@ export const discardPurgedObjects=(user:User,vid:string)=>edit(user,async s=>{
   const v=vault(s,vid,false),objects=new Set(v.purgedObjects??[]);v.records=v.records.filter(r=>!objects.has(r.objectId));v.purgedObjects=[];
 });
 export const renameDevice=(user:User,name:string)=>edit(user,async s=>{
-  if(!name.trim()||name.length>80)throw Error('Название устройства: от 1 до 80 символов');s.deviceName=name.trim();
+  if(!name.trim()||name.length>80)throw Error('Название устройства: от 1 до 80 символов');s.deviceName=name.trim();s.deviceNameDirty=true;
 });
 export const resolveConflict=(user:User,vid:string,objectId:string,expected:string[],chosen:string,keepBoth:boolean)=>edit(user,async s=>{
   const v=vault(s,vid),versions=heads(v).filter(r=>r.objectId===objectId);
@@ -330,7 +381,7 @@ async function commit(user:User,fn:(s:State)=>Promise<void>){
   await exclusive(async()=>{const s=await readState(user.id);if(!s)throw Error('Локальный аккаунт закрыт');await fn(s);await writeState(s);announce();});
 }
 const wire=(r:Revision)=>{const{pending:_,reminderPending:__,lifecyclePending:___,...value}=r;return value;};
-function lock(v:Vault,epoch?:number){delete v.key;delete v.grant;v.needsGrant=false;if(epoch!==undefined)v.epoch=epoch;}
+function lock(v:Vault,epoch?:number,accountId?:string){if(accountId)clearRuntimeVaultKey(accountId,v.header.id);delete v.key;delete v.grant;v.needsGrant=false;if(epoch!==undefined){if(v.systemUnlock&&v.systemUnlock.lockEpoch!==epoch)delete v.systemUnlock;v.epoch=epoch;}}
 const accessContext=(user:string,v:Vault)=>context(user,v.header,v.header.keyId,v.header.keyId);
 export async function closeAllVault(user:User,vid:string,password:string){
   const actor=await session();if(actor?.id!==user.id)throw Error('Войдите в этот аккаунт');
@@ -339,7 +390,31 @@ export async function closeAllVault(user:User,vid:string,password:string){
     if(v.transfer)throw Error('Сначала завершите перенос');
     if(!v.closeOperation){v.closeOperation=id();v.closeBaseEpoch=v.epoch??0;}operationId=v.closeOperation;});
   const result=await vaultRequest(user.id,'/close-all',{vaultId:vid,operationId,password,confirmed:true});
-  await commit(user,async s=>{const v=vault(s,vid,false);lock(v,result.epoch);delete v.closeOperation;delete v.closeBaseEpoch;});
+  await commit(user,async s=>{const v=vault(s,vid,false);lock(v,result.epoch,user.id);delete v.closeOperation;delete v.closeBaseEpoch;});
+}
+export class OutboxReviewRequired extends Error { constructor(){super('Требуется проверка локальных изменений перед синхронизацией.');} }
+export interface OutboxReviewItem { key:string;vaultId:string;objectId:string;kind:'change'|'purge';local?:Note;server?:Note;serverState:'present'|'missing'|'deleted'|'conflict'|'locked' }
+const reviewKey=(vaultId:string,objectId:string)=>vaultId+':'+objectId;
+function reviewKeys(s:State){const keys=new Set<string>();for(const v of s.vaults){for(const r of v.records)if(r.pending&&r.objectId!==v.header.id)keys.add(reviewKey(v.header.id,r.objectId));for(const objectId of v.purgePending??[])keys.add(reviewKey(v.header.id,objectId));}return keys;}
+export async function requireOutboxReview(user:User){
+  await exclusive(async()=>{const s=await readState(user.id);if(!s)return;s.sessionReviewRequired=true;s.reviewAccepted??=[];s.deviceRegistered=false;await writeState(s);announce();});
+}
+function remoteHeads(v:Vault,objectId:string){const records=v.records.filter(r=>r.objectId===objectId&&!r.pending),parents=new Set(records.flatMap(r=>[r.parent,...(r.resolves??[])]));return records.filter(r=>!parents.has(r.id));}
+export async function outboxReviewItems(user:User):Promise<OutboxReviewItem[]>{
+  const s=await readState(user.id);if(!s?.sessionReviewRequired)return[];const accepted=new Set(s.reviewAccepted??[]),items:OutboxReviewItem[]=[];
+  for(const v of s.vaults){const objectIds=new Set<string>();for(const r of v.records)if(r.pending&&r.objectId!==v.header.id)objectIds.add(r.objectId);for(const objectId of v.purgePending??[])objectIds.add(objectId);
+    for(const objectId of objectIds){const key=reviewKey(v.header.id,objectId);if(accepted.has(key))continue;const purge=Boolean(v.purgePending?.includes(objectId));
+      const localHead=heads(v).filter(r=>r.objectId===objectId&&r.pending).at(-1),serverHeads=remoteHeads(v,objectId);let local:Note|undefined,server:Note|undefined;
+      if(v.key){if(localHead)local=await readNote(user.id,v,localHead);if(serverHeads.length===1)server=await readNote(user.id,v,serverHeads[0]);}
+      items.push({key,vaultId:v.header.id,objectId,kind:purge?'purge':'change',...(local?{local}:{}),...(server?{server}:{}),serverState:v.deleted?'deleted':!v.key?'locked':serverHeads.length>1?'conflict':serverHeads.length===1?'present':'missing'});
+    }}return items;
+}
+export async function decideOutboxReview(user:User,key:string,accept:boolean){
+  let finished=false;await commit(user,async s=>{if(!s.sessionReviewRequired)throw Error('Проверка уже завершена');const split=key.indexOf(':');if(split<1)throw Error('Некорректное изменение');
+    const vaultId=key.slice(0,split),objectId=key.slice(split+1),v=s.vaults.find(v=>v.header.id===vaultId);if(!v)throw Error('Хранилище не найдено');s.reviewAccepted??=[];
+    if(accept){if(!s.reviewAccepted.includes(key))s.reviewAccepted.push(key);}else{v.records=v.records.filter(r=>r.objectId!==objectId||!r.pending);v.purgePending=(v.purgePending??[]).filter(id=>id!==objectId);}
+    const accepted=new Set(s.reviewAccepted),remaining=[...reviewKeys(s)].filter(item=>!accepted.has(item));if(!remaining.length){s.sessionReviewRequired=false;s.reviewAccepted=[];finished=true;}
+  });return finished;
 }
 export async function acknowledgeReminder(user:User,target:{vaultId:string;objectId:string;configId:string;occurrenceId?:string}){
   await edit(user,async s=>{s.reminderSeen??=[];if(!s.reminderSeen.some(x=>x.vaultId===target.vaultId&&x.objectId===target.objectId&&x.configId===target.configId&&x.occurrenceId===target.occurrenceId))s.reminderSeen.push(target);});
@@ -349,12 +424,40 @@ export async function acknowledgeReminder(user:User,target:{vaultId:string;objec
     if(result.exists)await commit(user,async s=>{s.reminderSeen=(s.reminderSeen??[]).filter(x=>x.vaultId!==target.vaultId||x.objectId!==target.objectId||x.configId!==target.configId||x.occurrenceId!==target.occurrenceId);});
   }catch{/* The durable local acknowledgement is retried by synchronize(). */}
 }
+async function refreshOutboxReviewRemote(user:User){
+  const state=await readState(user.id);if(!state?.sessionReviewRequired)return;const remote=await vaultRequest(user.id,'');if(!Array.isArray(remote.vaults))throw Error('Некорректный список хранилищ');
+  const affected=new Set([...reviewKeys(state)].map(key=>key.slice(0,key.indexOf(':'))));
+  for(const local of state.vaults.filter(v=>affected.has(v.header.id))){
+    const item=remote.vaults.find((row:any)=>row.id===local.header.id);if(!item)continue;
+    await commit(user,async s=>{const v=vault(s,local.header.id,false);if(item.deleted){v.deleted=true;return;}if(JSON.stringify(v.header)!==JSON.stringify(item.header)){v.syncError='Заголовок хранилища изменён';return;}
+      const epoch=item.epoch??0;if(epoch>(v.epoch??0))lock(v,epoch,user.id);v.epoch=epoch;v.access=item.access??undefined;if(typeof item.displayName==='string')v.displayName=item.displayName;});
+    if(item.deleted)continue;let currentState=await readState(user.id),currentVault=currentState?.vaults.find(v=>v.header.id===local.header.id);if(!currentState||!currentVault||currentVault.syncError)continue;
+    if((currentVault.epoch??0)>0&&!currentVault.grant&&currentVault.key&&currentVault.needsGrant&&currentVault.access){
+      const challenge=await vaultRequest(user.id,'/access/challenge',{vaultId:currentVault.header.id,deviceId:currentState.deviceId},{deviceId:currentState.deviceId,grants:{}}),c=challenge.challenge;
+      if(!Array.isArray(c)||c.length!==8||c[5]!==currentState.deviceId)throw new APIError('vault_locked');const signature=await signAccess(currentVault.key,accessContext(user.id,currentVault),currentVault.access,c);
+      const granted=await vaultRequest(user.id,'/access/grant',{vaultId:currentVault.header.id,deviceId:currentState.deviceId,challengeId:c[6],signature},{deviceId:currentState.deviceId,grants:{}});
+      await commit(user,async s=>{const v=vault(s,currentVault!.header.id,false);v.grant=granted.token;v.needsGrant=false;});
+    }
+    let after=0;try{for(;;){const current=await readState(user.id);if(!current)break;const v=current.vaults.find(v=>v.header.id===local.header.id);if(!v)break;
+      const grants:Record<string,string>={};if(v.grant)grants[v.header.id]=v.grant;const page=await vaultRequest(user.id,'/'+v.header.id+'?after='+after,undefined,{deviceId:current.deviceId,grants});
+      if(!Array.isArray(page.records)||page.records.length>5)throw Error('Некорректный ответ сервера');await commit(user,async s=>{const target=vault(s,v.header.id,false);for(const r of page.records){const existing=target.records.find(x=>x.id===r.id);if(!existing)target.records.push(r);else if(JSON.stringify(wire(existing))!==JSON.stringify(r))throw Error('Версия заметки изменена на сервере');}});
+      if(page.next===null)break;if(!Number.isSafeInteger(page.next)||page.next<=after)throw Error('Некорректная страница данных');after=page.next;}}
+    catch(error){if(error instanceof APIError&&error.code==='vault_locked')await commit(user,async s=>lock(vault(s,local.header.id,false),undefined,user.id));else throw error;}
+  }
+}
 export async function synchronize(user:User){
   if(!navigator.locks)throw Error('Для синхронизации нужен Web Locks');
   return navigator.locks.request('tasks-sync:'+user.id,async()=>{
     if(!await readState(user.id))return;
-    const current=await session();if(current?.id!==user.id)throw Error('Для синхронизации войдите в этот аккаунт. Локальные данные сохранены.');
-    await commit(user,async s=>{s.deviceId??=id();s.deviceName??='Устройство';});
+    const current=await session();if(current?.id!==user.id){await requireOutboxReview(user);throw Error('Для синхронизации войдите в этот аккаунт. Локальные данные сохранены.');}
+    await commit(user,async s=>{s.deviceId??=id();if(!s.deviceName||s.deviceName==='Устройство')s.deviceName=automaticDeviceName();});
+    const deviceState=await readState(user.id);if(deviceState?.deviceId&&deviceState.deviceName&&(!deviceState.deviceRegistered||deviceState.deviceNameDirty)){
+      try{const registered=await accountRequest('devices/register',{deviceId:deviceState.deviceId,deviceName:deviceState.deviceName,clientKind:clientKind(),rename:Boolean(deviceState.deviceNameDirty)});
+        if(typeof registered.deviceName==='string')await commit(user,async s=>{s.deviceName=registered.deviceName as string;s.deviceRegistered=true;delete s.deviceNameDirty;});
+      }catch{/* Device metadata must never block encrypted note sync. */}
+    }
+    const reviewState=await readState(user.id);if(reviewState?.sessionReviewRequired){await refreshOutboxReviewRemote(user);const pending=await outboxReviewItems(user);
+      if(pending.length)throw new OutboxReviewRequired();await commit(user,async s=>{s.sessionReviewRequired=false;s.reviewAccepted=[];});}
     const api=async(path:string,body?:unknown,ids:string[]=[])=>{
       const s=await readState(user.id);if(!s)throw Error('Локальный аккаунт закрыт');
       const grants:Record<string,string>={};for(const vid of ids){const v=s.vaults.find(v=>v.header.id===vid);if(v?.grant)grants[vid]=v.grant;}
@@ -387,7 +490,7 @@ export async function synchronize(user:User){
         if(JSON.stringify(v.header)!==JSON.stringify(item.header)){v.syncError='Заголовок хранилища изменён';failures.push(v.syncError);return;}
         const epoch=item.epoch??0;
         if(epoch<(v.epoch??0))throw Error('Сервер вернул устаревшую блокировку');
-        if(epoch>(v.epoch??0))lock(v,epoch);
+        if(epoch>(v.epoch??0))lock(v,epoch,user.id);
         v.epoch=epoch;v.access=item.access??undefined;
         if(v.closeOperation&&epoch>(v.closeBaseEpoch??0)){delete v.closeOperation;delete v.closeBaseEpoch;}
       });
@@ -397,7 +500,7 @@ export async function synchronize(user:User){
       await commit(user,async s=>{
         const v=vault(s,vid,false);
         if(error instanceof APIError&&error.code==='vault_deleted'){v.deleted=true;await stashDeleted(s,v);return;}
-        if(error instanceof APIError&&error.code==='vault_locked')lock(v);
+        if(error instanceof APIError&&error.code==='vault_locked')lock(v,undefined,user.id);
         v.syncError=error instanceof Error?error.message:'Ошибка синхронизации';failures.push(v.syncError);
       });
     }
@@ -492,11 +595,16 @@ export async function synchronize(user:User){
       for(const rid of transfer.revisions){const expected=target.records.find(r=>r.id===rid),actual=received.find(r=>r.id===rid);
         if(!expected||!actual||JSON.stringify(wire(expected))!==JSON.stringify(actual))throw Error('Проверка перенесённой заметки не прошла');}
       await api('/transfer',{source:vid,target:transfer.target,revisions:transfer.revisions,confirmed:true},[vid,transfer.target]);
-      await commit(user,async state=>{const current=vault(state,vid,false);current.deleted=true;current.records=[];lock(current);delete current.transfer;
+      await commit(user,async state=>{const current=vault(state,vid,false);current.deleted=true;current.records=[];lock(current,undefined,user.id);delete current.systemUnlock;delete current.transfer;
         state.reminderSeen=(state.reminderSeen??[]).filter(x=>x.vaultId!==vid);});
     }catch(error){await recordFailure(vid,error);}}
     if(failures.length)throw Error([...new Set(failures)].join(' · '));
   });
+}
+export async function lockAfterBackground(user:User,durationMs:number){
+  let changed=false;await exclusive(async()=>{const s=await readState(user.id);if(!s)return;
+    for(const v of s.vaults){const limit=v.systemUnlock?.autoLockMs??0;if(limit>0&&durationMs>=limit&&v.key){clearRuntimeVaultKey(user.id,v.header.id);delete v.key;changed=true;}}
+    if(changed)await writeState(s);});if(changed)announce('vault-lock');return changed;
 }
 export const hasUnsaved = (s: State) => Boolean(s.reminderSeen?.length)||s.stash.length > 0 || s.vaults.some(v => v.pending || v.transfer || Boolean(v.purgePending?.length)||Boolean(v.purgedObjects?.length)||v.records.some(r => r.pending||r.reminderPending||r.lifecyclePending));
 let flushHandler: (() => Promise<void>) | undefined;

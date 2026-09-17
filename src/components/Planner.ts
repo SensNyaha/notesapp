@@ -6,23 +6,31 @@ import { createVault, openVault, closeVault, saveNote, readNote, vaultName, head
   readStash, moveStash, discardStash, discardPurgedObjects, registerDraftFlush, edit, hasUnsaved, closeAllVault, resolveConflict, renameDevice,
   acknowledgeReminder, readTags, createTag, renameTag, deleteTag, copyNote, readVaultPushMode, setVaultPushMode,
   archiveNote,restoreArchivedNote,trashNote,restoreTrashedNote,permanentlyDeleteNote,noteHistory,restoreNoteVersion,noteLifecycle,
-  type Note, type TagDefinition, type VaultPushMode, type NoteLifecycleState } from '../planner';
+  outboxReviewItems,decideOutboxReview,OutboxReviewRequired,enableSystemUnlock,unlockVaultSystem,lockVault,forgetSystemUnlock,setSystemAutoLock,lockAfterBackground,
+  type Note, type TagDefinition, type VaultPushMode, type NoteLifecycleState, type OutboxReviewItem } from '../planner';
+import { AUTO_LOCK_VALUES, type AutoLockMs } from '../crypto/system-unlock';
 import { localTime } from '../../shared/reminders.mjs';
 import type { ReminderPlan,ReminderRepeat,ReminderEnd } from '../../shared/reminders.mjs';
 import { reminderRequest, type ReminderSettings, type ReminderStatus, type ReminderTarget } from '../reminders';
 import { Attachments, RichTextEditor, sanitizeNoteHtml } from './RichTextEditor';
 import { noteSearchScore } from '../search';
+import { AuthError } from '../auth';
 
 interface Draft extends Note { vault: string; object: string; revision: string | null; dirty: boolean; key: CryptoKey }
 interface OpenedNote extends Note { vault: string; object: string; revision: string; key: CryptoKey }
 interface HistoryState {vault:string;objectId:string;back:'list'|'archive'|'trash';selected:string;entries:{revision:Revision;note:Note}[]}
-export function Planner({ user,reminderTarget,onReminderHandled }: { user: User;reminderTarget?:ReminderTarget;onReminderHandled:()=>void }) {
+export function Planner({ user,reminderTarget,onReminderHandled,onSyncState }: { user: User;reminderTarget?:ReminderTarget;onReminderHandled:()=>void;
+  onSyncState:(state:'syncing'|'online'|'offline'|'auth'|'error'|'idle')=>void }) {
   const [state, setState] = useState<State>();
+  const stateRef = useRef<State>(); stateRef.current = state;
+  const hiddenAt = useRef<number | null>(null);
+  const backgroundLockTimer = useRef<ReturnType<typeof setTimeout>>();
   const [names, setNames] = useState<Record<string, string>>({});
   const [notes, setNotes] = useState<Record<string, Note>>({});
   const [tags,setTags]=useState<Record<string,TagDefinition[]>>({});
   const [pushDefaults,setPushDefaults]=useState<Record<string,VaultPushMode>>({});
   const [stash, setStash] = useState<Record<string, Note>>({});
+  const [reviewItems,setReviewItems]=useState<OutboxReviewItem[]>([]);
   const [selected, setSelected] = useState('');
   const selectionInitialized = useRef(false);
   function select(vid: string) {
@@ -33,8 +41,9 @@ export function Planner({ user,reminderTarget,onReminderHandled }: { user: User;
       if (s.vaults.some(v => v.header.id === vid && !v.deleted)) s.lastVaultId = vid;
     }).catch(() => setError('Не удалось запомнить выбранное хранилище'));
   }
-  const [screen, setScreen] = useState<'list' | 'create' | 'open' | 'transfer' | 'stash' | 'close-all' | 'conflict' | 'device'|'reminder'|'schedule'|'tags'|'archive'|'trash'|'history'>('list');
+  const [screen, setScreen] = useState<'list' | 'create' | 'open' | 'transfer' | 'stash' | 'close-all' | 'system-unlock' | 'conflict' | 'device'|'reminder'|'schedule'|'tags'|'archive'|'trash'|'history'|'outbox-review'>('list');
   const [password,setPassword]=useState('');
+  const [autoLockMs,setAutoLockMs]=useState<AutoLockMs>(900_000);
   const [comparison,setComparison]=useState<{objectId:string;versions:string[];chosen:string}>();
   const [name, setName] = useState(''); const [phrase, setPhrase] = useState(''); const [repeat, setRepeat] = useState('');
   const [confirmed, setConfirmed] = useState(false);
@@ -59,7 +68,9 @@ export function Planner({ user,reminderTarget,onReminderHandled }: { user: User;
   const [history,setHistory]=useState<HistoryState|null>(null);
   const [tagName,setTagName]=useState(''),[tagColor,setTagColor]=useState('#356AE6'),[editingTag,setEditingTag]=useState('');
   const [status, setStatus] = useState(''); const [error, setError] = useState(''); const [busy, setBusy] = useState(false);
+  const [syncStatus,setSyncStatus]=useState<'local'|'syncing'|'synced'|'offline'|'error'>('local');
   const timer = useRef<ReturnType<typeof setTimeout>>(); const saving = useRef<Promise<void> | null>(null);
+  const syncTimer=useRef<ReturnType<typeof setTimeout>>(),syncAgain=useRef(false);
   const draggedChecklistItem=useRef<number|null>(null);
   const syncRunning = useRef(false), alive = useRef(true), generation = useRef(0);
   const acknowledgedTarget=useRef('');
@@ -67,25 +78,36 @@ export function Planner({ user,reminderTarget,onReminderHandled }: { user: User;
   function showViewing(note:OpenedNote|null){viewingRef.current=note;setViewing(note);}
   async function load() {
     const g = ++generation.current, s = await readState(user.id);
-    if (!s) { if (alive.current && g === generation.current) { setState(undefined); setNames({}); setNotes({});setTags({}); setStash({}); showDraft(null); } return; }
+    if (!s) { if (alive.current && g === generation.current) { setState(undefined); setNames({}); setNotes({});setTags({}); setStash({});setReviewItems([]); showDraft(null); } return; }
     const ns: Record<string, string> = {}, texts: Record<string, Note> = {}, catalogs:Record<string,TagDefinition[]>={},defaults:Record<string,VaultPushMode>={},st: Record<string, Note> = {};
     for (const v of s.vaults) {
       ns[v.header.id] = await vaultName(user.id, v);
       if (v.key){catalogs[v.header.id]=await readTags(user.id,v);defaults[v.header.id]=await readVaultPushMode(user.id,v);for (const r of heads(v)) texts[r.id] = await readNote(user.id, v, r);}
     }
     for (const item of s.stash) st[item.id] = await readStash(s, item.id);
+    const reviews=s.sessionReviewRequired?await outboxReviewItems(user):[];
     if (!alive.current || g !== generation.current) return;
     if (!selectionInitialized.current) {
       selectionInitialized.current = true;
       if (s.vaults.some(v => v.header.id === s.lastVaultId && !v.deleted)) setSelected(s.lastVaultId!);
     }
-    setState(s); setNames(ns); setNotes(texts);setTags(catalogs);setPushDefaults(defaults); setStash(st);
+    setState(s); setNames(ns); setNotes(texts);setTags(catalogs);setPushDefaults(defaults); setStash(st);setReviewItems(reviews);
     const d = draftRef.current;
     if (d && !s.vaults.some(v => v.header.id === d.vault && v.key && !v.deleted)) {
       if (d.dirty) await flush(); showDraft(null); setStatus('Хранилище закрыто или удалено. Черновик сохранён зашифрованным; стеш используется только при удалении источника.');
     }
     const opened=viewingRef.current;
-    if(opened&&!s.vaults.some(v=>v.header.id===opened.vault&&v.key&&!v.deleted))showViewing(null);
+    if(opened){
+      const current=s.vaults.find(v=>v.header.id===opened.vault&&v.key&&!v.deleted);
+      if(!current)showViewing(null);
+      else if(!draftRef.current){
+        const versions=heads(current).filter(r=>r.objectId===opened.object);
+        if(versions.length===1&&versions[0].id!==opened.revision&&texts[versions[0].id])
+          showViewing({...texts[versions[0].id],vault:opened.vault,object:opened.object,revision:versions[0].id,key:current.key!});
+        else if(versions.length>1)setStatus('Заметка изменена на нескольких устройствах. Откройте конфликт версий из списка.');
+        else if(!versions.length)showViewing(null);
+      }
+    }
   }
   async function flush() {
     if (timer.current) clearTimeout(timer.current);
@@ -104,6 +126,9 @@ export function Planner({ user,reminderTarget,onReminderHandled }: { user: User;
         showDraft({ ...latest, revision: result.id, dirty: !unchanged });
       }
       setStatus(result.stashed ? 'Хранилище недоступно. Заметка сохранена в стеше.' : 'Сохранено на устройстве · ожидает синхронизации');
+      setSyncStatus('local');
+      if(syncTimer.current)clearTimeout(syncTimer.current);
+      syncTimer.current=setTimeout(()=>{if(syncRunning.current)syncAgain.current=true;else void sync();},1500);
       }
     });
     saving.current = task;
@@ -116,24 +141,57 @@ export function Planner({ user,reminderTarget,onReminderHandled }: { user: User;
     finally { if (alive.current) setBusy(false); }
   }
   async function sync() {
-    if (syncRunning.current) return;
+    if (syncRunning.current) { syncAgain.current=true; return; }
     syncRunning.current = true;
+    setSyncStatus('syncing');onSyncState('syncing');
     try { await flush(); await synchronize(user);void reminderRequest(user,'').then(remote=>{setServerReminders(remote.items);setReminderSettings(remote.settings);}).catch(()=>{}); const s = await readState(user.id);
-      setStatus(s && hasUnsaved(s) ? 'Сохранено на устройстве. Есть отложенные или неотправленные заметки.' : 'Синхронизация завершена'); await load(); }
-    catch (caught) { if (alive.current) setStatus(caught instanceof Error && !(caught instanceof TypeError) && caught.name !== 'TimeoutError'
-      ? caught.message : 'Нет синхронизации. Локальные изменения сохранены; повторим при подключении.'); }
-    finally { syncRunning.current = false; }
+      if(alive.current){const pending=Boolean(draftRef.current?.dirty||saving.current||s&&hasUnsaved(s));setSyncStatus(pending?'local':'synced');onSyncState('online');
+        setStatus(pending ? 'Сохранено на устройстве. Есть отложенные или неотправленные заметки.' : 'Синхронизировано'); await load();} }
+    catch (caught) { if (alive.current) {
+      if(caught instanceof OutboxReviewRequired){setSyncStatus('local');onSyncState('online');setStatus('Перед синхронизацией проверьте локальные изменения после завершения предыдущей сессии.');await load();return;}
+      const network=caught instanceof TypeError||caught instanceof AuthError&&caught.code==='network'||caught instanceof Error&&caught.name==='TimeoutError'
+        ||Boolean(caught&&typeof caught==='object'&&'code'in caught&&caught.code==='network');
+      const auth=caught instanceof AuthError&&caught.code==='unauthorized'||caught instanceof Error&&caught.message.startsWith('Для синхронизации войдите');
+      setSyncStatus(network?'offline':'error');onSyncState(network?'offline':auth?'auth':'error');
+      setStatus(network?'Нет синхронизации. Локальные изменения сохранены; повторим при подключении.':caught instanceof Error?caught.message:'Ошибка синхронизации. Локальные данные сохранены.');
+    } }
+    finally { syncRunning.current = false;if(syncAgain.current&&alive.current){syncAgain.current=false;syncTimer.current=setTimeout(()=>void sync(),1000);} }
   }
   useEffect(() => {
     alive.current = true;
     const changed = () => { void load().catch(() => { if (alive.current) setError('Не удалось прочитать данные. Возможно, запись повреждена.'); }); };
-    const wake = () => { if (document.visibilityState === 'visible') void sync(); else void flush().catch(() => setError('Не удалось сохранить черновик')); };
+    const wake = () => {
+      if (document.visibilityState !== 'visible') {
+        hiddenAt.current = Date.now();
+        void flush().catch(() => setError('Не удалось сохранить черновик'));
+        if(backgroundLockTimer.current)clearTimeout(backgroundLockTimer.current);
+        const limits=(stateRef.current?.vaults??[]).filter(v=>v.key&&v.systemUnlock&&v.systemUnlock.autoLockMs>0).map(v=>v.systemUnlock!.autoLockMs);
+        if(limits.length){const delay=Math.min(...limits);backgroundLockTimer.current=setTimeout(()=>{
+          const started=hiddenAt.current;if(started===null)return;const away=Math.max(0,Date.now()-started);
+          void lockAfterBackground(user,away).then(locked=>{if(locked){showDraft(null);showViewing(null);setNotes({});setTags({});setPushDefaults({});return load();}})
+            .catch(error=>setError(error instanceof Error?error.message:'Не удалось заблокировать хранилище'));
+        },delay);}
+        return;
+      }
+      if(backgroundLockTimer.current){clearTimeout(backgroundLockTimer.current);backgroundLockTimer.current=undefined;}
+      const started = hiddenAt.current; hiddenAt.current = null;
+      if (started !== null) {
+        const away = Math.max(0, Date.now() - started), snapshot = stateRef.current;
+        const shouldLock = Boolean(snapshot?.vaults.some(v => v.key && v.systemUnlock && v.systemUnlock.autoLockMs > 0 && away >= v.systemUnlock.autoLockMs));
+        if (shouldLock) {
+          showDraft(null); showViewing(null); setNotes({}); setTags({}); setPushDefaults({});
+          void lockAfterBackground(user, away).then(locked => locked ? load() : undefined).then(() => sync()).catch(error => setError(error instanceof Error ? error.message : 'Не удалось восстановить приложение после блокировки'));
+          return;
+        }
+      }
+      void sync();
+    };
     const leave = (event: BeforeUnloadEvent) => { if (draftRef.current?.dirty || saving.current) { event.preventDefault(); event.returnValue = ''; } };
-    changed(); void edit(user,async()=>{}).then(()=>sync()).catch(error=>setError(error instanceof Error?error.message:'Не удалось открыть локальные данные')); registerDraftFlush(flush);
+    changed(); void edit(user,async s=>{s.lastOpenedAt=Date.now();}).then(()=>sync()).catch(error=>setError(error instanceof Error?error.message:'Не удалось открыть локальные данные')); registerDraftFlush(flush);
     changes?.addEventListener('message', changed); window.addEventListener('tasks-data', changed);
     window.addEventListener('online', wake); document.addEventListener('visibilitychange', wake); window.addEventListener('beforeunload', leave);
-    const interval = setInterval(() => { if (!draftRef.current?.dirty) void sync(); }, 30000);
-    return () => { alive.current = false; generation.current++; registerDraftFlush(); if (timer.current) clearTimeout(timer.current);
+    const interval = setInterval(() => { void sync(); }, 30000);
+    return () => { alive.current = false; generation.current++; registerDraftFlush(); if (timer.current) clearTimeout(timer.current);if(syncTimer.current)clearTimeout(syncTimer.current);if(backgroundLockTimer.current)clearTimeout(backgroundLockTimer.current);onSyncState('idle');
       clearInterval(interval); changes?.removeEventListener('message', changed); window.removeEventListener('tasks-data', changed);
       window.removeEventListener('online', wake); document.removeEventListener('visibilitychange', wake); window.removeEventListener('beforeunload', leave); };
   }, [user.id]);
@@ -153,6 +211,7 @@ export function Planner({ user,reminderTarget,onReminderHandled }: { user: User;
   },[reminderTarget?.configId,reminderTarget?.occurrenceId,state,notes,selected,screen]);
   const v = state?.vaults.find(v => v.header.id === selected);
   const active = state?.vaults.filter(v => !v.deleted) ?? [];
+  const autoLockLabel=(value:number)=>value===0?'Никогда':value===60_000?'Через 1 минуту':value===300_000?'Через 5 минут':value===900_000?'Через 15 минут':value===1_800_000?'Через 30 минут':'Через 1 час';
   const opened = active.filter(v => v.key && !v.transfer);
   function form(next: typeof screen, vid = '') { showViewing(null);select(vid); setName(''); setPhrase(''); setRepeat(''); setPassword(''); setConfirmed(false); setError(''); setScreen(next); }
   async function submit(event: Event) {
@@ -258,13 +317,42 @@ export function Planner({ user,reminderTarget,onReminderHandled }: { user: User;
     else showViewing(null);
     showDraft(null);void sync();
   }
-  const feedback = e('div', { 'aria-live': 'polite' }, error && e('p', { class: 'error', role: 'alert' }, error),
+  const feedback = e('div', { 'aria-live': 'polite' },e('p',{class:'sync-state '+syncStatus},
+      syncStatus==='syncing'?'Синхронизация…':syncStatus==='synced'?'Синхронизировано':syncStatus==='offline'?'Нет подключения · сохранено на устройстве':syncStatus==='error'?'Ошибка синхронизации · локальная копия сохранена':'Сохранено на устройстве · ожидает синхронизации'),
+    error && e('p', { class: 'error', role: 'alert' }, error),
     status && e('p', { class: 'hint' }, status));
   if(screen==='device')return e('section',{class:'card'},e('button',{onClick:()=>setScreen('list')},'Назад'),e('h2',null,'Название этого устройства'),
     e('form',{onSubmit:(ev:Event)=>{ev.preventDefault();void run(async()=>{await renameDevice(user,name);setScreen('list');});}},
       e('label',null,'Название',e('input',{value:name,maxLength:80,required:true,onInput:(ev:Event)=>setName((ev.target as HTMLInputElement).value)})),
       e('p',{class:'hint'},'Название и время изменения будут видны в новых версиях заметок после расшифровки.'),feedback,
       e('button',{class:'primary',disabled:busy},'Сохранить')));
+  if(screen==='system-unlock'){
+    const configured=Boolean(v?.systemUnlock);
+    return e('section',{class:'card'},
+      e('button',{disabled:busy,onClick:()=>{setPhrase('');setScreen('list');}},'Назад'),
+      e('h2',null,'Системная разблокировка'),
+      e('p',{class:'auth-notice'},'Фраза остаётся резервным способом. Tasks не получает Face ID, отпечаток пальца или системный код. Для криптографической разблокировки требуется WebAuthn PRF.'),
+      e('form',{onSubmit:(ev:Event)=>{ev.preventDefault();const secret=phrase;setPhrase('');void run(async()=>{
+        if(configured)await setSystemAutoLock(user,selected,autoLockMs);
+        else await enableSystemUnlock(user,selected,secret,autoLockMs);
+        setScreen('list');setStatus(configured?'Настройки автоблокировки сохранены.':'Системная разблокировка включена. Готовый ключ хранилища больше не сохраняется в IndexedDB.');});}},
+        !configured&&e('label',null,'Фраза хранилища',e('input',{type:'password',autoComplete:'off',value:phrase,required:true,onInput:(ev:Event)=>setPhrase((ev.target as HTMLInputElement).value)})),
+        e('label',null,'Автоблокировка после ухода из приложения',e('select',{value:String(autoLockMs),onChange:(ev:Event)=>setAutoLockMs(Number((ev.target as HTMLSelectElement).value) as AutoLockMs)},
+          AUTO_LOCK_VALUES.map(value=>e('option',{value:String(value),key:value},autoLockLabel(value))))),
+        e('p',{class:'hint'},'Пока PWA находится на экране, хранилище не блокируется по таймеру. «Никогда» отключает background-таймер. После закрытия, перезагрузки или перезапуска PWA защищённый root key отсутствует в runtime, поэтому потребуется системная проверка либо фраза.'),
+        feedback,e('button',{class:'primary',disabled:busy},busy?'Сохраняем…':configured?'Сохранить настройку':'Включить системную разблокировку')));
+  }
+  if(screen==='outbox-review')return e('section',{class:'card planner'},e('button',{disabled:busy,onClick:()=>setScreen('list')},'Назад'),
+    e('h1',null,'Проверка локальных изменений'),e('p',{class:'auth-notice'},'Предыдущая серверная сессия была завершена. Ничего из локальной очереди не будет отправлено, пока вы не решите судьбу каждой заметки.'),
+    reviewItems.length?e('div',{class:'conflict-grid'},reviewItems.map(item=>{const blocked=item.serverState==='locked'||item.serverState==='conflict';
+      const serverLabel=item.serverState==='present'?'Текущая версия на сервере':item.serverState==='missing'?'На сервере заметки нет':item.serverState==='deleted'?'Хранилище удалено на сервере':item.serverState==='conflict'?'На сервере несколько версий':'Хранилище нужно открыть для сравнения';
+      return e('article',{class:'note-row',key:item.key},e('h2',null,item.local?.title||item.server?.title||'Без заголовка'),e('p',{class:'muted'},names[item.vaultId]||'Хранилище'),
+        e('div',{class:'review-compare'},e('div',null,e('strong',null,serverLabel),item.server&&e('p',{class:'note-preview'},item.server.text||'Без текста')),
+          e('div',null,e('strong',null,item.kind==='purge'?'Планируется окончательное удаление':'Локальная версия после применения'),item.local&&e('p',{class:'note-preview'},item.local.text||'Без текста'))),
+        blocked&&e('p',{class:'error'},item.serverState==='locked'?'Сначала вернитесь к списку и откройте это хранилище прежней фразой.':'Сначала разрешите конфликт серверных версий.'),
+        item.serverState==='deleted'&&e('p',{class:'hint'},'Если принять локальную версию, обычная логика восстановления сохранит её локально, а не перезапишет удалённое хранилище.'),
+        e('div',{class:'actions'},e('button',{class:'primary',disabled:busy||blocked,onClick:()=>void run(async()=>{const done=await decideOutboxReview(user,item.key,true);if(done){setScreen('list');setStatus('Все локальные изменения проверены. Синхронизация продолжена.');queueMicrotask(()=>void sync());}})},item.kind==='purge'?'Подтвердить удаление':'Применить изменение'),
+          e('button',{disabled:busy||blocked,onClick:()=>void run(async()=>{const done=await decideOutboxReview(user,item.key,false);if(done){setScreen('list');setStatus('Все локальные изменения проверены. Синхронизация продолжена.');queueMicrotask(()=>void sync());}})},'Отклонить локальное изменение')));})):e('p',null,'Изменений для проверки нет.'),feedback);
   if(screen==='close-all')return e('section',{class:'card'},e('button',{disabled:busy,onClick:()=>{setPassword('');setScreen('list');}},'Назад'),
     e('h2',null,'Закрыть хранилище на всех устройствах'),e('p',null,'Будет закрыто только выбранное хранилище, включая это устройство. Сервер сразу остановит синхронизацию. Устройства без сети удалят сохранённый ключ при подключении. Заметки и очередь не удаляются.'),
     e('form',{onSubmit:(ev:Event)=>{ev.preventDefault();const secret=password;setPassword('');void run(async()=>{
@@ -349,10 +437,13 @@ export function Planner({ user,reminderTarget,onReminderHandled }: { user: User;
       selectedVersion&&selectedVersion.revision.id!==currentId&&e('button',{class:'primary',disabled:busy,onClick:()=>{if(confirm('Восстановить выбранное содержимое как новую версию? Старое напоминание останется выключенным.'))void run(async()=>{await restoreNoteVersion(user,history.vault,history.objectId,history.selected);const back=history.back;setHistory(null);setScreen(back);setStatus('Выбранная версия восстановлена как новая.');void sync();});}},'Восстановить эту версию'),
       feedback);
   }
-  if(viewing&&!draft){const current=state?.vaults.find(item=>item.header.id===viewing.vault),revision=current&&heads(current).find(item=>item.id===viewing.revision),lifecycle=current&&revision?statusOf(current,revision,viewing):'active';return e('section',{class:'card note-view'},
+  if(viewing&&!draft){const current=state?.vaults.find(item=>item.header.id===viewing.vault),versions=current?heads(current).filter(item=>item.objectId===viewing.object):[],competing=versions.length>1,
+    revision=versions.find(item=>item.id===viewing.revision),lifecycle=current&&revision?statusOf(current,revision,viewing):'active';return e('section',{class:'card note-view'},
     e('div',{class:'actions note-view-actions'},e('button',{onClick:()=>{showViewing(null);setMenuOpen(false);}},'Назад'),
-      e('div',{class:'actions compact'},e('button',{onClick:()=>setMenuOpen(!menuOpen),'aria-expanded':menuOpen},'Действия'),lifecycle==='active'&&e('button',{class:'primary',onClick:()=>showDraft({...viewing,dirty:false})},'Редактировать'))),
-    menuOpen&&e('div',{class:'note-action-menu',role:'menu'},
+      e('div',{class:'actions compact'},e('button',{disabled:competing,onClick:()=>setMenuOpen(!menuOpen),'aria-expanded':menuOpen&&!competing},'Действия'),lifecycle==='active'&&!competing&&e('button',{class:'primary',onClick:()=>showDraft({...viewing,dirty:false})},'Редактировать'))),
+    competing&&e('div',{class:'error',role:'status'},'Заметка изменена на нескольких устройствах. Выберите версию, прежде чем редактировать.',
+      e('button',{onClick:()=>{setComparison({objectId:viewing.object,versions:versions.map(item=>item.id),chosen:versions[0].id});showViewing(null);setMenuOpen(false);setScreen('conflict');}},'Сравнить версии')),
+    menuOpen&&!competing&&e('div',{class:'note-action-menu',role:'menu'},
       lifecycle==='active'&&e('button',{onClick:()=>{setMenuOpen(false);void run(()=>updateViewing({pinned:!viewing.pinned}));}},viewing.pinned?'Открепить':'Закрепить'),
       lifecycle==='active'&&e('button',{onClick:()=>showDraft({...viewing,dirty:false})},'Изменить теги'),
       lifecycle==='active'&&e('button',{disabled:busy,onClick:()=>{if(current)void run(()=>duplicate(current,viewing.revision));}},'Создать копию'),
@@ -372,7 +463,7 @@ export function Planner({ user,reminderTarget,onReminderHandled }: { user: User;
     viewing.reminder&&e('section',{class:'reminder-card'},e('h2',null,'Напоминание'),
       e('p',null,new Date(viewing.reminder.local+'Z').toLocaleString('ru-RU',{timeZone:'UTC'}),' · ',
         viewing.reminder.state==='active'?'Активно':viewing.reminder.state==='done'?'Выполнено':'Выключено'),
-      e('p',{class:'hint'},viewing.reminder.mode==='custom'?'Для push разрешён отдельный собственный текст.':viewing.reminder.mode==='title'?'Текст push автоматически повторяет заголовок заметки.':'Push не содержит названия хранилища и текста заметки.')));}
+      e('p',{class:'hint'},viewing.reminder.mode==='custom'?'Для push разрешён отдельный собственный текст.':viewing.reminder.mode==='title'?'Текст push автоматически повторяет заголовок заметки.':'Push не содержит названия хранилища и текста заметки.')),feedback);}
   if (draft) return e('section', { class: 'card note-editor' },
     e('div', { class: 'actions' }, e('button', { disabled: busy, onClick: () => void run(finishEditing) }, 'Назад'),
       e('button', { class: 'primary', disabled: busy, onClick: () => void run(finishEditing) }, 'Готово')),
@@ -396,8 +487,12 @@ export function Planner({ user,reminderTarget,onReminderHandled }: { user: User;
   if (screen === 'create' || screen === 'open' || screen === 'transfer') return e('section', { class: 'card' },
     e('button', { disabled: busy, onClick: () => { setScreen('list'); setPhrase(''); setRepeat(''); } }, 'Назад'),
     e('h2', null, screen === 'open' ? 'Открыть хранилище' : screen === 'transfer' ? 'Перенести с новой фразой' : 'Новое хранилище'),
+    screen==='open'&&v?.systemUnlock&&e('div',{class:'auth-notice'},
+      e('p',null,'Для этого хранилища настроена системная разблокировка на данном устройстве.'),
+      e('button',{class:'primary',type:'button',disabled:busy,onClick:()=>void run(async()=>{await unlockVaultSystem(user,selected);setPhrase('');setScreen('list');setStatus('Хранилище разблокировано системной проверкой.');void sync();})},'Разблокировать системно'),
+      e('p',{class:'hint'},'Можно вместо этого ввести фразу хранилища ниже.')),
     screen!=='open'&&e('p',{class:'hint'},'Название видно на всех ваших устройствах до разблокировки и хранится на сервере отдельно от зашифрованных заметок.'),
-    e('p', { class: 'hint' }, 'Фраза не отправляется на сервер. Доступ сохранится на этом устройстве до «Закрыть хранилище». Без фразы и сохранённого доступа восстановить заметки невозможно.'),
+    e('p', { class: 'hint' }, screen==='open'&&v?.systemUnlock?'Фраза остаётся независимым резервным способом и не отправляется на сервер.':'Фраза не отправляется на сервер. Доступ сохранится на этом устройстве до «Закрыть хранилище». Без фразы и сохранённого доступа восстановить заметки невозможно.'),
     e('form', { onSubmit: submit }, screen !== 'open' && e('label', null, 'Название', e('input', { required: true, maxLength: 200, value: name, onInput: (ev: Event) => setName((ev.target as HTMLInputElement).value) })),
       e('label', null, 'Фраза хранилища', e('input', { type: 'password', autoComplete: screen === 'open' ? 'current-password' : 'new-password', required: true, value: phrase,
         onInput: (ev: Event) => setPhrase((ev.target as HTMLInputElement).value) })),
@@ -532,6 +627,9 @@ export function Planner({ user,reminderTarget,onReminderHandled }: { user: User;
     e('div', { class: 'card-heading' }, e('h1', null, 'Заметки'), e('button', { disabled: busy, onClick: () => void run(sync) }, 'Синхронизировать')),
     e('label', null, 'Хранилище', e('select', { value: selected, onChange: (ev: Event) => select((ev.target as HTMLSelectElement).value) },
       e('option', { value: '' }, 'Выберите хранилище'), active.map(v => e('option', { value: v.header.id, key: v.header.id }, names[v.header.id] || 'Хранилище')))),
+    state?.sessionReviewRequired&&e('div',{class:'auth-notice',role:'status'},e('strong',null,'Синхронизация локальных изменений приостановлена.'),
+      e('p',null,reviewItems.length?`Нужно проверить изменений: ${reviewItems.length}.`:'Проверяем актуальное состояние сервера…'),
+      reviewItems.length>0&&e('button',{class:'primary',onClick:()=>setScreen('outbox-review')},'Проверить изменения')),
     e('div',{class:'organization-tools'},e('label',{class:'search-field'},'Поиск во всех открытых хранилищах',e('input',{type:'search',value:query,placeholder:'Слова, часть слова или фраза',onInput:(ev:Event)=>setQuery((ev.target as HTMLInputElement).value)})),
       normalizedQuery?e('label',null,'Сортировка результатов',e('select',{value:searchSort,onChange:(ev:Event)=>setSearchSort((ev.target as HTMLSelectElement).value as typeof searchSort)},e('option',{value:'relevance'},'По релевантности'),e('option',{value:'newest'},'Сначала новые'),e('option',{value:'oldest'},'Сначала старые')))
         :e('label',null,'Сортировка',e('select',{value:sort,onChange:(ev:Event)=>setSort((ev.target as HTMLSelectElement).value as typeof sort)},e('option',{value:'newest'},'Сначала новые'),e('option',{value:'oldest'},'Сначала старые'),e('option',{value:'title'},'По заголовку')))),
@@ -544,7 +642,18 @@ export function Planner({ user,reminderTarget,onReminderHandled }: { user: User;
       e('button',{disabled:!v?.key,onClick:()=>{setQuery('');setSelectedTags([]);setScreen('trash');}},'Корзина'+(v?.key?' ('+heads(v).filter(r=>notes[r.id]&&statusOf(v,r,notes[r.id])==='trashed'&&!v.purgePending?.includes(r.objectId)).length+')':'')),
       e('button', { onClick: () => setScreen('stash') }, 'Отложенные заметки (' + (state?.stash.length ?? 0) + ')'),
       e('button',{onClick:()=>{setName(state?.deviceName??'Устройство');setScreen('device');}},'Это устройство: '+(state?.deviceName??'Устройство'))),
-    v&&!v.deleted&&e('div',null,
+    v&&!v.deleted&&e('div',{class:'vault-security'},
+      e('h2',null,'Разблокировка'),
+      v.systemUnlock
+        ? e('div',null,
+          e('p',{class:'hint'},'Системная разблокировка включена · '+autoLockLabel(v.systemUnlock.autoLockMs)),
+          e('div',{class:'actions'},
+            v.key&&e('button',{disabled:busy,onClick:()=>void run(async()=>{await flush();showDraft(null);showViewing(null);await lockVault(user,selected);setStatus('Хранилище заблокировано.');})},'Заблокировать сейчас'),
+            !v.key&&e('button',{class:'primary',disabled:busy,onClick:()=>void run(async()=>{await unlockVaultSystem(user,selected);setStatus('Хранилище разблокировано системной проверкой.');})},'Разблокировать системно'),
+            e('button',{disabled:busy,onClick:()=>{setAutoLockMs(v.systemUnlock!.autoLockMs);setScreen('system-unlock');setPhrase('');setError('');}},'Настройки разблокировки'),
+            e('button',{disabled:busy,onClick:()=>{if(confirm('Забыть системную разблокировку на этом устройстве? Фраза хранилища останется рабочей.'))void run(async()=>{await flush();showDraft(null);showViewing(null);await forgetSystemUnlock(user,selected);setStatus('Системная разблокировка забыта. Для открытия введите фразу.');});}},'Забыть системную разблокировку')))
+        : e('div',null,e('p',{class:'hint'},'Хранилище остаётся открытым на этом устройстве после перезапуска PWA, пока вы явно его не закроете.'),
+          v.key&&e('button',{disabled:busy||Boolean(v.transfer),onClick:()=>{setAutoLockMs(900_000);setPhrase('');setScreen('system-unlock');}},'Включить системную разблокировку')),
       e('button',{disabled:busy||Boolean(v.transfer)||!v.access,onClick:()=>form('close-all',selected)},'Закрыть на всех устройствах'),
       v.syncError&&e('p',{class:'error',role:'status'},v.syncError)),
     state?.stash.length ? e('p', { class: 'auth-notice', role: 'status' }, 'Есть заметки, не попавшие в конечное хранилище. Откройте «Отложенные заметки».') : null,
@@ -573,7 +682,8 @@ export function Planner({ user,reminderTarget,onReminderHandled }: { user: User;
         tagChips(current.header.id,note!.tagIds).length>0&&e('span',{class:'tag-list'},tagChips(current.header.id,note!.tagIds).map(tag=>e('span',{class:'tag-chip',style:{'--tag-color':tag.color},key:tag.id},tag.name))),
         note!.checklist?.length&&e('small',null,'Чек-лист: '+note!.checklist.filter(item=>item.done).length+' / '+note!.checklist.length),
         note!.reminder&&e('small',null,'Напоминание: '+new Date(note!.reminder.local+'Z').toLocaleString('ru-RU',{timeZone:'UTC'})),
-        e('small', null, r.pending ? 'Сохранено на устройстве' : 'Синхронизировано'),
+        e('small',{class:'sync-state '+(r.pending?syncStatus==='syncing'?'syncing':syncStatus==='offline'?'offline':syncStatus==='error'?'error':'local':'synced')},
+          r.pending?syncStatus==='syncing'?'Синхронизация…':syncStatus==='offline'?'Нет подключения':syncStatus==='error'?'Ошибка синхронизации':'Сохранено на устройстве':'Синхронизировано'),
         heads(current).filter(x => x.objectId === r.objectId).length > 1 && e('small', null, 'Есть другая версия — обе сохранены')),
         e('button',{class:'row-edit-button',disabled:Boolean(current.transfer),onClick:()=>editRevision(current,r),'aria-label':'Редактировать заметку «'+(note!.title||'Без заголовка')+'»'},'Редактировать'))),
       e('button', { class: 'primary', disabled: busy || Boolean(v.transfer), onClick: () => { if (v.key) showDraft({ vault: selected, object: crypto.randomUUID(), revision: null, title: '', text: '', dirty: false, key: v.key }); } }, '+ Новая заметка'))), feedback);

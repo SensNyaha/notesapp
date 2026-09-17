@@ -9,7 +9,7 @@ export function authConfiguration(env = process.env) {
   if (mode === 'localhost' && (url.protocol !== 'http:' || !['localhost', '127.0.0.1', '[::1]'].includes(url.hostname))) {
     throw new Error('Localhost cookie mode only permits a loopback HTTP APP_ORIGIN');
   }
-  return { origin, secure: mode === 'secure', bootstrap: {
+  return { origin, rpId: url.hostname, secure: mode === 'secure', bootstrap: {
     login: env.BOOTSTRAP_ADMIN_LOGIN, password: env.BOOTSTRAP_ADMIN_PASSWORD,
   } };
 }

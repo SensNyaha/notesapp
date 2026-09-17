@@ -1,6 +1,6 @@
 import { h } from 'preact';
 import { useEffect, useRef, useState } from 'preact/hooks';
-import { authMessage, setupRequired, signIn, AuthError } from '../auth';
+import { authMessage, setupRequired, signIn, signInWithPasskey, webAuthnCapability, AuthError } from '../auth';
 import type { User } from '../types/auth';
 
 const e = h;
@@ -15,7 +15,19 @@ export function Login({ onLogin }: { onLogin: (user: User) => void }) {
   const [help, setHelp] = useState(false);
   const repeatField = useRef<HTMLInputElement>(null);
   const loginField = useRef<HTMLInputElement>(null);
+  const [passkeyAvailable, setPasskeyAvailable] = useState(false);
   useEffect(() => { if (confirming) repeatField.current?.focus(); }, [confirming]);
+  useEffect(() => { void webAuthnCapability().then(result => setPasskeyAvailable(result.available)).catch(() => {}); }, []);
+
+  async function passkeyLogin() {
+    if (busy) return;
+    setBusy(true); setError('');
+    try {
+      if (await setupRequired()) { setError('Сначала создайте первого администратора с логином и паролем.'); return; }
+      onLogin(await signInWithPasskey());
+    } catch (caught) { setError(authMessage(caught)); }
+    finally { setBusy(false); }
+  }
 
   async function submit(event: SubmitEvent) {
     event.preventDefault();
@@ -68,6 +80,9 @@ export function Login({ onLogin }: { onLogin: (user: User) => void }) {
         setConfirming(false); setPassword(''); setRepeat(''); setError(''); setVisible(false);
         requestAnimationFrame(() => loginField.current?.focus());
       } }, 'Отмена')),
+    !confirming && passkeyAvailable && e('div', { class: 'passkey-login' },
+      e('p', { class: 'hint' }, 'или'),
+      e('button', { type: 'button', disabled: busy, onClick: () => void passkeyLogin() }, 'Войти с ключом доступа')),
     !confirming && e('button', { class: 'text-button', type: 'button', 'aria-expanded': help, onClick: () => setHelp(!help) }, 'Восстановить доступ'),
     help && !confirming && e('p', { class: 'auth-notice' }, 'Обратитесь к администратору за новым временным паролем. Он действует 48 часов; после входа задайте свой пароль. Для восстановления учётной записи администратора потребуется доступ к серверу. Сброс пароля аккаунта не восстанавливает доступ к зашифрованному хранилищу.'));
 }

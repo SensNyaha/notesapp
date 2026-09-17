@@ -1,6 +1,6 @@
 import { randomUUID } from 'node:crypto';
 
-export const SCHEMA_VERSION = 10;
+export const SCHEMA_VERSION = 12;
 
 export function migrate(db) {
   db.exec('BEGIN IMMEDIATE');
@@ -132,6 +132,39 @@ export function migrate(db) {
         PRIMARY KEY(vault_id,object_id)
       ) STRICT;
       CREATE INDEX note_lifecycle_cleanup ON note_lifecycle(state,purge_after);
+    `);
+    if(version<11){
+      const columns=new Set(db.prepare('PRAGMA table_info(sessions)').all().map(row=>row.name));
+      for(const [name,type] of [['device_id','TEXT'],['device_name','TEXT'],['client_kind','TEXT'],
+        ['created_at','INTEGER NOT NULL DEFAULT 0'],['last_seen','INTEGER NOT NULL DEFAULT 0']]){
+        if(!columns.has(name))db.exec(`ALTER TABLE sessions ADD COLUMN ${name} ${type}`);
+      }
+      db.exec('CREATE INDEX IF NOT EXISTS sessions_user_active ON sessions(user_id,revoked,last_seen)');
+    }
+    if(version<12)db.exec(`
+      CREATE TABLE webauthn_credentials(
+        id TEXT PRIMARY KEY NOT NULL,
+        user_id TEXT NOT NULL REFERENCES users(id) ON DELETE CASCADE,
+        credential_id TEXT NOT NULL UNIQUE,
+        public_key BLOB NOT NULL,
+        counter INTEGER NOT NULL DEFAULT 0 CHECK(counter>=0),
+        transports TEXT NOT NULL DEFAULT '[]',
+        device_type TEXT NOT NULL CHECK(device_type IN('singleDevice','multiDevice')),
+        backed_up INTEGER NOT NULL DEFAULT 0 CHECK(backed_up IN(0,1)),
+        display_name TEXT NOT NULL CHECK(length(display_name) BETWEEN 1 AND 80),
+        created_at INTEGER NOT NULL,
+        last_used INTEGER
+      ) STRICT;
+      CREATE INDEX webauthn_credentials_user ON webauthn_credentials(user_id,created_at);
+      CREATE TABLE webauthn_challenges(
+        id TEXT PRIMARY KEY NOT NULL,
+        challenge TEXT NOT NULL UNIQUE,
+        purpose TEXT NOT NULL CHECK(purpose IN('register','authenticate')),
+        user_id TEXT REFERENCES users(id) ON DELETE CASCADE,
+        session_id TEXT REFERENCES sessions(id) ON DELETE CASCADE,
+        expires INTEGER NOT NULL
+      ) STRICT;
+      CREATE INDEX webauthn_challenges_expiry ON webauthn_challenges(expires);
     `);
     db.exec(`PRAGMA user_version = ${SCHEMA_VERSION}`);
     db.exec('COMMIT');

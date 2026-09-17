@@ -13,10 +13,11 @@ test('schema 3 upgrades atomically to current version without changing installat
   const db = new DatabaseSync(':memory:');
   try {
     migrate(db);
+    db.exec('DROP TABLE webauthn_challenges; DROP TABLE webauthn_credentials;');
     db.exec("DROP TABLE note_lifecycle; DROP TRIGGER reminder_record_changed; DROP TRIGGER reminder_vault_deleted; DROP TABLE reminder_occurrences; DROP TABLE reminder_deliveries; DROP TABLE reminders; DROP TABLE reminder_settings; DROP INDEX records_object; DROP TRIGGER push_revoke_session; DROP TABLE push_tests; DROP TABLE push_subscriptions; DROP TABLE push_test_limits; DROP TABLE push_config; DROP TABLE vault_grants; DROP TABLE vault_challenges; DROP TABLE vault_closures; DROP TABLE records; DROP TABLE vaults; PRAGMA user_version=3; INSERT INTO users(id,login,password_hash,role,created_at) VALUES('owner','owner','stored-hash','admin',123);");
     const installation = db.prepare('SELECT * FROM installation').get(), user = db.prepare('SELECT * FROM users').get();
     migrate(db); migrate(db);
-    assert.equal(db.prepare('PRAGMA user_version').get().user_version,10);
+    assert.equal(db.prepare('PRAGMA user_version').get().user_version,12);
     assert.deepEqual(db.prepare('SELECT * FROM installation').get(),installation);
     assert.deepEqual(db.prepare('SELECT * FROM users').get(),user);
     assert.equal(db.prepare('SELECT count(*) n FROM vaults').get().n,0);
@@ -27,6 +28,7 @@ test('schema 4 vault headers and immutable ciphertext survive the access migrati
   const db = new DatabaseSync(':memory:');
   try {
     migrate(db);
+    db.exec('DROP TABLE webauthn_challenges; DROP TABLE webauthn_credentials;');
     db.exec(`DROP TABLE note_lifecycle; DROP TRIGGER reminder_record_changed; DROP TRIGGER reminder_vault_deleted; DROP TABLE reminder_occurrences; DROP TABLE reminder_deliveries; DROP TABLE reminders; DROP TABLE reminder_settings; DROP INDEX records_object; DROP TRIGGER push_revoke_session; DROP TABLE push_tests; DROP TABLE push_subscriptions; DROP TABLE push_test_limits; DROP TABLE push_config; DROP TABLE vault_grants; DROP TABLE vault_challenges; DROP TABLE vault_closures;
       ALTER TABLE vaults DROP COLUMN access_pack; ALTER TABLE vaults DROP COLUMN lock_epoch;
       PRAGMA user_version=4;
@@ -36,7 +38,7 @@ test('schema 4 vault headers and immutable ciphertext survive the access migrati
     const installation=db.prepare('SELECT * FROM installation').get(),users=db.prepare('SELECT * FROM users').all();
     const records=db.prepare('SELECT * FROM records').all();
     migrate(db);migrate(db);
-    assert.equal(db.prepare('PRAGMA user_version').get().user_version,10);
+    assert.equal(db.prepare('PRAGMA user_version').get().user_version,12);
     assert.deepEqual(db.prepare('SELECT * FROM installation').get(),installation);
     assert.deepEqual(db.prepare('SELECT * FROM users').all(),users);
     assert.deepEqual(db.prepare('SELECT * FROM records').all(),records);
@@ -49,17 +51,18 @@ test('schema 5 push migration preserves vault grants, sessions and ciphertext by
   const db=new DatabaseSync(':memory:');
   try{
     migrate(db);
+    db.exec('DROP TABLE webauthn_challenges; DROP TABLE webauthn_credentials;');
     db.exec(`DROP TABLE note_lifecycle; DROP TRIGGER reminder_record_changed; DROP TRIGGER reminder_vault_deleted; DROP TABLE reminder_occurrences; DROP TABLE reminder_deliveries; DROP TABLE reminders; DROP TABLE reminder_settings; DROP INDEX records_object; DROP TRIGGER push_revoke_session; DROP TABLE push_tests; DROP TABLE push_subscriptions; DROP TABLE push_test_limits; DROP TABLE push_config;
       PRAGMA user_version=5;
       INSERT INTO users(id,login,password_hash,role,created_at) VALUES('owner','owner','hash','admin',123);
-      INSERT INTO sessions VALUES('session','owner','access',999,'refresh',999,999,0);
+      INSERT INTO sessions(id,user_id,access_hash,access_expires,refresh_hash,refresh_expires,absolute_expires,revoked) VALUES('session','owner','access',999,'refresh',999,999,0);
       INSERT INTO vaults VALUES('vault','owner','header',0,NULL,2,'encrypted-access');
       INSERT INTO records VALUES('record','vault','object',NULL,'ciphertext');
       INSERT INTO vault_grants VALUES('grant','vault','device',2);`);
     const tables=['users','sessions','vaults','records','vault_grants','installation'];
     const before=tables.map(table=>db.prepare('SELECT * FROM '+table).all());
     migrate(db);migrate(db);
-    assert.equal(db.prepare('PRAGMA user_version').get().user_version,10);
+    assert.equal(db.prepare('PRAGMA user_version').get().user_version,12);
     assert.deepEqual(tables.map(table=>db.prepare('SELECT * FROM '+table).all()),before);
     assert.equal(db.prepare('SELECT count(*) n FROM push_subscriptions').get().n,0);
   }finally{db.close();}
@@ -69,9 +72,10 @@ test('schema 6 reminder migration preserves subscriptions, VAPID keys, sessions 
   const db=new DatabaseSync(':memory:');
   try{
     migrate(db);
+    db.exec('DROP TABLE webauthn_challenges; DROP TABLE webauthn_credentials;');
     db.exec(`DROP TABLE note_lifecycle; DROP TRIGGER reminder_record_changed; DROP TRIGGER reminder_vault_deleted; DROP TABLE reminder_occurrences; DROP TABLE reminder_deliveries; DROP TABLE reminders; DROP TABLE reminder_settings; DROP INDEX records_object; PRAGMA user_version=6;
       INSERT INTO users(id,login,password_hash,role,created_at) VALUES('owner','owner','hash','admin',123);
-      INSERT INTO sessions VALUES('session','owner','access',999,'refresh',999,999,0);
+      INSERT INTO sessions(id,user_id,access_hash,access_expires,refresh_hash,refresh_expires,absolute_expires,revoked) VALUES('session','owner','access',999,'refresh',999,999,0);
       INSERT INTO vaults VALUES('vault','owner','opaque-header',0,NULL,0,NULL);
       INSERT INTO records VALUES('record','vault','object',NULL,'opaque-ciphertext');
       INSERT INTO push_config VALUES(1,'public-key','private-key');
@@ -79,7 +83,7 @@ test('schema 6 reminder migration preserves subscriptions, VAPID keys, sessions 
       INSERT INTO push_tests VALUES('test','subscription',500,600,'scheduled',0,0);`);
     const tables=['users','sessions','vaults','records','push_config','push_subscriptions','push_tests','installation'];
     const before=tables.map(table=>db.prepare('SELECT * FROM '+table).all());migrate(db);migrate(db);
-    assert.equal(db.prepare('PRAGMA user_version').get().user_version,10);
+    assert.equal(db.prepare('PRAGMA user_version').get().user_version,12);
     assert.deepEqual(tables.map(table=>db.prepare('SELECT * FROM '+table).all()),before);
     assert.deepEqual(db.prepare('SELECT name FROM sqlite_master WHERE type=\'table\' AND name LIKE \'reminder%\' ORDER BY name').all().map(x=>x.name),
       ['reminder_deliveries','reminder_occurrences','reminder_settings','reminders']);
@@ -109,7 +113,7 @@ test('WAL backup preserves schema 1; migration preserves installation and admini
     restoredDb.close();
     db.close();
     db = openDatabase(dir, { countBoot: false });
-    assert.equal(db.prepare('PRAGMA user_version').get().user_version, 10);
+    assert.equal(db.prepare('PRAGMA user_version').get().user_version, 12);
     assert.equal(db.prepare('SELECT boot_count FROM installation').get().boot_count, 7);
     assert.equal(db.prepare('SELECT installation_id FROM installation').get().installation_id, 'preserved-id');
     migrate(db);
@@ -129,19 +133,51 @@ test('WAL backup preserves schema 1; migration preserves installation and admini
 test('schema 7 adds discoverable labels without changing encrypted records or account data',()=>{
   const db=new DatabaseSync(':memory:');
   try{
-    migrate(db);db.exec(`DROP TABLE note_lifecycle; DROP TRIGGER vault_label_deleted; DROP TABLE vault_labels; DROP TABLE reminder_occurrences;
+    migrate(db);db.exec('DROP TABLE webauthn_challenges; DROP TABLE webauthn_credentials;');db.exec(`DROP TABLE note_lifecycle; DROP TRIGGER vault_label_deleted; DROP TABLE vault_labels; DROP TABLE reminder_occurrences;
       ALTER TABLE reminder_deliveries DROP COLUMN occurrence_id; ALTER TABLE reminders DROP COLUMN schedule; ALTER TABLE reminder_settings DROP COLUMN all_day_time; PRAGMA user_version=7;
       INSERT INTO users(id,login,password_hash,role,created_at) VALUES('owner','owner','hash','admin',123);
       INSERT INTO vaults(id,user_id,header) VALUES('vault','owner','opaque-header');
       INSERT INTO records VALUES('record','vault','object',NULL,'opaque-payload');`);
     const tables=['users','vaults','records','installation'],before=tables.map(t=>db.prepare('SELECT * FROM '+t).all());
     migrate(db);migrate(db);
-    assert.equal(db.prepare('PRAGMA user_version').get().user_version,10);
+    assert.equal(db.prepare('PRAGMA user_version').get().user_version,12);
     assert.deepEqual(tables.map(t=>db.prepare('SELECT * FROM '+t).all()),before);
     assert.equal(db.prepare('SELECT count(*) n FROM vault_labels').get().n,0);
     db.prepare('INSERT INTO vault_labels VALUES(?,?)').run('vault','Название');
     db.exec("UPDATE vaults SET deleted=1 WHERE id='vault'");
     assert.equal(db.prepare('SELECT count(*) n FROM vault_labels').get().n,0);
+  }finally{db.close();}
+});
+
+test('schema 10 adds device session metadata without changing authentication tokens',()=>{
+  const db=new DatabaseSync(':memory:');
+  try{
+    migrate(db);db.exec('DROP TABLE webauthn_challenges; DROP TABLE webauthn_credentials;');db.exec(`DROP INDEX sessions_user_active;
+      ALTER TABLE sessions DROP COLUMN last_seen; ALTER TABLE sessions DROP COLUMN created_at;
+      ALTER TABLE sessions DROP COLUMN client_kind; ALTER TABLE sessions DROP COLUMN device_name; ALTER TABLE sessions DROP COLUMN device_id;
+      PRAGMA user_version=10; INSERT INTO users(id,login,password_hash,role,created_at) VALUES('owner','owner','hash','admin',123);
+      INSERT INTO sessions(id,user_id,access_hash,access_expires,refresh_hash,refresh_expires,absolute_expires,revoked) VALUES('session','owner','access',999,'refresh',999,999,0);`);
+    const before=db.prepare('SELECT id,user_id,access_hash,access_expires,refresh_hash,refresh_expires,absolute_expires,revoked FROM sessions').get();
+    migrate(db);migrate(db);assert.equal(db.prepare('PRAGMA user_version').get().user_version,12);
+    const after=db.prepare('SELECT * FROM sessions').get();for(const [key,value] of Object.entries(before))assert.equal(after[key],value);
+    assert.equal(after.device_id,null);assert.equal(after.device_name,null);assert.equal(after.client_kind,null);assert.equal(after.created_at,0);assert.equal(after.last_seen,0);
+    assert.ok(db.prepare("SELECT name FROM sqlite_master WHERE type='index' AND name='sessions_user_active'").get());
+  }finally{db.close();}
+});
+
+test('schema 11 adds WebAuthn credentials and one-time challenges without changing sessions',()=>{
+  const db=new DatabaseSync(':memory:');
+  try{
+    migrate(db);
+    const beforeSession=db.prepare('SELECT * FROM sessions').all();
+    db.exec('DROP TABLE webauthn_challenges; DROP TABLE webauthn_credentials; PRAGMA user_version=11;');
+    migrate(db);migrate(db);
+    assert.equal(db.prepare('PRAGMA user_version').get().user_version,12);
+    assert.deepEqual(db.prepare('SELECT * FROM sessions').all(),beforeSession);
+    const tables=db.prepare("SELECT name FROM sqlite_master WHERE type='table' AND name LIKE 'webauthn_%' ORDER BY name").all().map(row=>row.name);
+    assert.deepEqual(tables,['webauthn_challenges','webauthn_credentials']);
+    const credentialColumns=db.prepare('PRAGMA table_info(webauthn_credentials)').all().map(row=>row.name);
+    assert.deepEqual(credentialColumns,['id','user_id','credential_id','public_key','counter','transports','device_type','backed_up','display_name','created_at','last_used']);
   }finally{db.close();}
 });
 

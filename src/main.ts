@@ -4,14 +4,16 @@ import { isHealthResponse, type HealthResponse } from './types/api';
 import './style.css';
 import { Login } from './components/Login';
 import { PasswordScreen, UsersScreen } from './components/Accounts';
+import { DevicesScreen } from './components/Devices';
+import { PasskeysScreen } from './components/Passkeys';
 import { CryptoCheck } from './components/CryptoCheck';
 import { Planner } from './components/Planner';
 import { Notifications } from './components/Notifications';
 import { ServerStorage } from './components/ServerStorage';
 import { detachPush, browserUnsubscribe } from './push';
-import { profiles, readState, eraseState, exclusive, announce, changes } from './storage';
-import { flushDraft, hasUnsaved, synchronize } from './planner';
-import { session, signOut, authMessage } from './auth';
+import { profiles, profileActivity, readState, eraseState, exclusive, announce, changes } from './storage';
+import { flushDraft, hasUnsaved, synchronize, requireOutboxReview, OutboxReviewRequired, lockAfterBackground } from './planner';
+import { session, signOut, authMessage, AuthError } from './auth';
 import type { User } from './types/auth';
 import { updateReminderZone, type ReminderTarget } from './reminders';
 
@@ -24,6 +26,12 @@ function initialReminderTarget():ReminderTarget|undefined{
   if(match)history.replaceState(null,'',location.pathname+location.search);
   return (parts?.length===4||parts?.length===5)&&parts.every(value=>uuid.test(value))
     ?{accountId:parts[0],vaultId:parts[1],objectId:parts[2],configId:parts[3],...(parts[4]?{occurrenceId:parts[4]}:{})}:undefined;
+}
+function connectionFailure(caught:unknown):'offline'|'auth'|'error'{
+  if(caught instanceof TypeError||caught instanceof AuthError&&caught.code==='network'||caught instanceof Error&&caught.name==='TimeoutError'
+    ||Boolean(caught&&typeof caught==='object'&&'code'in caught&&caught.code==='network'))return'offline';
+  if(caught instanceof AuthError&&caught.code==='unauthorized'||caught instanceof Error&&caught.message.startsWith('Для синхронизации войдите'))return'auth';
+  return'error';
 }
 
 function DefinitionList({ rows }: { rows: DefinitionRow[] }) {
@@ -38,7 +46,7 @@ function DefinitionList({ rows }: { rows: DefinitionRow[] }) {
 function App() {
   const [user, setUser] = useState<User | null>(null);
   const userRef = useRef<User | null>(null); userRef.current = user;
-  const [page, setPage] = useState<'home' | 'password' | 'users' | 'diagnostics' | 'notifications'>('home');
+  const [page, setPage] = useState<'home' | 'password' | 'users' | 'devices' | 'passkeys' | 'diagnostics' | 'notifications'>('home');
   const [localProfiles, setLocalProfiles] = useState<User[]>([]);
   const localMode = useRef(false);
   const [notice, setNotice] = useState('');
@@ -47,8 +55,12 @@ function App() {
   useEffect(() => { setPage('home'); setNotice(''); }, [user?.id]);
   const [authLoading, setAuthLoading] = useState(true);
   const [authError, setAuthError] = useState('');
+  const [connection, setConnection] = useState<'checking'|'online'|'offline'|'auth'|'error'>('checking');
+  const [syncing, setSyncing] = useState(false);
   const [loggingOut, setLoggingOut] = useState(false);
   const authGeneration = useRef(0);
+  const backgroundAt = useRef<number | null>(null);
+  const backgroundFlush = useRef<Promise<void> | null>(null);
   const [health, setHealth] = useState<HealthResponse | null>(null);
   const [busy, setBusy] = useState(false);
   const [error, setError] = useState('');
@@ -67,23 +79,47 @@ function App() {
         if (result) {
           if (!active || result.id === active.id) {
             if (result.mustChangePassword && active && !active.mustChangePassword) await flushDraft();
-            localMode.current = false; setUser(result);void updateReminderZone(result).catch(()=>{});
+            localMode.current = false;userRef.current=result;setUser(result);void updateReminderZone(result).catch(()=>{});
           }
         }
+        if(active&&(!result||result.id!==active.id))await requireOutboxReview(active);
         setAuthError(active && (!result || result.id !== active.id) ? 'Для синхронизации войдите в этот аккаунт. Локальные данные доступны.' : '');
+        setConnection(result && (!active || result.id === active.id) ? 'online' : 'auth');
         setLocalProfiles(await profiles());
       }
     } catch (caught) {
-      if (generation === authGeneration.current) { setAuthError(authMessage(caught)); setLocalProfiles(await profiles().catch(() => [])); }
+      if (generation === authGeneration.current) {
+        const failure=connectionFailure(caught);if(failure==='auth'&&userRef.current)await requireOutboxReview(userRef.current);
+        setAuthError(failure==='offline'&&userRef.current?'':authMessage(caught));setConnection(failure);
+        setLocalProfiles(await profiles().catch(() => []));
+      }
     } finally { if (generation === authGeneration.current) setAuthLoading(false); }
   }
   useEffect(() => {
-    void checkSession();
+    void profileActivity().then(local => {
+      setLocalProfiles(local.map(item=>item.user));
+      const recent=local[0];
+      if (recent && (local.length===1||recent.lastOpenedAt) && !userRef.current) { userRef.current=recent.user;setUser(recent.user); }
+    }).catch(() => {}).finally(() => { setAuthLoading(false); void checkSession(); });
     const wake = () => { if (document.visibilityState === 'visible') void checkSession(); };
     document.addEventListener('visibilitychange', wake);
     window.addEventListener('online', wake);
     return () => { authGeneration.current++; document.removeEventListener('visibilitychange', wake); window.removeEventListener('online', wake); };
   }, []);
+  useEffect(() => {
+    if (!user || page === 'home' || user.mustChangePassword) return;
+    let active=true,running=false;
+    const tick=async()=>{
+      if(running)return;running=true;setSyncing(true);
+      try { await synchronize(user);if(active)setConnection('online'); }
+      catch(caught){if(active)setConnection(caught instanceof OutboxReviewRequired?'online':connectionFailure(caught));}
+      finally{running=false;if(active)setSyncing(false);}
+    };
+    const wake=()=>{if(document.visibilityState==='visible')void tick();};
+    void tick();window.addEventListener('online',wake);document.addEventListener('visibilitychange',wake);
+    const interval=setInterval(wake,30000);
+    return()=>{active=false;clearInterval(interval);window.removeEventListener('online',wake);document.removeEventListener('visibilitychange',wake);};
+  },[user?.id,user?.mustChangePassword,page]);
   useEffect(() => {
     const receive = (event: Event) => {
       const message = event instanceof MessageEvent ? event.data : (event as CustomEvent).detail;
@@ -208,14 +244,16 @@ function App() {
     authError && e('div', { class: 'auth-status' }, e('p', { class: 'error', role: 'alert' }, authError),
       e('button', { onClick: () => void checkSession() }, 'Повторить проверку входа')),
     localProfiles.length > 0 && e('section', { class: 'auth-status card' }, e('h2', null, 'Данные на этом устройстве'),
-      localProfiles.map(profile => e('button', { onClick: () => { localMode.current = true; setUser(profile); } }, 'Открыть локально · ' + profile.login))),
-    e(Login, { onLogin: (result) => { authGeneration.current++; localMode.current = false; setUser(result); setAuthError('');void updateReminderZone(result).catch(()=>{}); } }));
+      localProfiles.map(profile => e('button', { onClick: () => { localMode.current = true;userRef.current=profile;setUser(profile); } }, 'Открыть локально · ' + profile.login))),
+    e(Login, { onLogin: (result) => { authGeneration.current++; localMode.current = false;void requireOutboxReview(result).catch(()=>{}).finally(()=>{userRef.current=result;setUser(result);setAuthError('');void updateReminderZone(result).catch(()=>{});}); } }));
 
   if (user.mustChangePassword || page === 'password') return e('div', null,
     updateNotice && e('div', { class: 'auth-status' }, updateNotice),
     authError && e('p', { class: 'auth-status error', role: 'alert' }, authError),
     e(PasswordScreen, { key: user.id, user, onBack: () => setPage('home'), onLogout: logout, onRefresh: checkSession,
-      onDone: (result) => { authGeneration.current++; setUser(result); setPage('home'); setAuthError(''); setNotice('Пароль изменён.'); } }));
+      onDone: (result) => { authGeneration.current++;void requireOutboxReview(result).catch(()=>{}).finally(()=>{userRef.current=result;setUser(result);setPage('home');setAuthError('');setNotice('Пароль изменён.');}); } }));
+  if (page === 'devices') return e(DevicesScreen, { user, onBack: () => setPage('home'), onAuthLost: checkSession });
+  if (page === 'passkeys') return e(PasskeysScreen, { user, onBack: () => setPage('home') });
   if (page === 'users' && user.role === 'admin') return e('div', null,
     authError && e('p', { class: 'auth-status error', role: 'alert' }, authError),
     e(UsersScreen, { key: user.id, onBack: () => setPage('home'), onRefresh: checkSession }));
@@ -224,7 +262,8 @@ function App() {
     e('header', null,
       e('a', { class: 'brand', href: '/', 'aria-label': 'Tasks, главная' },
         e('img', { src: '/icon.svg', width: 40, height: 40, alt: '' }), 'Tasks'),
-      e('span', { class: 'stage' }, 'Этап 10')),
+      e('span', { class: 'shell-sync', role: 'status', 'aria-live': 'polite' }, syncing && e('span', { class: 'sync-spinner', 'aria-hidden': 'true' }), syncing ? 'Синхронизация…' : '')),
+    connection === 'offline' && e('div', { class: 'offline-banner', role: 'status' }, 'ОФЛАЙН РЕЖИМ · изменения сохраняются на устройстве'),
     e('div', { class: 'account-bar' }, e('p', null, user.login, ' · ', user.role === 'admin' ? 'Администратор' : 'Пользователь'),
       e('button', { disabled: loggingOut, onClick: logout }, loggingOut ? 'Выходим…' : 'Выйти')),
     authError && e('p', { class: 'error', role: 'alert' }, authError),
@@ -233,11 +272,14 @@ function App() {
       e('button', { onClick: () => void flushDraft().then(() => setPage('home')).catch(() => setAuthError('Сохраните черновик')) }, 'Заметки'),
       e('button', { onClick: () => void flushDraft().then(() => setPage('diagnostics')).catch(() => setAuthError('Сохраните черновик')) }, 'Диагностика'),
       e('button', { onClick: () => void flushDraft().then(() => setPage('notifications')).catch(() => setAuthError('Сохраните черновик')) }, 'Уведомления'),
+      e('button', { onClick: () => void flushDraft().then(() => setPage('devices')).catch(() => setAuthError('Сохраните черновик')) }, 'Устройства'),
+      e('button', { onClick: () => void flushDraft().then(() => setPage('passkeys')).catch(() => setAuthError('Сохраните черновик')) }, 'Ключи доступа'),
       e('button', { onClick: () => void flushDraft().then(() => setPage('password')).catch(() => setAuthError('Сохраните черновик')) }, 'Изменить пароль'),
       user.role === 'admin' && e('button', { onClick: () => void flushDraft().then(() => setPage('users')).catch(() => setAuthError('Сохраните черновик')) }, 'Пользователи'),
       e('button', { onClick: () => void flushDraft().then(detachPush).then(() => { setUser(null); void profiles().then(setLocalProfiles); }).catch(error => setAuthError(error instanceof Error?error.message:'Сохраните черновик и проверьте сеть')) }, 'Войти снова / другой аккаунт')),
     reminderTarget&&reminderTarget.accountId!==user.id&&e('p',{class:'auth-notice',role:'status'},'Уведомление относится к другому аккаунту. Войдите в нужный аккаунт, чтобы открыть заметку.'),
-    page === 'home' && e(Planner, { user, key: user.id, reminderTarget, onReminderHandled:()=>setReminderTarget(undefined) }),
+    page === 'home' && e(Planner, { user, key: user.id, reminderTarget, onReminderHandled:()=>setReminderTarget(undefined),
+      onSyncState:(next:'syncing'|'online'|'offline'|'auth'|'error'|'idle')=>{setSyncing(next==='syncing');if(next!=='syncing'&&next!=='idle')setConnection(next);} }),
     page === 'notifications' && e(Notifications, { user, key: user.id }),
     updateNotice,
     page === 'diagnostics' && e('div', null,
