@@ -12,7 +12,7 @@ import { generateVaultKey } from '../src/crypto/vault.ts';
 import { seal, unseal } from '../src/crypto/records.ts';
 import { signAccess } from '../src/crypto/access.ts';
 import { createVault, openVault, closeVault, saveNote, readNote, heads, synchronize, transferVault,
-  readStash, moveStash, discardStash, edit, closeAllVault, resolveConflict, renameDevice, acknowledgeReminder, context, vaultName,
+  readStash, moveStash, discardStash, edit, closeAllVault, deleteVault, resolveConflict, renameDevice, acknowledgeReminder, context, vaultName,
   readTags,createTag,renameTag,deleteTag,copyNote,readVaultPushMode,setVaultPushMode,archiveNote,restoreArchivedNote,trashNote,
   restoreTrashedNote,permanentlyDeleteNote,restoreNoteVersion,noteHistory,noteLifecycle,requireOutboxReview,outboxReviewItems,decideOutboxReview,OutboxReviewRequired } from '../src/planner.ts';
 import { readState, writeState, changes } from '../src/storage.ts';
@@ -365,6 +365,24 @@ test('vault persistence, offline queue, conflicts, deletion and encrypted stash 
     const second=await readState(user.id),locked=second.vaults.find(v=>v.header.id===vid);
     assert.equal(locked.key,undefined);assert.equal(await vaultName(user.id,locked),'Узнаваемое хранилище (закрыто)');
     await writeState(first);
+  });
+  await t.test('vault deletion requires an open local key and cryptographic vault proof',async()=>{
+    const vid=await createVault(user,'Удаляемое хранилище','abcdef'),oid=randomUUID();
+    await saveNote(user,vid,oid,null,{title:'Удаляемая заметка',text:'Содержимое'});await synchronize(user);
+    let s=await readState(user.id),snapshot;
+    const direct=await post('/api/vaults/delete',{vaultId:vid,confirmed:true});assert.equal(direct.statusCode,423);
+    await closeVault(user,vid);await assert.rejects(deleteVault(user,vid),/только открытое/);
+    await openVault(user,vid,'abcdef');snapshot=structuredClone(await readState(user.id));
+    lose='/api/vaults/delete';await assert.rejects(deleteVault(user,vid),/lost response/);
+    let remote=(await send('/api/vaults')).json().vaults.find(v=>v.id===vid);assert.equal(remote.deleted,true);assert.ok((await readState(user.id)).vaults.some(v=>v.header.id===vid));
+    await deleteVault(user,vid);s=await readState(user.id);assert.equal(s.vaults.some(v=>v.header.id===vid),false);
+    remote=(await send('/api/vaults')).json().vaults.find(v=>v.id===vid);assert.equal(remote.deleted,true);assert.equal(remote.header,null);
+    let probe=new DatabaseSync(join(dir,'tasks.sqlite'),{readOnly:true});
+    assert.equal(probe.prepare('SELECT count(*) n FROM records WHERE vault_id=?').get(vid).n,0);
+    assert.equal(probe.prepare('SELECT count(*) n FROM vault_labels WHERE vault_id=?').get(vid).n,0);probe.close();
+    assert.equal((await post('/api/vaults/delete',{vaultId:vid,confirmed:true})).statusCode,200);
+    await writeState(snapshot);await synchronize(user);s=await readState(user.id);
+    const stale=s.vaults.find(v=>v.header.id===vid);assert.equal(stale.deleted,true);assert.equal(stale.key,undefined);assert.equal(stale.records.length,0);
   });
   await t.test('re-login review blocks the outbox until each local note is accepted or rejected',async()=>{
     const vid=await createVault(user,'Проверка очереди','abcdef'),oid=randomUUID();await saveNote(user,vid,oid,null,{title:'Серверная версия',text:'До офлайна'});await synchronize(user);

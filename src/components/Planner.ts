@@ -6,7 +6,7 @@ import { createVault, openVault, closeVault, saveNote, readNote, vaultName, head
   readStash, moveStash, discardStash, discardPurgedObjects, registerDraftFlush, edit, hasUnsaved, closeAllVault, resolveConflict, renameDevice,
   acknowledgeReminder, readTags, createTag, renameTag, deleteTag, copyNote, readVaultPushMode, setVaultPushMode,
   archiveNote,restoreArchivedNote,trashNote,restoreTrashedNote,permanentlyDeleteNote,noteHistory,restoreNoteVersion,noteLifecycle,
-  outboxReviewItems,decideOutboxReview,OutboxReviewRequired,enableSystemUnlock,unlockVaultSystem,lockVault,forgetSystemUnlock,setSystemAutoLock,lockAfterBackground,
+  outboxReviewItems,decideOutboxReview,OutboxReviewRequired,enableSystemUnlock,unlockVaultSystem,lockVault,forgetSystemUnlock,setSystemAutoLock,lockAfterBackground,deleteVault,vaultEntryMode,
   type Note, type TagDefinition, type VaultPushMode, type NoteLifecycleState, type OutboxReviewItem } from '../planner';
 import { AUTO_LOCK_VALUES, type AutoLockMs } from '../crypto/system-unlock';
 import { localTime } from '../../shared/reminders.mjs';
@@ -32,7 +32,10 @@ export function Planner({ user,reminderTarget,onReminderHandled,onSyncState }: {
   const [stash, setStash] = useState<Record<string, Note>>({});
   const [reviewItems,setReviewItems]=useState<OutboxReviewItem[]>([]);
   const [selected, setSelected] = useState('');
+  const selectedRef=useRef('');selectedRef.current=selected;
   const selectionInitialized = useRef(false);
+  const startupUnlockHandled=useRef(false);
+  const unlockAttempt=useRef(0);
   function select(vid: string) {
     selectionInitialized.current = true;
     setSelected(vid);
@@ -140,6 +143,29 @@ export function Planner({ user,reminderTarget,onReminderHandled,onSyncState }: {
     catch (caught) { setError(caught instanceof Error ? caught.message : 'Не удалось выполнить действие'); }
     finally { if (alive.current) setBusy(false); }
   }
+  function unlockError(caught:unknown){
+    return caught instanceof DOMException&&caught.name==='NotAllowedError'
+      ?'Системная разблокировка отменена. Можно повторить её, ввести фразу или отложить открытие хранилища.'
+      :caught instanceof Error?caught.message:'Не удалось разблокировать хранилище';
+  }
+  async function activateVault(vid:string){
+    select(vid);showDraft(null);showViewing(null);
+    if(!vid){setScreen('list');return;}
+    const local=await readState(user.id),current=local?.vaults.find(item=>item.header.id===vid&&!item.deleted);
+    if(!current){setSelected('');setScreen('list');setError('Хранилище больше не доступно.');return;}
+    const mode=vaultEntryMode(current);
+    if(mode==='open'){setScreen('list');setError('');return;}
+    setPhrase('');setRepeat('');setPassword('');setConfirmed(false);setError('');setScreen('open');
+    if(mode==='phrase')return;
+    const attempt=++unlockAttempt.current;setBusy(true);
+    try{
+      await unlockVaultSystem(user,vid);
+      if(attempt!==unlockAttempt.current||!alive.current)return;
+      setStatus('Хранилище разблокировано системной проверкой.');setScreen('list');await load();void sync();
+    }catch(caught){if(attempt===unlockAttempt.current&&alive.current)setError(unlockError(caught));}
+    finally{if(attempt===unlockAttempt.current&&alive.current)setBusy(false);}
+  }
+  function postponeUnlock(){unlockAttempt.current++;setPhrase('');setError('');setScreen('list');select('');}
   async function sync() {
     if (syncRunning.current) { syncAgain.current=true; return; }
     syncRunning.current = true;
@@ -176,13 +202,16 @@ export function Planner({ user,reminderTarget,onReminderHandled,onSyncState }: {
       if(backgroundLockTimer.current){clearTimeout(backgroundLockTimer.current);backgroundLockTimer.current=undefined;}
       const started = hiddenAt.current; hiddenAt.current = null;
       if (started !== null) {
-        const away = Math.max(0, Date.now() - started), snapshot = stateRef.current;
-        const shouldLock = Boolean(snapshot?.vaults.some(v => v.key && v.systemUnlock && v.systemUnlock.autoLockMs > 0 && away >= v.systemUnlock.autoLockMs));
-        if (shouldLock) {
-          showDraft(null); showViewing(null); setNotes({}); setTags({}); setPushDefaults({});
-          void lockAfterBackground(user, away).then(locked => locked ? load() : undefined).then(() => sync()).catch(error => setError(error instanceof Error ? error.message : 'Не удалось восстановить приложение после блокировки'));
-          return;
-        }
+        const away = Math.max(0, Date.now() - started);
+        void (async()=>{
+          const locked=await lockAfterBackground(user,away);
+          if(locked){showDraft(null);showViewing(null);setNotes({});setTags({});setPushDefaults({});}
+          await load();
+          const local=await readState(user.id),vid=selectedRef.current,current=local?.vaults.find(item=>item.header.id===vid&&!item.deleted);
+          if(current?.systemUnlock&&!current.key&&current.systemUnlock.autoLockMs>0&&away>=current.systemUnlock.autoLockMs){await activateVault(vid);return;}
+          await sync();
+        })().catch(error=>setError(error instanceof Error?error.message:'Не удалось восстановить приложение после блокировки'));
+        return;
       }
       void sync();
     };
@@ -196,13 +225,19 @@ export function Planner({ user,reminderTarget,onReminderHandled,onSyncState }: {
       window.removeEventListener('online', wake); document.removeEventListener('visibilitychange', wake); window.removeEventListener('beforeunload', leave); };
   }, [user.id]);
   useEffect(()=>{
+    if(!state||startupUnlockHandled.current)return;
+    startupUnlockHandled.current=true;
+    const last=state.vaults.find(item=>item.header.id===state.lastVaultId&&!item.deleted);
+    if(last)void activateVault(last.header.id);
+  },[state?.lastVaultId]);
+  useEffect(()=>{
     if(!reminderTarget||reminderTarget.accountId!==user.id||!state)return;
     const targetKey=reminderTarget.configId+'.'+(reminderTarget.occurrenceId??'');if(acknowledgedTarget.current!==targetKey){acknowledgedTarget.current=targetKey;void acknowledgeReminder(user,reminderTarget);}
     const targetVault=state.vaults.find(v=>v.header.id===reminderTarget.vaultId);
     if(!targetVault){setStatus('Заметка из уведомления ещё не загружена. Выполняется синхронизация.');void sync();return;}
-    if(selected!==reminderTarget.vaultId)select(reminderTarget.vaultId);
     if(targetVault.deleted){setError('Хранилище из уведомления удалено.');onReminderHandled();return;}
-    if(!targetVault.key){if(screen!=='open')form('open',reminderTarget.vaultId);return;}
+    if(selected!==reminderTarget.vaultId){void activateVault(reminderTarget.vaultId);return;}
+    if(!targetVault.key){if(screen!=='open'&&!busy)void activateVault(reminderTarget.vaultId);return;}
     const versions=heads(targetVault).filter(r=>r.objectId===reminderTarget.objectId);
     if(versions.length>1){setComparison({objectId:reminderTarget.objectId,versions:versions.map(r=>r.id),chosen:versions[0].id});setScreen('conflict');onReminderHandled();return;}
     const revision=versions[0],value=revision&&notes[revision.id];
@@ -485,16 +520,16 @@ export function Planner({ user,reminderTarget,onReminderHandled,onSyncState }: {
       :e('button',{onClick:openReminderForm},'Напомнить')),
     feedback, error && e('button', { onClick: () => void run(flush) }, 'Повторить сохранение'));
   if (screen === 'create' || screen === 'open' || screen === 'transfer') return e('section', { class: 'card' },
-    e('button', { disabled: busy, onClick: () => { setScreen('list'); setPhrase(''); setRepeat(''); } }, 'Назад'),
+    e('button', { disabled: busy, onClick: () => { if(screen==='open'){postponeUnlock();return;}setScreen('list');setPhrase('');setRepeat(''); } }, screen==='open'?'Отложить':'Назад'),
     e('h2', null, screen === 'open' ? 'Открыть хранилище' : screen === 'transfer' ? 'Перенести с новой фразой' : 'Новое хранилище'),
     screen==='open'&&v?.systemUnlock&&e('div',{class:'auth-notice'},
-      e('p',null,'Для этого хранилища настроена системная разблокировка на данном устройстве.'),
-      e('button',{class:'primary',type:'button',disabled:busy,onClick:()=>void run(async()=>{await unlockVaultSystem(user,selected);setPhrase('');setScreen('list');setStatus('Хранилище разблокировано системной проверкой.');void sync();})},'Разблокировать системно'),
-      e('p',{class:'hint'},'Можно вместо этого ввести фразу хранилища ниже.')),
+      e('p',null,'Для этого хранилища настроена системная разблокировка на данном устройстве. При выборе хранилища Tasks сразу запрашивает системную проверку.'),
+      e('button',{class:'primary',type:'button',disabled:busy,onClick:()=>void activateVault(selected)},busy?'Ожидаем системную проверку…':'Повторить системную разблокировку'),
+      e('p',{class:'hint'},'Можно вместо этого ввести фразу хранилища ниже или отложить открытие.')),
     screen!=='open'&&e('p',{class:'hint'},'Название видно на всех ваших устройствах до разблокировки и хранится на сервере отдельно от зашифрованных заметок.'),
     e('p', { class: 'hint' }, screen==='open'&&v?.systemUnlock?'Фраза остаётся независимым резервным способом и не отправляется на сервер.':'Фраза не отправляется на сервер. Доступ сохранится на этом устройстве до «Закрыть хранилище». Без фразы и сохранённого доступа восстановить заметки невозможно.'),
     e('form', { onSubmit: submit }, screen !== 'open' && e('label', null, 'Название', e('input', { required: true, maxLength: 200, value: name, onInput: (ev: Event) => setName((ev.target as HTMLInputElement).value) })),
-      e('label', null, 'Фраза хранилища', e('input', { type: 'password', autoComplete: screen === 'open' ? 'current-password' : 'new-password', required: true, value: phrase,
+      e('label', null, 'Фраза хранилища', e('input', { type: 'password', autoComplete: screen === 'open' ? 'current-password' : 'new-password', autoFocus:screen==='open', required: true, value: phrase,
         onInput: (ev: Event) => setPhrase((ev.target as HTMLInputElement).value) })),
       screen !== 'open' && e('label', null, 'Повторите фразу (минимум 6 любых символов)', e('input', { type: 'password', autoComplete: 'new-password', required: true, value: repeat,
         onInput: (ev: Event) => setRepeat((ev.target as HTMLInputElement).value) })),
@@ -625,7 +660,7 @@ export function Planner({ user,reminderTarget,onReminderHandled,onSyncState }: {
     :Number(Boolean(b.note!.pinned))-Number(Boolean(a.note!.pinned))||(sort==='title'?a.note!.title.localeCompare(b.note!.title,'ru'):sort==='oldest'?(a.note!.author?.time??0)-(b.note!.author?.time??0):(b.note!.author?.time??0)-(a.note!.author?.time??0)));
   return e('section', { class: 'card planner' },
     e('div', { class: 'card-heading' }, e('h1', null, 'Заметки'), e('button', { disabled: busy, onClick: () => void run(sync) }, 'Синхронизировать')),
-    e('label', null, 'Хранилище', e('select', { value: selected, onChange: (ev: Event) => select((ev.target as HTMLSelectElement).value) },
+    e('label', null, 'Хранилище', e('select', { value: selected, onChange: (ev: Event) => void activateVault((ev.target as HTMLSelectElement).value) },
       e('option', { value: '' }, 'Выберите хранилище'), active.map(v => e('option', { value: v.header.id, key: v.header.id }, names[v.header.id] || 'Хранилище')))),
     state?.sessionReviewRequired&&e('div',{class:'auth-notice',role:'status'},e('strong',null,'Синхронизация локальных изменений приостановлена.'),
       e('p',null,reviewItems.length?`Нужно проверить изменений: ${reviewItems.length}.`:'Проверяем актуальное состояние сервера…'),
@@ -668,9 +703,15 @@ export function Planner({ user,reminderTarget,onReminderHandled,onSyncState }: {
       e('button',{onClick:()=>form('open',v.header.id)},'Открыть и сохранить'),
       e('button',{onClick:()=>{if(confirm('Удалить эти локальные версии с устройства без возможности восстановления?'))void run(()=>discardPurgedObjects(user,v.header.id));}},'Удалить локальные версии'))),
     !active.length && e('div', { class: 'empty-state' }, e('h2', null, 'Пока нет хранилищ'), e('p', null, 'Создайте первое хранилище и задайте его фразу.')),
-    v && !v.deleted && (!v.key ? e('button', { class: 'primary', onClick: () => form('open', selected) }, 'Открыть хранилище') : e('div', null,
+    v && !v.deleted && (!v.key ? e('button', { class: 'primary', onClick: () => void activateVault(selected) }, 'Открыть хранилище') : e('div', null,
       e('div', { class: 'actions' }, e('button', { disabled: busy || Boolean(v.transfer), onClick: () => void run(() => closeVault(user, selected)) }, 'Закрыть хранилище'),
-        e('button', { disabled: busy || Boolean(v.transfer), onClick: () => form('transfer', selected) }, 'Забыл фразу · перенести')),
+        e('button', { disabled: busy || Boolean(v.transfer), onClick: () => form('transfer', selected) }, 'Забыл фразу · перенести'),
+        e('button',{class:'danger-button',disabled:busy||Boolean(v.transfer),onClick:()=>{
+          const label=names[selected]||'это хранилище';
+          if(confirm('Удалить «'+label+'» и все его серверные данные? Хранилище исчезнет на остальных устройствах после синхронизации. Отменить это действие средствами приложения будет невозможно.'))void run(async()=>{
+            await flush();showDraft(null);showViewing(null);await deleteVault(user,selected);select('');setScreen('list');setStatus('Хранилище удалено.');
+          });
+        }},'Удалить хранилище')),
       v.transfer && e('p', { class: 'auth-notice' }, 'Перенос подготовлен. Подключитесь к сети и завершите синхронизацию. Исходник сохранён до подтверждения.'),
       !heads(v).some(r=>notes[r.id]&&statusOf(v,r,notes[r.id])==='active') && !normalizedQuery&&e('div', { class: 'empty-state' }, e('h2', null, 'Пока нет заметок'), e('p', null, 'Создайте первую заметку или верните заметку из архива.')),
       heads(v).some(r=>notes[r.id]&&statusOf(v,r,notes[r.id])==='active')&&!visibleItems.length&&e('div',{class:'empty-state'},e('h2',null,'Ничего не найдено'),e('p',null,'Измените запрос или сбросьте фильтры.'),e('button',{onClick:()=>{setQuery('');setSelectedTags([]);setQuickFilter('all');}},'Сбросить фильтры')),

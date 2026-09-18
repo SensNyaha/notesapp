@@ -131,6 +131,17 @@ export function registerVaults(app, db, { guard, accessOf, clock }) {
     db.prepare("UPDATE note_lifecycle SET state='purged',changed_at=?,purge_after=NULL WHERE vault_id=? AND object_id=?").run(clock(),vaultId,objectId);
     return{ok:true};
   });
+  post('delete',obj({vaultId:uuid,confirmed:{const:true}}),(req,user)=>{
+    const row=own(user,req.body.vaultId,false);
+    if(row.deleted)return{ok:true};
+    permit(req,row,true);
+    db.prepare('DELETE FROM records WHERE vault_id=?').run(row.id);
+    db.prepare('DELETE FROM note_lifecycle WHERE vault_id=?').run(row.id);
+    db.prepare('UPDATE vaults SET deleted=1,header=NULL,access_pack=NULL,replacement=NULL WHERE id=?').run(row.id);
+    db.prepare('DELETE FROM vault_grants WHERE vault_id=?').run(row.id);
+    db.prepare('DELETE FROM vault_challenges WHERE vault_id=?').run(row.id);
+    return{ok:true};
+  });
   post('transfer', obj({ source: uuid, target: uuid, revisions: { type: 'array', maxItems: 10000, uniqueItems: true, items: uuid }, confirmed: { const: true } }), (req, user) => {
     const { source, target, revisions } = req.body;
     if (source === target) fail('invalid_request', 400);

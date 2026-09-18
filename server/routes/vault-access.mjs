@@ -64,8 +64,8 @@ export function registerVaultAccess(app, db, { own, action, post, obj, uuid, b64
     }catch(error){if(error instanceof AccountError)return reply.code(error.status).send({error:error.code});throw error;}
     finally{if(occupied)inFlight--;}
   });
-  return function permit(req,row){
-    if(row.lock_epoch===0)return;
+  return function permit(req,row,required=false){
+    if(!required&&row.lock_epoch===0)return;
     let grants;try{const text=req.headers['x-vault-grants'];if(typeof text!=='string'||text.length>1024)throw Error();grants=JSON.parse(text);}catch{fail('vault_locked',423);}
     const token=grants?.[row.id];
     if(typeof token!=='string'||! /^[A-Za-z0-9_-]{43}$/.test(token))fail('vault_locked',423);

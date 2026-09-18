@@ -2,7 +2,7 @@ import test from 'node:test';
 import assert from 'node:assert/strict';
 import 'fake-indexeddb/auto';
 import { writeState, readState, eraseState, setRuntimeVaultKey, clearRuntimeVaultKey, changes } from '../src/storage.ts';
-import { lockAfterBackground, lockVault } from '../src/planner.ts';
+import { lockAfterBackground, lockVault, vaultEntryMode } from '../src/planner.ts';
 
 const user={id:'81000000-0000-4000-8000-000000000001',login:'lock-user',role:'user'};
 const vaultId='82000000-0000-4000-8000-000000000002';
@@ -18,6 +18,12 @@ function installLocks(){
 async function runtimeKey(){return crypto.subtle.generateKey({name:'AES-KW',length:256},false,['wrapKey','unwrapKey']);}
 function state(key,autoLockMs=900_000){return{user,vaults:[{header:{id:vaultId,keyId:wrapper.keyId,revisionId:'84000000-0000-4000-8000-000000000004',wrapper:{},name:{}},
   records:[],key,systemUnlock:{...wrapper,autoLockMs}}],stash:[]};}
+
+test('vault entry chooses immediate access, system verification or phrase from current local state',()=>{
+  assert.equal(vaultEntryMode({key:{}}),'open');
+  assert.equal(vaultEntryMode({systemUnlock:wrapper}),'system');
+  assert.equal(vaultEntryMode({}),'phrase');
+});
 
 test('protected root key is runtime-only; timeout/manual lock clear it while encrypted wrapper remains',async t=>{
   installLocks();t.after(async()=>{await eraseState(user.id);changes?.close();});

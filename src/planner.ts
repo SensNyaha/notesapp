@@ -121,6 +121,7 @@ function vault(s: State, vid: string, open = true) {
   const v = s.vaults.find(v => v.header.id === vid);
   if (!v || (open && !v.key)) throw Error('Откройте хранилище'); return v;
 }
+export function vaultEntryMode(v:Pick<Vault,'key'|'systemUnlock'>):'open'|'system'|'phrase'{return v.key?'open':v.systemUnlock?'system':'phrase';}
 function phraseCheck(phrase: string) {
   if (Array.from(phrase).length < 6 || new TextEncoder().encode(phrase).length > 4096) throw Error('Фраза: минимум 6 символов, максимум 4096 байт.');
 }
@@ -383,6 +384,45 @@ async function commit(user:User,fn:(s:State)=>Promise<void>){
 const wire=(r:Revision)=>{const{pending:_,reminderPending:__,lifecyclePending:___,...value}=r;return value;};
 function lock(v:Vault,epoch?:number,accountId?:string){if(accountId)clearRuntimeVaultKey(accountId,v.header.id);delete v.key;delete v.grant;v.needsGrant=false;if(epoch!==undefined){if(v.systemUnlock&&v.systemUnlock.lockEpoch!==epoch)delete v.systemUnlock;v.epoch=epoch;}}
 const accessContext=(user:string,v:Vault)=>context(user,v.header,v.header.keyId,v.header.keyId);
+async function grantForOpenVault(user:User,vid:string){
+  const actor=await session();if(actor?.id!==user.id)throw Error('Войдите в этот аккаунт');
+  await commit(user,async s=>{s.deviceId??=id();});
+  let state=await readState(user.id),v=state?.vaults.find(v=>v.header.id===vid);
+  if(!state||!v||v.deleted||!v.key)throw Error('Сначала откройте хранилище');
+  if(v.transfer)throw Error('Сначала завершите перенос');
+  let pack=v.access;
+  if(!pack){
+    pack=await createAccess(v.key,accessContext(user.id,v));
+    const result=await vaultRequest(user.id,'/access/setup',{vaultId:vid,pack});pack=result.pack;
+    await commit(user,async s=>{vault(s,vid,false).access=pack;});
+    state=await readState(user.id);v=state?.vaults.find(v=>v.header.id===vid);
+    if(!state||!v?.key)throw Error('Хранилище было закрыто во время операции');
+  }
+  const challenge=await vaultRequest(user.id,'/access/challenge',{vaultId:vid,deviceId:state.deviceId}),c=challenge.challenge;
+  if(!Array.isArray(c)||c.length!==8||c[0]!=='tasks-vault-access'||c[1]!==1||c[2]!==user.id||c[3]!==vid||c[4]!==(v.epoch??0)||c[5]!==state.deviceId)throw new APIError('vault_locked');
+  const signature=await signAccess(v.key,accessContext(user.id,v),pack!,c);
+  const granted=await vaultRequest(user.id,'/access/grant',{vaultId:vid,deviceId:state.deviceId,challengeId:c[6],signature});
+  await commit(user,async s=>{const current=vault(s,vid,false);current.grant=granted.token;current.needsGrant=false;});
+  return{deviceId:state.deviceId!,token:granted.token as string};
+}
+export async function deleteVault(user:User,vid:string){
+  const initial=await readState(user.id),current=initial?.vaults.find(v=>v.header.id===vid);
+  if(!initial||!current||current.deleted)throw Error('Хранилище не найдено');
+  if(!current.key)throw Error('Удалить можно только открытое на этом устройстве хранилище');
+  if(current.transfer)throw Error('Сначала завершите перенос');
+  if(current.pending){
+    clearRuntimeVaultKey(user.id,vid);await commit(user,async s=>{s.vaults=s.vaults.filter(v=>v.header.id!==vid);s.reminderSeen=(s.reminderSeen??[]).filter(item=>item.vaultId!==vid);if(s.lastVaultId===vid)delete s.lastVaultId;});return;
+  }
+  let grant=initial.deviceId&&current.grant?{deviceId:initial.deviceId,token:current.grant}:await grantForOpenVault(user,vid);
+  try{await vaultRequest(user.id,'/delete',{vaultId:vid,confirmed:true},{deviceId:grant.deviceId,grants:{[vid]:grant.token}});}
+  catch(error){
+    if(!(error instanceof APIError)||error.code!=='vault_locked')throw error;
+    grant=await grantForOpenVault(user,vid);
+    await vaultRequest(user.id,'/delete',{vaultId:vid,confirmed:true},{deviceId:grant.deviceId,grants:{[vid]:grant.token}});
+  }
+  clearRuntimeVaultKey(user.id,vid);
+  await commit(user,async s=>{s.vaults=s.vaults.filter(v=>v.header.id!==vid);s.reminderSeen=(s.reminderSeen??[]).filter(item=>item.vaultId!==vid);if(s.lastVaultId===vid)delete s.lastVaultId;});
+}
 export async function closeAllVault(user:User,vid:string,password:string){
   const actor=await session();if(actor?.id!==user.id)throw Error('Войдите в этот аккаунт');
   let operationId='';
