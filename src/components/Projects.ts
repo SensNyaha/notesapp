@@ -3,9 +3,11 @@ import { useEffect, useRef, useState } from 'preact/hooks';
 import type { User } from '../types/auth.ts';
 import { changes, readState, type State } from '../storage.ts';
 import {
-  createProject,createTask,deleteProject,entityKind,movePlannerObject,readProjectWorkspace,readTags,setProjectArchived,synchronize,
-  updateProject,updateTask,vaultName,type ChecklistItem,type Note,type ProjectWorkspace,type TagDefinition,type TaskPriority,type TaskStatus,type WorkspaceItem
+  createProject,createTask,deleteProject,entityKind,movePlannerObject,readProjectWorkspace,readTags,rescheduleTasks,setProjectArchived,synchronize,
+  updateProject,updateTask,vaultName,type ChecklistItem,type GanttCalendar,type Note,type ProjectWorkspace,type TagDefinition,type TaskDependency,type TaskDependencyType,type TaskPriority,type TaskReminderAnchor,type TaskStatus,type WorkspaceItem
 } from '../planner.ts';
+import { cascadeSchedule,dependencyConflicts,type ScheduleChange } from '../gantt.ts';
+import { GanttView,type GanttDateChange } from './Gantt.ts';
 import { sharedVaultMembers,type VaultMemberInfo } from '../collaboration.ts';
 import type { ReminderPlan } from '../../shared/reminders.mjs';
 
@@ -13,6 +15,8 @@ type ProjectFilter='active'|'all'|'favorite'|'archive';
 type ProjectTab='overview'|'tasks'|'notes'|'files';
 type TaskFilter='all'|'active'|'done'|'cancelled'|'unscheduled';
 type ReminderChoice='none'|'exact'|'start'|'start-1d'|'end'|'end-1d';
+type TaskView='list'|'gantt';
+type ImpactState={taskId:string;changes:ScheduleChange[];single:GanttDateChange};
 const templates=[
   {id:'work',name:'Рабочий проект',tasks:['Определить результат','Подготовить план','Проверить итог']},
   {id:'study',name:'Обучение',tasks:['Собрать материалы','Изучить основной блок','Повторить и закрепить']},
@@ -22,6 +26,7 @@ const templates=[
 ] as const;
 const statusLabel:Record<TaskStatus,string>={todo:'К выполнению',in_progress:'В работе',done:'Выполнено',cancelled:'Отменено'};
 const priorityLabel:Record<TaskPriority,string>={none:'Без приоритета',low:'Низкий',medium:'Средний',high:'Высокий'};
+const dependencyLabel:Record<TaskDependencyType,string>={FS:'Окончание → начало',SS:'Начало → начало',FF:'Окончание → окончание',SF:'Начало → окончание'};
 const dateShift=(date:string,days:number)=>new Date(Date.parse(date+'T00:00:00Z')+days*86400000).toISOString().slice(0,10);
 const activeItem=(item:WorkspaceItem)=>item.lifecycle==='active';
 const taskOf=(item:WorkspaceItem)=>item.value.task!;
@@ -46,12 +51,16 @@ export function ProjectsScreen({user,onBack}:{user:User;onBack:()=>void}){
   const [editingProject,setEditingProject]=useState('');
   const [projectTitle,setProjectTitle]=useState(''),[projectDescription,setProjectDescription]=useState('');
   const [projectStart,setProjectStart]=useState(''),[projectEnd,setProjectEnd]=useState(''),[projectFavorite,setProjectFavorite]=useState(false);
+  const [projectCalendar,setProjectCalendar]=useState<GanttCalendar>('calendar');
   const [template,setTemplate]=useState('');
   const [editingTask,setEditingTask]=useState('');
   const [taskTitle,setTaskTitle]=useState(''),[taskDescription,setTaskDescription]=useState('');
   const [taskProject,setTaskProject]=useState(''),[taskStatus,setTaskStatus]=useState<TaskStatus>('todo'),[taskPriority,setTaskPriority]=useState<TaskPriority>('none');
   const [taskStart,setTaskStart]=useState(''),[taskEnd,setTaskEnd]=useState(''),[taskAssignee,setTaskAssignee]=useState('');
   const [taskChecklist,setTaskChecklist]=useState<ChecklistItem[]>([]),[taskTags,setTaskTags]=useState<string[]>([]);
+  const [taskDependencies,setTaskDependencies]=useState<TaskDependency[]>([]);
+  const [taskView,setTaskView]=useState<TaskView>('list'),[impact,setImpact]=useState<ImpactState|null>(null);
+  const impactActions=useRef<{only:()=>Promise<void>;chain:()=>Promise<void>}>();
   const [reminderChoice,setReminderChoice]=useState<ReminderChoice>('none'),[reminderLocal,setReminderLocal]=useState('');
   const [existingReminderId,setExistingReminderId]=useState('');
 
@@ -96,24 +105,26 @@ export function ProjectsScreen({user,onBack}:{user:User;onBack:()=>void}){
   const assigneeName=(id:string|undefined)=>{
     if(!id)return'Не назначен';const member=members.find(item=>item.user.id===id);return member?member.user.login:'Участник больше не имеет доступа';
   };
+  const dependencyCandidates=(workspace?.tasks??[]).filter(item=>activeItem(item)&&(item.value.projectId??'')===taskProject&&item.revision.objectId!==editingTask).sort(byTitle);
+  const successorTasks=editingTask?(workspace?.tasks??[]).filter(item=>activeItem(item)&&item.value.task?.dependencies?.some(dep=>dep.taskId===editingTask)):[];
   function resetProjectForm(){
-    setEditingProject('');setProjectTitle('');setProjectDescription('');setProjectStart('');setProjectEnd('');setProjectFavorite(false);setTemplate('');
+    setEditingProject('');setProjectTitle('');setProjectDescription('');setProjectStart('');setProjectEnd('');setProjectFavorite(false);setProjectCalendar('calendar');setTemplate('');
   }
   function openProjectForm(item?:WorkspaceItem){
     setError('');setTemplate('');if(item){setEditingProject(item.revision.objectId);setProjectTitle(item.value.title);setProjectDescription(item.value.text);
-      setProjectStart(item.value.project?.startDate??'');setProjectEnd(item.value.project?.endDate??'');setProjectFavorite(Boolean(item.value.project?.favorite));
+      setProjectStart(item.value.project?.startDate??'');setProjectEnd(item.value.project?.endDate??'');setProjectFavorite(Boolean(item.value.project?.favorite));setProjectCalendar(item.value.project?.calendar??'calendar');
     }else resetProjectForm();setScreen('project-form');
   }
   function resetTaskForm(projectId=selectedProject){
     setEditingTask('');setTaskTitle('');setTaskDescription('');setTaskProject(projectId);setTaskStatus('todo');setTaskPriority('none');setTaskStart('');setTaskEnd('');
-    setTaskAssignee('');setTaskChecklist([]);setTaskTags([]);setReminderChoice('none');setReminderLocal('');setExistingReminderId('');
+    setTaskAssignee('');setTaskChecklist([]);setTaskTags([]);setTaskDependencies([]);setReminderChoice('none');setReminderLocal('');setExistingReminderId('');
   }
   function openTaskForm(item?:WorkspaceItem,projectId=selectedProject){
     setError('');if(!item){resetTaskForm(projectId);setScreen('task-form');return;}
     const task=item.value.task!;setEditingTask(item.revision.objectId);setTaskTitle(item.value.title);setTaskDescription(item.value.text);setTaskProject(item.value.projectId??'');
     setTaskStatus(task.status);setTaskPriority(task.priority);setTaskStart(task.startDate??'');setTaskEnd(task.endDate??'');setTaskAssignee(task.assigneeUserId??'');
-    setTaskChecklist((item.value.checklist??[]).map(x=>({...x})));setTaskTags([...(item.value.tagIds??[])]);
-    setExistingReminderId(item.value.reminder?.id??'');setReminderChoice(item.value.reminder?'exact':'none');setReminderLocal(item.value.reminder?.local??'');setScreen('task-form');
+    setTaskChecklist((item.value.checklist??[]).map(x=>({...x})));setTaskTags([...(item.value.tagIds??[])]);setTaskDependencies((task.dependencies??[]).map(dep=>({...dep})));
+    setExistingReminderId(item.value.reminder?.id??'');setReminderChoice(task.reminderAnchor??(item.value.reminder?'exact':'none'));setReminderLocal(item.value.reminder?.local??'');setScreen('task-form');
   }
   function reminderPlan():ReminderPlan|undefined{
     if(reminderChoice==='none')return undefined;let local=reminderLocal;
@@ -126,31 +137,80 @@ export function ProjectsScreen({user,onBack}:{user:User;onBack:()=>void}){
       repeat:{type:'once'},end:{type:'never'},allDay:false,important:taskPriority==='high'};
   }
 
+  function ganttRows(projectId=selectedProject){
+    return projectTasks(projectId).map(item=>({id:item.revision.objectId,title:item.value.title,status:taskOf(item).status,priority:taskOf(item).priority,
+      startDate:taskOf(item).startDate,endDate:taskOf(item).endDate,dependencies:taskOf(item).dependencies}));
+  }
+  function scheduleImpact(projectId:string,change:GanttDateChange,only:()=>Promise<void>,chain:()=>Promise<void>){
+    const rows=ganttRows(projectId),calendar=projectById.get(projectId)?.value.project?.calendar??'calendar',calculated=cascadeSchedule(rows,change.id,change.startDate,change.endDate,calendar);
+    const related=calculated.changes.length>1||rows.some(row=>row.id===change.id&&(row.dependencies?.length??0)>0)||rows.some(row=>row.dependencies?.some(dep=>dep.taskId===change.id));
+    if(!related){void run(only);return false;}
+    impactActions.current={only,chain};setImpact({taskId:change.id,changes:calculated.changes,single:change});return true;
+  }
+  async function applyImpact(mode:'only'|'chain'){
+    const actions=impactActions.current;if(!actions)return;setImpact(null);impactActions.current=undefined;
+    await run(mode==='chain'?actions.chain:actions.only);
+  }
+
   async function submitProject(ev:Event){
     ev.preventDefault();await run(async()=>{
       if(editingProject){
-        await updateProject(user,selectedVault,editingProject,{title:projectTitle,description:projectDescription,favorite:projectFavorite,startDate:projectStart||undefined,endDate:projectEnd||undefined});
+        await updateProject(user,selectedVault,editingProject,{title:projectTitle,description:projectDescription,favorite:projectFavorite,startDate:projectStart||undefined,endDate:projectEnd||undefined,calendar:projectCalendar});
         setSelectedProject(editingProject);setScreen('project');setStatus('Проект обновлён.');
       }else{
-        const created=await createProject(user,selectedVault,{title:projectTitle,description:projectDescription,favorite:projectFavorite,startDate:projectStart||undefined,endDate:projectEnd||undefined});
+        const created=await createProject(user,selectedVault,{title:projectTitle,description:projectDescription,favorite:projectFavorite,startDate:projectStart||undefined,endDate:projectEnd||undefined,calendar:projectCalendar});
         const tpl=templates.find(item=>item.id===template);if(tpl)for(const title of tpl.tasks)await createTask(user,selectedVault,{title,projectId:created.objectId,status:'todo',priority:'none'});
         setSelectedProject(created.objectId);setTab('overview');setScreen('project');setStatus(tpl?'Проект создан из шаблона.':'Проект создан.');
       }
     });
   }
   async function submitTask(ev:Event){
-    ev.preventDefault();const reminder=reminderPlan();await run(async()=>{
+    ev.preventDefault();setError('');
+    try{
+      const reminder=reminderPlan(),reminderAnchor:TaskReminderAnchor|null=reminderChoice==='none'||reminderChoice==='exact'?null:reminderChoice;
       const payload={title:taskTitle,description:taskDescription,projectId:cleanProjectId(taskProject),status:taskStatus,priority:taskPriority,startDate:taskStart||undefined,
-        endDate:taskEnd||undefined,assigneeUserId:taskAssignee||undefined,checklist:taskChecklist,tagIds:taskTags,reminder};
-      if(editingTask)await updateTask(user,selectedVault,editingTask,payload);else await createTask(user,selectedVault,payload);
-      setSelectedProject(taskProject);setTab('tasks');setScreen('project');setStatus(editingTask?'Задача обновлена.':'Задача создана.');
-    });
+        endDate:taskEnd||undefined,assigneeUserId:taskAssignee||undefined,checklist:taskChecklist,tagIds:taskTags,reminder,dependencies:taskDependencies,reminderAnchor};
+      const finish=()=>{setSelectedProject(taskProject);setTab('tasks');setScreen('project');setStatus(editingTask?'Задача обновлена.':'Задача создана.');};
+      if(!editingTask){await run(async()=>{await createTask(user,selectedVault,{...payload,reminderAnchor:reminderAnchor??undefined});finish();});return;}
+      const existing=(workspace?.tasks??[]).find(item=>item.revision.objectId===editingTask),before=existing?.value.task;
+      if(existing&&(existing.value.projectId??'')!==taskProject&&((before?.dependencies?.length??0)>0||successorTasks.length>0))throw Error('Перед переносом задачи в другой проект удалите её связи с предшественниками и последователями.');
+      const saveOnly=async()=>{await updateTask(user,selectedVault,editingTask,payload);finish();};
+      const datesChanged=Boolean(before&&(before.startDate??'')!==taskStart||(before&&(before.endDate??'')!==taskEnd));
+      if(datesChanged&&existing&&(existing.value.projectId??'')===taskProject){
+        const change={id:editingTask,startDate:taskStart||undefined,endDate:taskEnd||undefined};
+        const saveChain=async()=>{
+          const rows=ganttRows(taskProject),calendar=projectById.get(taskProject)?.value.project?.calendar??'calendar';
+          const calculated=cascadeSchedule(rows,editingTask,change.startDate,change.endDate,calendar);
+          await updateTask(user,selectedVault,editingTask,payload);
+          const rest=calculated.changes.filter(item=>item.id!==editingTask).map(item=>({objectId:item.id,startDate:item.startDate,endDate:item.endDate}));
+          if(rest.length)await rescheduleTasks(user,selectedVault,rest);finish();
+        };
+        scheduleImpact(taskProject,change,saveOnly,saveChain);return;
+      }
+      await run(saveOnly);
+    }catch(caught){setError(caught instanceof Error?caught.message:'Не удалось сохранить задачу');}
   }
   async function chooseVault(vid:string){
     setSelectedVault(vid);setSelectedProject('');setScreen('projects');setTab('overview');setError('');await load(vid);
   }
   const feedback=e('div',null,error&&e('p',{class:'error',role:'alert'},error),status&&e('p',{class:'auth-notice',role:'status'},status));
   const openedVaults=state?.vaults.filter(v=>!v.deleted&&!v.transfer&&Boolean(v.key))??[];
+  const taskTitleById=new Map((workspace?.tasks??[]).map(item=>[item.revision.objectId,item.value.title]));
+  const reminderShiftCount=impact?.changes.filter(change=>{const item=(workspace?.tasks??[]).find(row=>row.revision.objectId===change.id);return Boolean(item?.value.reminder&&item.value.task?.reminderAnchor);}).length??0;
+  const impactNode=impact&&e('div',{class:'modal-backdrop',role:'presentation'},
+    e('section',{class:'impact-dialog card',role:'dialog','aria-modal':'true','aria-labelledby':'impact-title'},
+      e('p',{class:'eyebrow'},'ВЛИЯНИЕ НА ПЛАН'),e('h2',{id:'impact-title'},'Изменение сроков затрагивает зависимости'),
+      e('p',null,'До применения проверьте цепочку. Можно сдвинуть связанные задачи, изменить только выбранную задачу или отменить действие.'),
+      e('div',{class:'impact-list'},impact.changes.map(change=>e('div',{key:change.id,class:change.id===impact.taskId?'impact-row primary-impact':'impact-row'},
+        e('strong',null,taskTitleById.get(change.id)??'Задача'),
+        e('span',null,(change.oldStart??'—')+' — '+(change.oldEnd??'—')+' → '+(change.startDate??'—')+' — '+(change.endDate??'—')),
+        change.shiftDays!==0&&e('small',null,(change.shiftDays>0?'+':'')+change.shiftDays+' дн.')))),
+      reminderShiftCount>0&&e('p',{class:'hint'},'Привязанные к началу/сроку напоминания будут пересчитаны: '+reminderShiftCount+'.'),
+      e('p',{class:'hint'},'Если изменить только выбранную задачу, нарушенные зависимости останутся видимыми как конфликты и их можно будет исправить позже.'),
+      e('div',{class:'impact-actions'},
+        impact.changes.length>1&&e('button',{class:'primary',disabled:busy,onClick:()=>void applyImpact('chain')},'Сдвинуть цепочку'),
+        e('button',{disabled:busy,onClick:()=>void applyImpact('only')},'Только эту задачу'),
+        e('button',{disabled:busy,onClick:()=>{impactActions.current=undefined;setImpact(null);}},'Отмена'))));
   if(!openedVaults.length)return e('main',{class:'projects-screen'},e('button',{onClick:onBack},'← К заметкам'),e('h1',null,'Проекты'),
     e('div',{class:'empty-state card'},e('h2',null,'Нет открытого хранилища'),e('p',null,'Откройте нужное E2EE-хранилище в разделе «Заметки», затем вернитесь в проекты.')),feedback);
 
@@ -163,6 +223,9 @@ export function ProjectsScreen({user,onBack}:{user:User;onBack:()=>void}){
         e('div',{class:'project-date-grid'},
           e('label',null,'Дата начала',e('input',{type:'date',value:projectStart,onInput:(ev:Event)=>setProjectStart((ev.target as HTMLInputElement).value)})),
           e('label',null,'Дата окончания',e('input',{type:'date',value:projectEnd,onInput:(ev:Event)=>setProjectEnd((ev.target as HTMLInputElement).value)}))),
+        e('label',null,'Календарь планирования',e('select',{value:projectCalendar,onChange:(ev:Event)=>setProjectCalendar((ev.target as HTMLSelectElement).value as GanttCalendar)},
+          e('option',{value:'calendar'},'Календарные дни'),e('option',{value:'weekdays'},'Рабочие дни · Пн–Пт'))),
+        e('p',{class:'hint'},projectCalendar==='weekdays'?'Каскад зависимостей пропускает субботу и воскресенье. Государственные праздники пока не учитываются.':'Каскад считает каждый календарный день.'),
         e('label',{class:'check-row'},e('input',{type:'checkbox',checked:projectFavorite,onChange:(ev:Event)=>setProjectFavorite((ev.target as HTMLInputElement).checked)}),'Избранный проект'),
         !editingProject&&e('details',{class:'template-picker'},e('summary',null,'Начать с шаблона (необязательно)'),
           e('p',{class:'hint'},'Шаблон только создаст несколько стартовых задач. Его можно не выбирать.'),
@@ -176,7 +239,7 @@ export function ProjectsScreen({user,onBack}:{user:User;onBack:()=>void}){
       e('form',{onSubmit:submitTask},
         e('label',null,'Название',e('input',{required:true,maxLength:200,value:taskTitle,onInput:(ev:Event)=>setTaskTitle((ev.target as HTMLInputElement).value)})),
         e('label',null,'Описание',e('textarea',{rows:5,maxLength:20000,value:taskDescription,onInput:(ev:Event)=>setTaskDescription((ev.target as HTMLTextAreaElement).value)})),
-        e('label',null,'Проект',e('select',{value:taskProject,onChange:(ev:Event)=>setTaskProject((ev.target as HTMLSelectElement).value)},
+        e('label',null,'Проект',e('select',{value:taskProject,onChange:(ev:Event)=>{const next=(ev.target as HTMLSelectElement).value;if(next!==taskProject)setTaskDependencies([]);setTaskProject(next);}},
           e('option',{value:''},'Без проекта'),writableProjects.map(item=>e('option',{key:item.revision.objectId,value:item.revision.objectId},item.value.title)))),
         e('div',{class:'project-date-grid'},
           e('label',null,'Статус',e('select',{value:taskStatus,onChange:(ev:Event)=>setTaskStatus((ev.target as HTMLSelectElement).value as TaskStatus)},
@@ -190,6 +253,19 @@ export function ProjectsScreen({user,onBack}:{user:User;onBack:()=>void}){
           e('option',{value:''},'Не назначен'),
           taskAssignee&&!members.some(item=>item.user.id===taskAssignee)&&e('option',{value:taskAssignee},'Участник больше не имеет доступа'),
           members.map(item=>e('option',{key:item.user.id,value:item.user.id},item.user.login+' · '+(item.role==='owner'?'владелец':item.role==='editor'?'редактор':'просмотр'))))),
+        e('fieldset',{class:'task-dependencies'},e('legend',null,'Зависимости'),
+          e('p',{class:'hint'},'Предшественники хранятся внутри E2EE-задачи. Циклические связи не сохраняются. Положительный лаг добавляет дни после контрольной точки, отрицательный — допускает перекрытие.'),
+          taskDependencies.map((dep,index)=>e('div',{class:'dependency-row',key:dep.taskId+'-'+index},
+            e('select',{value:dep.taskId,'aria-label':'Предшественник',onChange:(ev:Event)=>setTaskDependencies(current=>current.map((item,i)=>i===index?{...item,taskId:(ev.target as HTMLSelectElement).value}:item))},
+              dependencyCandidates.map(item=>e('option',{key:item.revision.objectId,value:item.revision.objectId},item.value.title))),
+            e('select',{value:dep.type,'aria-label':'Тип зависимости',onChange:(ev:Event)=>setTaskDependencies(current=>current.map((item,i)=>i===index?{...item,type:(ev.target as HTMLSelectElement).value as TaskDependencyType}:item))},
+              (Object.keys(dependencyLabel) as TaskDependencyType[]).map(type=>e('option',{key:type,value:type},dependencyLabel[type]))),
+            e('label',{class:'dependency-lag'},'Лаг, дн.',e('input',{type:'number',min:-3650,max:3650,value:String(dep.lagDays),onInput:(ev:Event)=>setTaskDependencies(current=>current.map((item,i)=>i===index?{...item,lagDays:Number((ev.target as HTMLInputElement).value)||0}:item))})),
+            e('button',{type:'button',class:'icon-danger',onClick:()=>setTaskDependencies(current=>current.filter((_,i)=>i!==index))},'Удалить'))),
+          dependencyCandidates.some(item=>!taskDependencies.some(dep=>dep.taskId===item.revision.objectId))
+            ?e('button',{type:'button',onClick:()=>{const candidate=dependencyCandidates.find(item=>!taskDependencies.some(dep=>dep.taskId===item.revision.objectId));if(candidate)setTaskDependencies(current=>[...current,{taskId:candidate.revision.objectId,type:'FS',lagDays:0}]);}},'+ Предшественник')
+            :e('p',{class:'muted'},dependencyCandidates.length?'Все доступные задачи уже добавлены.':'В этом проекте пока нет другой задачи для связи.'),
+          successorTasks.length>0&&e('div',{class:'dependency-successors'},e('strong',null,'Последователи'),successorTasks.map(item=>e('span',{key:item.revision.objectId},item.value.title)))),
 
         e('fieldset',{class:'task-checklist'},e('legend',null,'Чек-лист'),
           taskChecklist.map((item,index)=>e('div',{class:'project-check-row',key:item.id},
@@ -206,8 +282,8 @@ export function ProjectsScreen({user,onBack}:{user:User;onBack:()=>void}){
             e('option',{value:'start'},'В день начала · 09:00'),e('option',{value:'start-1d'},'За день до начала · 09:00'),
             e('option',{value:'end'},'В день срока · 09:00'),e('option',{value:'end-1d'},'За день до срока · 09:00'))),
           reminderChoice==='exact'&&e('label',null,'Дата и время',e('input',{type:'datetime-local',value:reminderLocal,onInput:(ev:Event)=>setReminderLocal((ev.target as HTMLInputElement).value)})),
-          reminderChoice!=='none'&&reminderChoice!=='exact'&&e('p',{class:'hint'},'Stage 17 вычисляет абсолютное время при сохранении. Автоматический каскад при переносе сроков появится вместе с зависимостями и Гантом.')),
-        e('button',{class:'primary',disabled:busy||readOnly},busy?'Сохраняем…':editingTask?'Сохранить задачу':'Создать задачу'))),feedback);
+          reminderChoice!=='none'&&reminderChoice!=='exact'&&e('p',{class:'hint'},'Напоминание остаётся привязанным к началу или сроку задачи. При подтверждённом каскаде Ганта его дата пересчитывается автоматически.')),
+        e('button',{class:'primary',disabled:busy||readOnly},busy?'Сохраняем…':editingTask?'Сохранить задачу':'Создать задачу'))),feedback,impactNode);
 
 
   if(screen==='project'){
@@ -241,11 +317,13 @@ export function ProjectsScreen({user,onBack}:{user:User;onBack:()=>void}){
           e('small',null,statusLabel[taskOf(item).status]+' · '+priorityLabel[taskOf(item).priority]+(taskOf(item).endDate?' · до '+taskOf(item).endDate:'')))))
       :null;
     const tasksNode=tab==='tasks'?e('div',{class:'project-task-list'},
-      e('div',{class:'section-heading'},e('h2',null,'Задачи'),!readOnly&&e('button',{class:'primary',onClick:()=>openTaskForm(undefined,selectedProject)},'+ Задача')),
-      e('div',{class:'quick-filters'},([['all','Все'],['active','Активные'],['done','Завершённые'],['cancelled','Отменённые'],['unscheduled','Без срока']] as const)
+      e('div',{class:'section-heading'},e('h2',null,'Задачи'),
+        e('div',{class:'task-view-switch'},e('button',{class:taskView==='list'?'filter-chip selected':'filter-chip',onClick:()=>setTaskView('list')},'Список'),e('button',{class:taskView==='gantt'?'filter-chip selected':'filter-chip',onClick:()=>setTaskView('gantt')},'Гант')),
+        !readOnly&&e('button',{class:'primary',onClick:()=>openTaskForm(undefined,selectedProject)},'+ Задача')),
+      taskView==='list'&&e('div',{class:'quick-filters'},([['all','Все'],['active','Активные'],['done','Завершённые'],['cancelled','Отменённые'],['unscheduled','Без срока']] as const)
         .map(([value,label])=>e('button',{class:taskFilter===value?'filter-chip selected':'filter-chip',onClick:()=>setTaskFilter(value)},label))),
-      !visibleTasks.length&&e('p',{class:'muted'},'Нет задач по выбранному фильтру.'),
-      visibleTasks.map(item=>{
+      taskView==='list'&&!visibleTasks.length&&e('p',{class:'muted'},'Нет задач по выбранному фильтру.'),
+      taskView==='list'&&visibleTasks.map(item=>{
         const task=taskOf(item);
         return e('article',{class:'task-row',key:item.revision.objectId},
           e('button',{class:'task-main',onClick:()=>openTaskForm(item)},
@@ -262,7 +340,16 @@ export function ProjectsScreen({user,onBack}:{user:User;onBack:()=>void}){
               checklist:item.value.checklist,tagIds:item.value.tagIds,reminder
             });
           })},(Object.keys(statusLabel) as TaskStatus[]).map(value=>e('option',{key:value,value},statusLabel[value]))));
-      }))
+      }),
+      taskView==='gantt'&&e(GanttView,{rows:ganttRows(selectedProject),calendar:currentProject?.value.project?.calendar??'calendar',readOnly,
+        onOpen:(id:string)=>{const item=tasks.find(row=>row.revision.objectId===id);if(item)openTaskForm(item);},
+        onRequestDates:(change:GanttDateChange)=>{
+          const only=async()=>{await rescheduleTasks(user,selectedVault,[{objectId:change.id,startDate:change.startDate,endDate:change.endDate}]);setStatus('Срок задачи изменён.');};
+          const chain=async()=>{const rows=ganttRows(selectedProject),calendar=currentProject?.value.project?.calendar??'calendar',calculated=cascadeSchedule(rows,change.id,change.startDate,change.endDate,calendar);
+            await rescheduleTasks(user,selectedVault,calculated.changes.map(item=>({objectId:item.id,startDate:item.startDate,endDate:item.endDate})));setStatus('Сроки цепочки зависимостей изменены.');};
+          scheduleImpact(selectedProject,change,only,chain);
+        }})
+      )
       :null;
     const notesNode=tab==='notes'?e('div',{class:'project-note-list'},
       e('div',{class:'section-heading'},e('h2',null,'Заметки проекта'),
@@ -336,7 +423,7 @@ export function ProjectsScreen({user,onBack}:{user:User;onBack:()=>void}){
           e('button',{class:tab==='files'?'filter-chip selected':'filter-chip',onClick:()=>setTab('files')},'Файлы ('+files.length+')')),
         overviewNode,tasksNode,notesNode,filesNode,actionsNode,
         workspace?.conflicts.length?e('p',{class:'error'},'Есть конфликтующие версии объектов: '+workspace.conflicts.length+'. Разрешите их перед редактированием.'):null,
-        feedback));
+        feedback),impactNode);
   }
 
   const normalized=query.trim().toLocaleLowerCase('ru');

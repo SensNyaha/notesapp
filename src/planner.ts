@@ -13,6 +13,7 @@ import { validPlan } from '../shared/reminders.mjs';
 import type { ReminderPlan } from '../shared/reminders.mjs';
 import { reminderRequest } from './reminders.ts';
 import { createFileKey, unwrapFileKey, rewrapFileKey, encryptFileChunk, decryptFileChunk, FILE_CHUNK_BYTES } from './crypto/files.ts';
+import { normalizeDependencies,validateDependencyGraph,type GanttCalendar,type TaskDependency,type TaskDependencyType } from './gantt.ts';
 export interface NoteAttachment { id:string;name:string;type:string;size:number;data?:string;storage?:'stream';wrappedKey?:string;chunks?:number;keyEpoch?:number;cryptoVaultId?:string;preview?:{type:string;size:number;chunks:number} }
 export interface AttachmentUploadProgress {sent:number;total:number;percent:number}
 export interface NoteCover {attachmentId:string}
@@ -25,8 +26,10 @@ export interface NoteLifecycle { state:NoteLifecycleState;changedAt:number }
 export type PlannerEntityKind='note'|'project'|'task';
 export type TaskStatus='todo'|'in_progress'|'done'|'cancelled';
 export type TaskPriority='none'|'low'|'medium'|'high';
-export interface ProjectMeta { favorite:boolean;startDate?:string;endDate?:string }
-export interface TaskMeta { status:TaskStatus;priority:TaskPriority;startDate?:string;endDate?:string;assigneeUserId?:string }
+export interface ProjectMeta { favorite:boolean;startDate?:string;endDate?:string;calendar?:GanttCalendar }
+export type TaskReminderAnchor='start'|'start-1d'|'end'|'end-1d';
+export interface TaskMeta { status:TaskStatus;priority:TaskPriority;startDate?:string;endDate?:string;assigneeUserId?:string;dependencies?:TaskDependency[];reminderAnchor?:TaskReminderAnchor }
+export type { GanttCalendar,TaskDependency,TaskDependencyType };
 export interface Note { title: string; text: string; html?:string;attachments?:NoteAttachment[];cover?:NoteCover;checklist?:ChecklistItem[];tagIds?:string[];pinned?:boolean;reminder?:ReminderPlan;
   kind?:PlannerEntityKind;projectId?:string;project?:ProjectMeta;task?:TaskMeta;
   lifecycle?:NoteLifecycle;author?:{name:string;time:number};importSource?:{kind:'tasks-note-v1';vaultId:string;objectId:string} }
@@ -407,54 +410,105 @@ export async function readProjectWorkspace(user:User,vid:string):Promise<Project
 }
 function cleanTitle(value:string,label:string){const text=value.trim();if(!text||text.length>200)throw Error(label+': от 1 до 200 символов');return text;}
 function projectMeta(input:ProjectMeta):ProjectMeta{
-  const value={favorite:Boolean(input.favorite),...(input.startDate?{startDate:input.startDate}:{}),...(input.endDate?{endDate:input.endDate}:{})};
+  const value={favorite:Boolean(input.favorite),calendar:input.calendar??'calendar',...(input.startDate?{startDate:input.startDate}:{}),...(input.endDate?{endDate:input.endDate}:{})};
+  if(!['calendar','weekdays'].includes(value.calendar))throw Error('Некорректный календарь проекта.');
   if(value.startDate&&!validDate(value.startDate)||value.endDate&&!validDate(value.endDate)||value.startDate&&value.endDate&&value.startDate>value.endDate)throw Error('Проверьте даты проекта.');
   return value;
 }
 function taskMeta(input:TaskMeta):TaskMeta{
   if(!['todo','in_progress','done','cancelled'].includes(input.status)||!['none','low','medium','high'].includes(input.priority))throw Error('Некорректный статус или приоритет задачи.');
-  const value={status:input.status,priority:input.priority,...(input.startDate?{startDate:input.startDate}:{}),...(input.endDate?{endDate:input.endDate}:{}),...(input.assigneeUserId?{assigneeUserId:input.assigneeUserId}:{})};
+  const dependencies=normalizeDependencies(input.dependencies);
+  const value={status:input.status,priority:input.priority,...(input.startDate?{startDate:input.startDate}:{}),...(input.endDate?{endDate:input.endDate}:{}),...(input.assigneeUserId?{assigneeUserId:input.assigneeUserId}:{}),...(dependencies.length?{dependencies}:{}),...(input.reminderAnchor?{reminderAnchor:input.reminderAnchor}:{})};
+  if(value.reminderAnchor&&!['start','start-1d','end','end-1d'].includes(value.reminderAnchor))throw Error('Некорректная привязка напоминания.');
   if(value.startDate&&!validDate(value.startDate)||value.endDate&&!validDate(value.endDate)||value.startDate&&value.endDate&&value.startDate>value.endDate)throw Error('Проверьте даты задачи.');
   if(value.assigneeUserId&&!uuid.test(value.assigneeUserId))throw Error('Некорректный исполнитель.');
   return value;
 }
-export async function createProject(user:User,vid:string,input:{title:string;description?:string;favorite?:boolean;startDate?:string;endDate?:string}){
+async function validateTaskDependencies(userId:string,v:Vault,objectId:string,projectId:string|undefined,candidate:TaskMeta){
+  const byObject=new Map<string,Revision[]>();for(const revision of heads(v)){const list=byObject.get(revision.objectId)??[];list.push(revision);byObject.set(revision.objectId,list);}
+  const graph:{id:string;title:string;startDate?:string;endDate?:string;dependencies?:TaskDependency[]}[]=[];
+  for(const [id,versions] of byObject){
+    if(id===objectId){graph.push({id,title:'Текущая задача',startDate:candidate.startDate,endDate:candidate.endDate,dependencies:candidate.dependencies});continue;}
+    if(versions.length!==1)continue;const revision=versions[0],value=await readNote(userId,v,revision);
+    if(entityKind(value)!=='task'||noteLifecycle(v,revision,value)!=='active'||(value.projectId??'')!==(projectId??''))continue;
+    graph.push({id,title:value.title,startDate:value.task?.startDate,endDate:value.task?.endDate,dependencies:value.task?.dependencies});
+  }
+  if(!graph.some(item=>item.id===objectId))graph.push({id:objectId,title:'Текущая задача',startDate:candidate.startDate,endDate:candidate.endDate,dependencies:candidate.dependencies});
+  const ids=new Set(graph.map(item=>item.id));for(const dep of candidate.dependencies??[])if(!ids.has(dep.taskId))throw Error('Зависимость можно создать только с активной задачей того же проекта.');
+  validateDependencyGraph(graph);
+}
+function anchoredReminder(reminder:ReminderPlan|undefined,anchor:TaskReminderAnchor|undefined,startDate?:string,endDate?:string){
+  if(!reminder||!anchor)return reminder;const base=anchor.startsWith('start')?startDate:endDate;if(!base)return reminder;
+  const day=anchor.endsWith('-1d')?new Date(Date.parse(base+'T00:00:00Z')-86400000).toISOString().slice(0,10):base;
+  return{...reminder,local:day+'T09:00'};
+}
+export async function createProject(user:User,vid:string,input:{title:string;description?:string;favorite?:boolean;startDate?:string;endDate?:string;calendar?:GanttCalendar}){
   const objectId=id(),value:Note={kind:'project',title:cleanTitle(input.title,'Название проекта'),text:(input.description??'').slice(0,10000),
-    project:projectMeta({favorite:Boolean(input.favorite),...(input.startDate?{startDate:input.startDate}:{}),...(input.endDate?{endDate:input.endDate}:{})})};
+    project:projectMeta({favorite:Boolean(input.favorite),calendar:input.calendar??'calendar',...(input.startDate?{startDate:input.startDate}:{}),...(input.endDate?{endDate:input.endDate}:{})})};
   const result=await saveNote(user,vid,objectId,null,value);return{objectId,revisionId:result.id};
 }
-export async function updateProject(user:User,vid:string,objectId:string,input:{title:string;description?:string;favorite?:boolean;startDate?:string;endDate?:string}){
+export async function updateProject(user:User,vid:string,objectId:string,input:{title:string;description?:string;favorite?:boolean;startDate?:string;endDate?:string;calendar?:GanttCalendar}){
   const state=await readState(user.id),v=state?.vaults.find(item=>item.header.id===vid);if(!v?.key)throw Error('Откройте хранилище.');
   const current=oneHead(v,objectId),previous=await readNote(user.id,v,current);if(entityKind(previous)!=='project')throw Error('Проект не найден.');
   return saveNote(user,vid,objectId,current.id,{...previous,title:cleanTitle(input.title,'Название проекта'),text:(input.description??'').slice(0,10000),
-    project:projectMeta({favorite:Boolean(input.favorite),...(input.startDate?{startDate:input.startDate}:{}),...(input.endDate?{endDate:input.endDate}:{})})});
+    project:projectMeta({favorite:Boolean(input.favorite),calendar:input.calendar??previous.project?.calendar??'calendar',...(input.startDate?{startDate:input.startDate}:{}),...(input.endDate?{endDate:input.endDate}:{})})});
 }
 export async function setProjectArchived(user:User,vid:string,objectId:string,archived:boolean){
   const state=await readState(user.id),v=state?.vaults.find(item=>item.header.id===vid);if(!v?.key)throw Error('Откройте хранилище.');
   const current=oneHead(v,objectId),previous=await readNote(user.id,v,current);if(entityKind(previous)!=='project')throw Error('Проект не найден.');
   return saveNote(user,vid,objectId,current.id,{...previous,lifecycle:{state:archived?'archived':'active',changedAt:Date.now()}});
 }
-export async function createTask(user:User,vid:string,input:{title:string;description?:string;projectId?:string;status?:TaskStatus;priority?:TaskPriority;startDate?:string;endDate?:string;assigneeUserId?:string;checklist?:ChecklistItem[];tagIds?:string[];reminder?:ReminderPlan}){
-  const objectId=id(),value:Note={kind:'task',title:cleanTitle(input.title,'Название задачи'),text:(input.description??'').slice(0,20000),
-    ...(input.projectId?{projectId:input.projectId}:{}),task:taskMeta({status:input.status??'todo',priority:input.priority??'none',
-      ...(input.startDate?{startDate:input.startDate}:{}),...(input.endDate?{endDate:input.endDate}:{}),...(input.assigneeUserId?{assigneeUserId:input.assigneeUserId}:{})}),
+export async function createTask(user:User,vid:string,input:{title:string;description?:string;projectId?:string;status?:TaskStatus;priority?:TaskPriority;startDate?:string;endDate?:string;assigneeUserId?:string;checklist?:ChecklistItem[];tagIds?:string[];reminder?:ReminderPlan;dependencies?:TaskDependency[];reminderAnchor?:TaskReminderAnchor}){
+  const objectId=id(),meta=taskMeta({status:input.status??'todo',priority:input.priority??'none',
+    ...(input.startDate?{startDate:input.startDate}:{}),...(input.endDate?{endDate:input.endDate}:{}),...(input.assigneeUserId?{assigneeUserId:input.assigneeUserId}:{}),
+    ...(input.dependencies?.length?{dependencies:normalizeDependencies(input.dependencies,objectId)}:{}),...(input.reminderAnchor?{reminderAnchor:input.reminderAnchor}:{})});
+  const state=await readState(user.id),vaultState=state?.vaults.find(item=>item.header.id===vid);if(!vaultState?.key)throw Error('Откройте хранилище.');
+  await validateTaskDependencies(user.id,vaultState,objectId,input.projectId,meta);
+  const value:Note={kind:'task',title:cleanTitle(input.title,'Название задачи'),text:(input.description??'').slice(0,20000),
+    ...(input.projectId?{projectId:input.projectId}:{}),task:meta,
     ...(input.checklist?.length?{checklist:input.checklist}:{}),...(input.tagIds?.length?{tagIds:input.tagIds}:{}),...(input.reminder?{reminder:input.reminder}:{})};
   const result=await saveNote(user,vid,objectId,null,value);return{objectId,revisionId:result.id};
 }
-export async function updateTask(user:User,vid:string,objectId:string,input:{title:string;description?:string;projectId?:string;status:TaskStatus;priority:TaskPriority;startDate?:string;endDate?:string;assigneeUserId?:string;checklist?:ChecklistItem[];tagIds?:string[];reminder?:ReminderPlan}){
+export async function updateTask(user:User,vid:string,objectId:string,input:{title:string;description?:string;projectId?:string;status:TaskStatus;priority:TaskPriority;startDate?:string;endDate?:string;assigneeUserId?:string;checklist?:ChecklistItem[];tagIds?:string[];reminder?:ReminderPlan;dependencies?:TaskDependency[];reminderAnchor?:TaskReminderAnchor|null}){
   const state=await readState(user.id),v=state?.vaults.find(item=>item.header.id===vid);if(!v?.key)throw Error('Откройте хранилище.');
   const current=oneHead(v,objectId),previous=await readNote(user.id,v,current);if(entityKind(previous)!=='task')throw Error('Задача не найдена.');
+  const reminderAnchor=input.reminderAnchor===undefined?previous.task?.reminderAnchor:input.reminderAnchor??undefined;
+  const meta=taskMeta({status:input.status,priority:input.priority,...(input.startDate?{startDate:input.startDate}:{}),
+      ...(input.endDate?{endDate:input.endDate}:{}),...(input.assigneeUserId?{assigneeUserId:input.assigneeUserId}:{}),
+      ...(input.dependencies!==undefined?{dependencies:normalizeDependencies(input.dependencies,objectId)}:previous.task?.dependencies?.length?{dependencies:previous.task.dependencies}:{}),
+      ...(reminderAnchor?{reminderAnchor}:{})});
+  await validateTaskDependencies(user.id,v,objectId,input.projectId,meta);
   const value:Note={...previous,title:cleanTitle(input.title,'Название задачи'),text:(input.description??'').slice(0,20000),
-    projectId:input.projectId||undefined,task:taskMeta({status:input.status,priority:input.priority,...(input.startDate?{startDate:input.startDate}:{}),
-      ...(input.endDate?{endDate:input.endDate}:{}),...(input.assigneeUserId?{assigneeUserId:input.assigneeUserId}:{})}),
+    projectId:input.projectId||undefined,task:meta,
     checklist:input.checklist?.length?input.checklist:undefined,tagIds:input.tagIds?.length?input.tagIds:undefined,reminder:input.reminder};
   if(!input.projectId)delete value.projectId;if(!input.reminder)delete value.reminder;
   return saveNote(user,vid,objectId,current.id,value);
+}
+export async function rescheduleTasks(user:User,vid:string,changes:{objectId:string;startDate?:string;endDate?:string}[]){
+  return edit(user,async s=>{
+    const v=vault(s,vid);const result:string[]=[];
+    for(const change of changes){
+      const current=oneHead(v,change.objectId),previous=await readNote(user.id,v,current);if(entityKind(previous)!=='task'||!previous.task)throw Error('Задача не найдена.');
+      const meta=taskMeta({...previous.task,startDate:change.startDate,endDate:change.endDate});
+      const reminder=anchoredReminder(previous.reminder,meta.reminderAnchor,meta.startDate,meta.endDate);
+      const created=await addRevision(user.id,v,change.objectId,current.id,{...previous,task:meta,...(reminder?{reminder}:{})});
+      result.push(created.id);
+    }
+    return result;
+  });
 }
 export async function movePlannerObject(user:User,vid:string,objectId:string,projectId?:string){
   const state=await readState(user.id),v=state?.vaults.find(item=>item.header.id===vid);if(!v?.key)throw Error('Откройте хранилище.');
   if(projectId){const projectRevision=oneHead(v,projectId),projectValue=await readNote(user.id,v,projectRevision);if(entityKind(projectValue)!=='project'||noteLifecycle(v,projectRevision,projectValue)!=='active')throw Error('Целевой проект недоступен.');}
   const current=oneHead(v,objectId),previous=await readNote(user.id,v,current);if(entityKind(previous)==='project')throw Error('Проекты нельзя вкладывать друг в друга.');
+  if(entityKind(previous)==='task'&&(previous.projectId??'')!==(projectId??'')){
+    if(previous.task?.dependencies?.length)throw Error('Перед переносом задачи удалите её зависимости.');
+    for(const revision of heads(v)){
+      if(revision.objectId===objectId)continue;const value=await readNote(user.id,v,revision);
+      if(entityKind(value)==='task'&&noteLifecycle(v,revision,value)==='active'&&value.task?.dependencies?.some(dep=>dep.taskId===objectId))
+        throw Error('Перед переносом задачи удалите связи с её последователями.');
+    }
+  }
   const next={...previous,projectId:projectId||undefined};if(!projectId)delete next.projectId;
   return saveNote(user,vid,objectId,current.id,next);
 }

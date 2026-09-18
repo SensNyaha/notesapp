@@ -13,6 +13,9 @@ import { ServerStorage } from './components/ServerStorage';
 import { DataTransfer } from './components/DataTransfer';
 import { CollaborationScreen } from './components/Collaboration';
 import { ProjectsScreen } from './components/Projects';
+import { AppShell,type ShellSection } from './components/AppShell';
+import { AboutSettings,AccountOverview,AppearanceSettings,SettingsHub,type SettingsPage } from './components/Settings';
+import { Onboarding } from './components/Onboarding';
 import { detachPush, browserUnsubscribe } from './push';
 import { profiles, profileActivity, readState, eraseState, exclusive, announce, changes } from './storage';
 import { flushDraft, hasUnsaved, synchronize, requireOutboxReview, OutboxReviewRequired, lockAfterBackground } from './planner';
@@ -20,8 +23,10 @@ import { session, signOut, authMessage, AuthError } from './auth';
 import type { User } from './types/auth';
 import { updateReminderZone, type ReminderTarget } from './reminders';
 import { clearCollaborationLocalRuntime } from './collaboration.ts';
+import { applyTheme } from './preferences.ts';
 
 const e = h;
+applyTheme();
 
 type DefinitionRow = [term: string, value: string, wide?: boolean];
 function initialReminderTarget():ReminderTarget|undefined{
@@ -50,10 +55,12 @@ function DefinitionList({ rows }: { rows: DefinitionRow[] }) {
 function App() {
   const [user, setUser] = useState<User | null>(null);
   const userRef = useRef<User | null>(null); userRef.current = user;
-  const [page, setPage] = useState<'home' | 'projects' | 'password' | 'users' | 'devices' | 'passkeys' | 'diagnostics' | 'notifications' | 'data' | 'collaboration'>('home');
+  const [page, setPage] = useState<'home'|'today'|'projects'|'settings'|'account'|'appearance'|'password'|'users'|'devices'|'passkeys'|'diagnostics'|'notifications'|'data'|'collaboration'|'archive'|'trash'|'about'>('home');
   const [localProfiles, setLocalProfiles] = useState<User[]>([]);
   const localMode = useRef(false);
   const [notice, setNotice] = useState('');
+  const [onboarding,setOnboarding]=useState(()=>{try{return localStorage.getItem('tasks-onboarding-v1')!=='done';}catch{return false;}});
+  function finishOnboarding(){try{localStorage.setItem('tasks-onboarding-v1','done');}catch{}setOnboarding(false);}
   const [reminderTarget,setReminderTarget]=useState<ReminderTarget|undefined>(initialReminderTarget);
   useEffect(()=>{const read=()=>{const target=initialReminderTarget();setReminderTarget(target);if(target)setPage('home');};window.addEventListener('hashchange',read);return()=>window.removeEventListener('hashchange',read);},[]);
   useEffect(() => { setPage('home'); setNotice(''); }, [user?.id]);
@@ -243,82 +250,66 @@ function App() {
   const updateNotice = waiting && e('div', { class: 'update', role: 'status' },
     'Доступна новая версия оболочки.', e('button', { onClick: applyUpdate }, 'Обновить приложение'));
   if (authLoading) return e('main', { class: 'auth-screen', role: 'status' }, 'Проверяем вход…');
-  if (!user) return e('div', null,
+  if (!user) return e('div', {class:'logged-out-shell'},
     updateNotice && e('div', { class: 'auth-status' }, updateNotice),
     authError && e('div', { class: 'auth-status' }, e('p', { class: 'error', role: 'alert' }, authError),
       e('button', { onClick: () => void checkSession() }, 'Повторить проверку входа')),
-    localProfiles.length > 0 && e('section', { class: 'auth-status card' }, e('h2', null, 'Данные на этом устройстве'),
-      localProfiles.map(profile => e('button', { onClick: () => { localMode.current = true;userRef.current=profile;setUser(profile); } }, 'Открыть локально · ' + profile.login))),
-    e(Login, { onLogin: (result) => { authGeneration.current++; localMode.current = false;void requireOutboxReview(result).catch(()=>{}).finally(()=>{userRef.current=result;setUser(result);setAuthError('');void updateReminderZone(result).catch(()=>{});}); } }));
+    onboarding&&localProfiles.length===0
+      ?e(Onboarding,{onDone:finishOnboarding})
+      :e('div',null,
+        localProfiles.length > 0 && e('section', { class: 'auth-status card local-profiles' }, e('h2', null, 'Данные на этом устройстве'),
+          localProfiles.map(profile => e('button', { onClick: () => { localMode.current = true;userRef.current=profile;setUser(profile); } }, 'Открыть локально · ' + profile.login))),
+        e(Login, { onLogin: (result) => { finishOnboarding();authGeneration.current++; localMode.current = false;void requireOutboxReview(result).catch(()=>{}).finally(()=>{userRef.current=result;setUser(result);setAuthError('');void updateReminderZone(result).catch(()=>{});}); } })));
 
-  if (user.mustChangePassword || page === 'password') return e('div', null,
+  if (user.mustChangePassword) return e('div', null,
     updateNotice && e('div', { class: 'auth-status' }, updateNotice),
     authError && e('p', { class: 'auth-status error', role: 'alert' }, authError),
     e(PasswordScreen, { key: user.id, user, onBack: () => setPage('home'), onLogout: logout, onRefresh: checkSession,
       onDone: (result) => { authGeneration.current++;void requireOutboxReview(result).catch(()=>{}).finally(()=>{userRef.current=result;setUser(result);setPage('home');setAuthError('');setNotice('Пароль изменён.');}); } }));
-  if (page === 'devices') return e(DevicesScreen, { user, onBack: () => setPage('home'), onAuthLost: checkSession });
-  if (page === 'passkeys') return e(PasskeysScreen, { user, onBack: () => setPage('home') });
-  if (page === 'users' && user.role === 'admin') return e('div', null,
-    authError && e('p', { class: 'auth-status error', role: 'alert' }, authError),
-    e(UsersScreen, { key: user.id, onBack: () => setPage('home'), onRefresh: checkSession }));
-
-  return e('main', null,
-    e('header', null,
-      e('a', { class: 'brand', href: '/', 'aria-label': 'Tasks, главная' },
-        e('img', { src: '/icon.svg', width: 40, height: 40, alt: '' }), 'Tasks'),
-      e('span', { class: 'shell-sync', role: 'status', 'aria-live': 'polite' }, syncing && e('span', { class: 'sync-spinner', 'aria-hidden': 'true' }), syncing ? 'Синхронизация…' : '')),
-    connection === 'offline' && e('div', { class: 'offline-banner', role: 'status' }, 'ОФЛАЙН РЕЖИМ · изменения сохраняются на устройстве'),
-    e('div', { class: 'account-bar' }, e('p', null, user.login, ' · ', user.role === 'admin' ? 'Администратор' : 'Пользователь'),
-      e('button', { disabled: loggingOut, onClick: logout }, loggingOut ? 'Выходим…' : 'Выйти')),
-    authError && e('p', { class: 'error', role: 'alert' }, authError),
-    notice && e('p', { class: 'auth-notice', role: 'status' }, notice),
-    e('nav', { class: 'actions', 'aria-label': 'Управление аккаунтом' },
-      e('button', { onClick: () => void flushDraft().then(() => setPage('home')).catch(() => setAuthError('Сохраните черновик')) }, 'Заметки'),
-      e('button', { onClick: () => void flushDraft().then(() => setPage('projects')).catch(() => setAuthError('Сохраните черновик')) }, 'Проекты'),
-      e('button', { onClick: () => void flushDraft().then(() => setPage('diagnostics')).catch(() => setAuthError('Сохраните черновик')) }, 'Диагностика'),
-      e('button', { onClick: () => void flushDraft().then(() => setPage('notifications')).catch(() => setAuthError('Сохраните черновик')) }, 'Уведомления'),
-      e('button', { onClick: () => void flushDraft().then(() => setPage('devices')).catch(() => setAuthError('Сохраните черновик')) }, 'Устройства'),
-      e('button', { onClick: () => void flushDraft().then(() => setPage('passkeys')).catch(() => setAuthError('Сохраните черновик')) }, 'Ключи доступа'),
-      e('button', { onClick: () => void flushDraft().then(() => setPage('collaboration')).catch(() => setAuthError('Сохраните черновик')) }, 'Контакты и совместная работа'),
-      e('button', { onClick: () => void flushDraft().then(() => setPage('data')).catch(() => setAuthError('Сохраните черновик')) }, 'Данные'),
-      e('button', { onClick: () => void flushDraft().then(() => setPage('password')).catch(() => setAuthError('Сохраните черновик')) }, 'Изменить пароль'),
-      user.role === 'admin' && e('button', { onClick: () => void flushDraft().then(() => setPage('users')).catch(() => setAuthError('Сохраните черновик')) }, 'Пользователи'),
-      e('button', { onClick: () => void flushDraft().then(detachPush).then(() => { clearCollaborationLocalRuntime(user.id);setUser(null); void profiles().then(setLocalProfiles); }).catch(error => setAuthError(error instanceof Error?error.message:'Сохраните черновик и проверьте сеть')) }, 'Войти снова / другой аккаунт')),
-    reminderTarget&&reminderTarget.accountId!==user.id&&e('p',{class:'auth-notice',role:'status'},'Уведомление относится к другому аккаунту. Войдите в нужный аккаунт, чтобы открыть заметку.'),
-    page === 'home' && e(Planner, { user, key: user.id, reminderTarget, onReminderHandled:()=>setReminderTarget(undefined),
-      onSyncState:(next:'syncing'|'online'|'offline'|'auth'|'error'|'idle')=>{setSyncing(next==='syncing');if(next!=='syncing'&&next!=='idle')setConnection(next);} }),
-    page === 'projects' && e(ProjectsScreen,{user,key:user.id,onBack:()=>setPage('home')}),
-    page === 'notifications' && e(Notifications, { user, key: user.id }),
-    page === 'collaboration' && e(CollaborationScreen,{user,key:user.id,onBack:()=>setPage('home')}),
-    page === 'data' && e(DataTransfer, { user, key: user.id }),
-    updateNotice,
-    page === 'diagnostics' && e('div', null,
+  async function navigate(next:typeof page){
+    try{await flushDraft();setAuthError('');setPage(next);}
+    catch{setAuthError('Сначала сохраните черновик.');}
+  }
+  const shellActive:ShellSection=page==='home'?'notes':page==='today'?'today':page==='projects'?'projects':'settings';
+  const navigateSection=(section:ShellSection)=>{
+    const next=section==='notes'?'home':section==='today'?'today':section==='projects'?'projects':'settings';
+    void navigate(next);
+  };
+  const openSetting=(next:SettingsPage)=>void navigate(next);
+  const syncCallback=(next:'syncing'|'online'|'offline'|'auth'|'error'|'idle')=>{
+    setSyncing(next==='syncing');if(next!=='syncing'&&next!=='idle')setConnection(next);
+  };
+  const diagnostics=e('main',{class:'settings-screen diagnostics-screen'},
     user.role==='admin'&&e(ServerStorage,{key:user.id}),
-    e('section', { class: 'intro' },
-      e('p', { class: 'eyebrow' }, 'ПЕРВЫЙ ЗАПУСК'),
-      e('h1', null, 'Основа приложения'),
-      e('p', null, 'Проверим подключение и сохранность данных перед созданием вашего хранилища.')),
-    e('section', { class: 'card', 'aria-labelledby': 'server-heading' },
-      e('div', { class: 'card-heading' },
-        e('h2', { id: 'server-heading' }, 'Сервер и база данных'),
-        e('span', { class: `badge ${health ? 'good' : ''}` }, busy ? 'Проверяем' : health ? 'Работают' : 'Нет связи')),
-      e('div', { 'aria-live': 'polite' },
-        error && e('p', { class: 'error' }, error),
-        health ? e(DefinitionList, { rows: serverRows }) : e('p', { class: 'muted' }, 'Сведения появятся после успешного ответа сервера.')),
-      e('p', { class: 'hint' }, 'После перезапуска контейнера идентификатор должен остаться прежним, а число запусков — увеличиться.'),
-      e('div', { class: 'actions' },
-        e('button', { class: 'primary', disabled: busy, onClick: checkServer }, busy ? 'Проверяем…' : 'Проверить ещё раз'),
-        e('a', { href: '/api/health', target: '_blank', rel: 'noreferrer' }, 'Открыть ответ API ↗'))),
-    e('section', { class: 'card', 'aria-labelledby': 'device-heading' },
-      e('h2', { id: 'device-heading' }, 'На этом устройстве'),
-      e(DefinitionList, { rows: deviceRows }),
-      swError && e('p', { class: 'error' }, swError),
-      e('p', { class: 'hint' }, 'Когда оболочка готова, остановите сервер и перезагрузите страницу. Она должна открыться с сообщением об отсутствии связи.')),
-    e(CryptoCheck, { key: user.id }),
-    e('footer', null,
-      e('strong', null, 'Криптографический модуль готов к проверке на тестовых данных.'),
-      e('p', null, 'Хранилища доступны в разделе «Заметки», тестовый push — в разделе «Уведомления».')),
-    ));
+    e('div',{class:'screen-heading'},e('div',null,e('p',{class:'eyebrow'},'ДИАГНОСТИКА'),e('h1',null,'Состояние приложения'))),
+    e('section',{class:'card','aria-labelledby':'server-heading'},
+      e('div',{class:'card-heading'},e('h2',{id:'server-heading'},'Сервер и база данных'),
+        e('span',{class:`badge ${health?'good':''}`},busy?'Проверяем':health?'Работают':'Нет связи')),
+      e('div',{'aria-live':'polite'},error&&e('p',{class:'error'},error),health?e(DefinitionList,{rows:serverRows}):e('p',{class:'muted'},'Сведения появятся после успешного ответа сервера.')),
+      e('div',{class:'actions'},e('button',{class:'primary',disabled:busy,onClick:checkServer},busy?'Проверяем…':'Проверить ещё раз'),
+        e('a',{href:'/api/health',target:'_blank',rel:'noreferrer'},'Открыть ответ API ↗'))),
+    e('section',{class:'card','aria-labelledby':'device-heading'},e('h2',{id:'device-heading'},'На этом устройстве'),e(DefinitionList,{rows:deviceRows}),swError&&e('p',{class:'error'},swError)),
+    e(CryptoCheck,{key:user.id}));
+  let content;
+  if(page==='home'||page==='today'||page==='archive'||page==='trash')content=e(Planner,{user,key:user.id+':'+page,section:page==='today'?'today':'notes',initialScreen:page==='archive'?'archive':page==='trash'?'trash':'list',reminderTarget,onReminderHandled:()=>setReminderTarget(undefined),onSyncState:syncCallback});
+  else if(page==='projects')content=e(ProjectsScreen,{user,key:user.id,onBack:()=>void navigate('home')});
+  else if(page==='settings')content=e(SettingsHub,{user,onOpen:openSetting,onLogout:logout,loggingOut});
+  else if(page==='account')content=e(AccountOverview,{user,onOpen:openSetting,onLogout:logout,loggingOut});
+  else if(page==='appearance')content=e(AppearanceSettings,null);
+  else if(page==='about')content=e(AboutSettings,null);
+  else if(page==='notifications')content=e(Notifications,{user,key:user.id});
+  else if(page==='devices')content=e(DevicesScreen,{user,onBack:()=>void navigate('settings'),onAuthLost:checkSession});
+  else if(page==='passkeys')content=e(PasskeysScreen,{user,onBack:()=>void navigate('settings')});
+  else if(page==='collaboration')content=e(CollaborationScreen,{user,key:user.id,onBack:()=>void navigate('settings')});
+  else if(page==='data')content=e(DataTransfer,{user,key:user.id});
+  else if(page==='password')content=e(PasswordScreen,{key:user.id,user,onBack:()=>void navigate('settings'),onLogout:logout,onRefresh:checkSession,
+    onDone:(result:User)=>{authGeneration.current++;void requireOutboxReview(result).catch(()=>{}).finally(()=>{userRef.current=result;setUser(result);setPage('settings');setAuthError('');setNotice('Пароль изменён.');});}});
+  else if(page==='users'&&user.role==='admin')content=e(UsersScreen,{key:user.id,onBack:()=>void navigate('settings'),onRefresh:checkSession});
+  else if(page==='diagnostics')content=diagnostics;
+  else content=e(SettingsHub,{user,onOpen:openSetting,onLogout:logout,loggingOut});
+  const shellNotice=reminderTarget&&reminderTarget.accountId!==user.id?'Уведомление относится к другому аккаунту. Войдите в нужный аккаунт, чтобы открыть заметку.':notice;
+  return e(AppShell,{user,active:shellActive,onNavigate:navigateSection,syncing,connection,loggingOut,onLogout:logout,
+    notice:shellNotice,error:authError,updateNotice},content);
 }
 
 const root = document.getElementById('app');

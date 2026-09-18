@@ -14,7 +14,7 @@ import { signAccess } from '../src/crypto/access.ts';
 import { createVault, openVault, closeVault, saveNote, readNote, heads, synchronize, transferVault,
   readStash, moveStash, discardStash, edit, closeAllVault, deleteVault, resolveConflict, renameDevice, acknowledgeReminder, context, vaultName,
   readTags,createTag,renameTag,deleteTag,copyNote,readVaultPushMode,setVaultPushMode,archiveNote,restoreArchivedNote,trashNote,
-  createProject,updateProject,createTask,updateTask,movePlannerObject,deleteProject,readProjectWorkspace,
+  createProject,updateProject,createTask,updateTask,rescheduleTasks,movePlannerObject,deleteProject,readProjectWorkspace,
   restoreTrashedNote,permanentlyDeleteNote,restoreNoteVersion,noteHistory,noteLifecycle,requireOutboxReview,outboxReviewItems,decideOutboxReview,OutboxReviewRequired } from '../src/planner.ts';
 import { readState, writeState, changes } from '../src/storage.ts';
 
@@ -341,6 +341,33 @@ test('vault persistence, offline queue, conflicts, deletion and encrypted stash 
     assert.equal(model.tasks[0].value.projectId,undefined);assert.equal(model.tasks[0].value.task.status,'done');
     await movePlannerObject(user,vid,task.objectId,project.objectId);await deleteProject(user,vid,project.objectId,false);model=await readProjectWorkspace(user,vid);
     assert.equal(model.projects.length,1);assert.equal(model.projects[0].lifecycle,'trashed');assert.equal(model.tasks.length,1);assert.equal(model.tasks[0].value.projectId,undefined);
+    await edit(user,async s=>{s.vaults=s.vaults.filter(v=>v.header.id!==vid);});
+  });
+  await t.test('task dependencies stay E2EE, reject invalid graphs, protect moves, and anchored reminders follow rescheduling',async()=>{
+    const vid=await createVault(user,'Гант','abcdef');
+    const project=await createProject(user,vid,{title:'PRIVATE GANTT PROJECT 1901',favorite:false,calendar:'weekdays'});
+    const other=await createProject(user,vid,{title:'Другой проект',favorite:false});
+    const first=await createTask(user,vid,{title:'PRIVATE GANTT A 1902',projectId:project.objectId,status:'todo',priority:'medium',startDate:'2027-04-02',endDate:'2027-04-02'});
+    const reminder={id:randomUUID(),state:'active',local:'2027-04-06T09:00',mode:'neutral',text:''};
+    const second=await createTask(user,vid,{title:'PRIVATE GANTT B 1903',projectId:project.objectId,status:'in_progress',priority:'high',startDate:'2027-04-05',endDate:'2027-04-06',
+      dependencies:[{taskId:first.objectId,type:'FS',lagDays:0}],reminder,reminderAnchor:'end'});
+    let model=await readProjectWorkspace(user,vid);
+    assert.equal(model.projects.find(item=>item.revision.objectId===project.objectId).value.project.calendar,'weekdays');
+    assert.deepEqual(model.tasks.find(item=>item.revision.objectId===second.objectId).value.task.dependencies,[{taskId:first.objectId,type:'FS',lagDays:0}]);
+    await assert.rejects(updateTask(user,vid,first.objectId,{title:'A',description:'',projectId:project.objectId,status:'todo',priority:'medium',startDate:'2027-04-02',endDate:'2027-04-02',
+      dependencies:[{taskId:second.objectId,type:'FS',lagDays:0}]}),/цикл/i);
+    await assert.rejects(createTask(user,vid,{title:'Cross-project',projectId:other.objectId,status:'todo',priority:'none',dependencies:[{taskId:first.objectId,type:'FS',lagDays:0}]}),/того же проекта/i);
+    await assert.rejects(movePlannerObject(user,vid,first.objectId,other.objectId),/последователями/i);
+    await rescheduleTasks(user,vid,[{objectId:second.objectId,startDate:'2027-04-08',endDate:'2027-04-09'}]);
+    model=await readProjectWorkspace(user,vid);
+    const shifted=model.tasks.find(item=>item.revision.objectId===second.objectId).value;
+    assert.equal(shifted.reminder.local,'2027-04-09T09:00');assert.equal(shifted.task.reminderAnchor,'end');
+    await updateTask(user,vid,second.objectId,{title:shifted.title,description:shifted.text,projectId:project.objectId,status:shifted.task.status,priority:shifted.task.priority,
+      startDate:shifted.task.startDate,endDate:shifted.task.endDate,reminder:shifted.reminder,reminderAnchor:'end',dependencies:[]});
+    await movePlannerObject(user,vid,first.objectId,other.objectId);
+    model=await readProjectWorkspace(user,vid);assert.equal(model.tasks.find(item=>item.revision.objectId===first.objectId).value.projectId,other.objectId);
+    const local=await readState(user.id),encrypted=JSON.stringify(local.vaults.find(v=>v.header.id===vid).records);
+    assert.ok(!encrypted.includes('PRIVATE GANTT PROJECT 1901'));assert.ok(!encrypted.includes('PRIVATE GANTT A 1902'));assert.ok(!encrypted.includes('PRIVATE GANTT B 1903'));
     await edit(user,async s=>{s.vaults=s.vaults.filter(v=>v.header.id!==vid);});
   });
   await t.test('archive, trash, encrypted history and permanent purge survive offline synchronization',async()=>{

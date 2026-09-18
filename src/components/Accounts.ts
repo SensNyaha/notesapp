@@ -1,5 +1,5 @@
 import { h } from 'preact';
-import { useEffect, useRef, useState } from 'preact/hooks';
+import { useEffect, useMemo, useRef, useState } from 'preact/hooks';
 import { accountRequest, authMessage, AuthError } from '../auth';
 import { markCollaborationRecoveryRequired, prepareCollaborationPasswordChange } from '../collaboration.ts';
 import { isUser, type User, type Account } from '../types/auth';
@@ -138,6 +138,8 @@ export function UsersScreen({ onBack, onRefresh }: { onBack: () => void; onRefre
   const heading = useHeading();
   const [users, setUsers] = useState<Account[]>([]), [busy, setBusy] = useState(true), [error, setError] = useState('');
   const [editing, setEditing] = useState(false), [target, setTarget] = useState<Account | null>(null);
+  const [query,setQuery]=useState(''),[roleFilter,setRoleFilter]=useState<'all'|'admin'|'user'>('all');
+  const visibleUsers=useMemo(()=>{const q=query.trim().toLocaleLowerCase('ru');return users.filter(user=>(roleFilter==='all'||user.role===roleFilter)&&(!q||user.login.toLocaleLowerCase('ru').includes(q)));},[users,query,roleFilter]);
   const generation = useRef(0);
   async function refresh() {
     const current = ++generation.current; setBusy(true); setError('');
@@ -155,9 +157,13 @@ export function UsersScreen({ onBack, onRefresh }: { onBack: () => void; onRefre
     e('div', { class: 'actions' },
       e('button', { class: 'primary', disabled: busy, onClick: () => { setTarget(null); setEditing(true); } }, 'Создать пользователя'),
       e('button', { disabled: busy, onClick: () => void refresh() }, busy ? 'Загружаем…' : 'Обновить список')),
+    e('div',{class:'user-filterbar'},
+      e('label',null,'Поиск',e('input',{type:'search',value:query,placeholder:'Логин пользователя',onInput:(event:Event)=>setQuery((event.currentTarget as HTMLInputElement).value)})),
+      e('label',null,'Роль',e('select',{value:roleFilter,onChange:(event:Event)=>setRoleFilter((event.currentTarget as HTMLSelectElement).value as typeof roleFilter)},e('option',{value:'all'},'Все · '+users.length),e('option',{value:'admin'},'Администраторы · '+users.filter(user=>user.role==='admin').length),e('option',{value:'user'},'Пользователи · '+users.filter(user=>user.role==='user').length)))),
     error && e('p', { class: 'error', role: 'alert' }, error),
     !busy && !error && users.length === 0 && e('p', null, 'Пользователей пока нет.'),
-    e('ul', { class: 'user-list', 'aria-busy': busy }, users.map(user => e('li', { key: user.id },
+    !busy&&!error&&users.length>0&&visibleUsers.length===0&&e('p',{class:'muted'},'По выбранным условиям пользователей нет.'),
+    e('ul', { class: 'user-list', 'aria-busy': busy }, visibleUsers.map(user => e('li', { key: user.id },
       e('strong', null, user.login), e('p', null, user.role === 'admin' ? 'Администратор' : 'Пользователь'),
       e('p', { class: 'muted' }, `Создан: ${date(user.createdAt)}`),
       e('p', null, user.mustChangePassword ? (user.temporaryExpires! > Date.now()

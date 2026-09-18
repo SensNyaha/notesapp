@@ -28,7 +28,7 @@ function BlobImage({load,alt,className,cacheKey}:{load:()=>Promise<Blob|null>;al
   const [url,setUrl]=useState('');useEffect(()=>{let active=true,current='';setUrl('');void load().then(blob=>{if(!active||!blob)return;current=URL.createObjectURL(blob);setUrl(current);}).catch(()=>{});
     return()=>{active=false;if(current)URL.revokeObjectURL(current);};},[cacheKey]);return url?e('img',{src:url,alt,class:className}):null;
 }
-export function Planner({ user,reminderTarget,onReminderHandled,onSyncState }: { user: User;reminderTarget?:ReminderTarget;onReminderHandled:()=>void;
+export function Planner({ user,section='notes',initialScreen='list',reminderTarget,onReminderHandled,onSyncState }: { user: User;section?:'notes'|'today';initialScreen?:'list'|'archive'|'trash';reminderTarget?:ReminderTarget;onReminderHandled:()=>void;
   onSyncState:(state:'syncing'|'online'|'offline'|'auth'|'error'|'idle')=>void }) {
   const [state, setState] = useState<State>();
   const stateRef = useRef<State>(); stateRef.current = state;
@@ -53,7 +53,7 @@ export function Planner({ user,reminderTarget,onReminderHandled,onSyncState }: {
       if (s.vaults.some(v => v.header.id === vid && !v.deleted)) s.lastVaultId = vid;
     }).catch(() => setError('Не удалось запомнить выбранное хранилище'));
   }
-  const [screen, setScreen] = useState<'list' | 'create' | 'open' | 'transfer' | 'stash' | 'close-all' | 'system-unlock' | 'conflict' | 'device'|'reminder'|'schedule'|'tags'|'archive'|'trash'|'history'|'outbox-review'|'sharing'>('list');
+  const [screen, setScreen] = useState<'list' | 'create' | 'open' | 'transfer' | 'stash' | 'close-all' | 'system-unlock' | 'conflict' | 'device'|'reminder'|'schedule'|'tags'|'archive'|'trash'|'history'|'outbox-review'|'sharing'>(section==='today'?'schedule':initialScreen);
   const [password,setPassword]=useState('');
   const [autoLockMs,setAutoLockMs]=useState<AutoLockMs>(900_000);
   const [comparison,setComparison]=useState<{objectId:string;versions:string[];chosen:string}>();
@@ -90,6 +90,7 @@ export function Planner({ user,reminderTarget,onReminderHandled,onSyncState }: {
   const draggedChecklistItem=useRef<number|null>(null);
   const syncRunning = useRef(false), alive = useRef(true), generation = useRef(0);
   const acknowledgedTarget=useRef('');
+  useEffect(()=>{if(section!=='today')return;let active=true;void reminderRequest(user,'').then(value=>{if(active){setServerReminders(value.items);setReminderSettings(value.settings);}}).catch(()=>{});return()=>{active=false;};},[section,user.id]);
   function showDraft(d: Draft | null) { draftRef.current = d; setDraft(d); }
   function showViewing(note:OpenedNote|null){viewingRef.current=note;setViewing(note);}
   async function load() {
@@ -770,7 +771,7 @@ export function Planner({ user,reminderTarget,onReminderHandled,onSyncState }: {
         e('button',{disabled:busy,onClick:pauseSchedule},'Приостановить расписание')),
       selectedLocal?e('button',{class:'danger-button',disabled:busy,onClick:()=>{if(confirm('Удалить расписание и всю историю его срабатываний?'))removeSchedule();}},'Удалить напоминание')
         :state?.vaults.some(item=>item.header.id===selectedItem.vault_id&&!item.deleted&&!item.key)&&e('button',{onClick:()=>form('open',selectedItem.vault_id)},'Открыть хранилище'),feedback);
-    return e('section',{class:'card planner today-screen'},e('button',{onClick:()=>setScreen('list')},'Назад'),
+    return e('section',{class:'card planner today-screen'},section!=='today'&&e('button',{onClick:()=>setScreen('list')},'Назад'),
       e('div',{class:'card-heading'},e('div',null,e('p',{class:'eyebrow'},new Date().toLocaleDateString('ru-RU',{weekday:'long',day:'numeric',month:'long'}).toUpperCase()),e('h1',null,'Сегодня')),
         e('button',{class:'today-add',onClick:()=>setTodayMenuOpen(!todayMenuOpen),'aria-expanded':todayMenuOpen},'+ Добавить')),
       e('div',{class:'today-counters'},groups.slice(0,4).map(([key,label,test])=>e('div',{key},e('strong',null,visible.filter(test).length),e('span',null,label)))),
@@ -836,7 +837,7 @@ export function Planner({ user,reminderTarget,onReminderHandled,onSyncState }: {
     return (!selectedTags.length||current.header.id===selected)&&selectedTags.every(tagId=>(note!.tagIds??[]).includes(tagId));
   }).sort((a,b)=>normalizedQuery?(searchSort==='relevance'?b.score-a.score||(b.note!.author?.time??0)-(a.note!.author?.time??0):searchSort==='oldest'?(a.note!.author?.time??0)-(b.note!.author?.time??0):(b.note!.author?.time??0)-(a.note!.author?.time??0))
     :Number(Boolean(b.note!.pinned))-Number(Boolean(a.note!.pinned))||(sort==='title'?a.note!.title.localeCompare(b.note!.title,'ru'):sort==='oldest'?(a.note!.author?.time??0)-(b.note!.author?.time??0):(b.note!.author?.time??0)-(a.note!.author?.time??0)));
-  return e('section', { class: 'card planner' },
+  return e('section', { class: 'card planner planner-list-screen' },
     e('div', { class: 'card-heading' }, e('h1', null, 'Заметки'), e('button', { disabled: busy, onClick: () => void run(sync) }, 'Синхронизировать')),
     e('label', null, 'Хранилище', e('select', { value: selected, onChange: (ev: Event) => void activateVault((ev.target as HTMLSelectElement).value) },
       e('option', { value: '' }, 'Выберите хранилище'), active.map(v => e('option', { value: v.header.id, key: v.header.id }, names[v.header.id] || 'Хранилище')))),
@@ -849,8 +850,7 @@ export function Planner({ user,reminderTarget,onReminderHandled,onSyncState }: {
     v?.key&&e('div',{class:'filters'},e('div',{class:'quick-filters'},([['all','Все'],['pinned','Закреплённые'],['untagged','Без тегов'],['reminder','С напоминанием']] as const).map(([value,label])=>e('button',{class:quickFilter===value?'filter-chip selected':'filter-chip','aria-pressed':quickFilter===value,onClick:()=>setQuickFilter(value)},label))),
       e('div',{class:'tag-filter'},activeTags(v.header.id).map(tag=>e('button',{key:tag.id,class:selectedTags.includes(tag.id)?'tag-chip selected':'tag-chip',style:{'--tag-color':tag.color},'aria-pressed':selectedTags.includes(tag.id),onClick:()=>setSelectedTags(current=>current.includes(tag.id)?current.filter(id=>id!==tag.id):[...current,tag.id])},tag.name)),
         e('button',{onClick:()=>setScreen('tags')},'Управлять тегами'))),
-    e('div', { class: 'actions' }, e('button', { disabled: busy, onClick: () => form('create') }, '+ Хранилище'),
-      e('button',{disabled:busy,onClick:()=>{setScreen('schedule');setSelectedOccurrence('');setSelectedTags([]);void reminderRequest(user,'').then(value=>{setServerReminders(value.items);setReminderSettings(value.settings);}).catch(()=>{});}},'Сегодня'),
+    e('div', { class: 'actions planner-tools' }, e('button', { disabled: busy, onClick: () => form('create') }, '+ Хранилище'),
       e('button',{disabled:!v?.key,onClick:()=>{setQuery('');setSelectedTags([]);setScreen('archive');}},'Архив'+(v?.key?' ('+heads(v).filter(r=>notes[r.id]&&statusOf(v,r,notes[r.id])==='archived').length+')':'')),
       e('button',{disabled:!v?.key,onClick:()=>{setQuery('');setSelectedTags([]);setScreen('trash');}},'Корзина'+(v?.key?' ('+heads(v).filter(r=>notes[r.id]&&statusOf(v,r,notes[r.id])==='trashed'&&!v.purgePending?.includes(r.objectId)).length+')':'')),
       e('button', { onClick: () => setScreen('stash') }, 'Отложенные заметки (' + (state?.stash.length ?? 0) + ')'),
@@ -905,5 +905,5 @@ export function Planner({ user,reminderTarget,onReminderHandled,onSyncState }: {
           r.pending?syncStatus==='syncing'?'Синхронизация…':syncStatus==='offline'?'Нет подключения':syncStatus==='error'?'Ошибка синхронизации':'Сохранено на устройстве':'Синхронизировано'),
         heads(current).filter(x => x.objectId === r.objectId).length > 1 && e('small', null, 'Есть другая версия — обе сохранены')),
         e('button',{class:'row-edit-button',disabled:Boolean(current.transfer),onClick:()=>editRevision(current,r),'aria-label':'Редактировать заметку «'+(note!.title||'Без заголовка')+'»'},'Редактировать'))),
-      e('button', { class: 'primary', disabled: busy || Boolean(v.transfer), onClick: () => { if (v.key) showDraft({ vault: selected, object: crypto.randomUUID(), revision: null, title: '', text: '', dirty: false, key: v.key }); } }, '+ Новая заметка'))), feedback);
+      e('button', { class: 'primary note-fab', disabled: busy || Boolean(v.transfer), onClick: () => { if (v.key) showDraft({ vault: selected, object: crypto.randomUUID(), revision: null, title: '', text: '', dirty: false, key: v.key }); } }, '+ Новая заметка'))), feedback);
 }

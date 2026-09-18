@@ -2,7 +2,7 @@
 
 Локально развёртываемая PWA для заметок, напоминаний и планирования со сквозным шифрованием содержимого.
 
-Текущая рабочая версия: **0.18.0**, SQLite schema **14**. Сервер и PWA слушают порт **3100**. Полная карта документации находится в [`docs/README.md`](docs/README.md), фактическое покрытие функций — в [`docs/IMPLEMENTATION_STATUS.md`](docs/IMPLEMENTATION_STATUS.md), дальнейший порядок разработки — в [`TODO.md`](TODO.md).
+Текущая рабочая версия: **0.20.0**, SQLite schema **14**. Сервер и PWA слушают порт **3100**. Полная карта документации находится в [`docs/README.md`](docs/README.md), фактическое покрытие функций — в [`docs/IMPLEMENTATION_STATUS.md`](docs/IMPLEMENTATION_STATUS.md), итоговый аудит экранов 01–54 — в [`docs/STAGE20_SCREEN_AUDIT.md`](docs/STAGE20_SCREEN_AUDIT.md).
 
 ## Что работает
 
@@ -29,6 +29,8 @@
 - совместные E2EE-хранилища с ролями владелец / редактор / просмотр, выдачей member envelopes и ротацией keyring epoch при отзыве участника;
 - зашифрованные комментарии к заметкам; viewer может комментировать и экспортировать, но не менять содержимое; permanent purge shared-заметки доступен владельцу;
 - персональные напоминания в shared vault шифруются account-wide collaboration key и не становятся общими для участников;
+- E2EE-проекты и задачи, FS/SS/FF/SF-зависимости с lag, рабочие/календарные дни, critical path, impact preview и адаптивный Гант;
+- финальная adaptive shell: iPhone bottom navigation, tablet rail, desktop sidebar, onboarding, Settings Hub и system/light/dark theme;
 - открытые названия закрытых хранилищ и диагностика свободного места для администратора;
 - транзакционные миграции, WAL-aware backup/restore и автоматические проверки.
 Архив, корзина, история и расширенные повторяющиеся напоминания реализованы, но их реальные сценарии на установленной PWA ещё отмечены как требующие пользовательской приёмки.
@@ -100,7 +102,7 @@ docker compose restart app
 docker compose stop app
 ```
 
-Ожидаемый health текущей версии содержит `status: ok`, `version: 0.18.0`, `database: ok`, постоянный `installationId`, `bootCount` и время сервера.
+Ожидаемый health текущей версии содержит `status: ok`, `version: 0.20.0`, `database: ok`, постоянный `installationId`, `bootCount` и время сервера.
 
 ## Запуск без Docker
 
@@ -121,7 +123,7 @@ npm run build
 npm run check
 ```
 
-`npm run build` уже включает typecheck, Vite production build и создание Service Worker. На версии **0.18.0** набор содержит **104 теста**. Они проверяют сервер и миграции, password/Passkey authentication, сессии, WebAuthn, PRF/auto-lock, portable backup, streaming ZIP/ZIP64, потоковую E2EE-криптографию файлов, file API и безопасный GC ссылок истории/копий, contacts/shared-vault API, collaboration crypto/key rotation, E2EE comments, TOFU fingerprint, отзыв участника с encrypted stash, удаление vault, синхронизацию, поиск, напоминания, push и PWA shell.
+`npm run build` уже включает typecheck, Vite production build и создание Service Worker. На версии **0.20.0** набор содержит **110 тестов**. Они проверяют сервер и миграции, password/Passkey authentication, сессии, WebAuthn, PRF/auto-lock, portable backup, streaming ZIP/ZIP64, E2EE-файлы и GC, contacts/shared-vault, E2EE comments, outbox/sync, поиск, reminders/push, projects/tasks, зависимости, Gantt scheduling helpers и PWA shell.
 
 Автоматические проверки не заменяют проверку установленной PWA, Safari, реальной доставки push и адаптивных экранов. Тестовый push при закрытой PWA ранее подтверждён пользователем на iOS 26.6.1.
 
