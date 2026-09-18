@@ -1,6 +1,7 @@
 import { h } from 'preact';
 import { useEffect, useRef, useState } from 'preact/hooks';
 import { accountRequest, authMessage, AuthError } from '../auth';
+import { markCollaborationRecoveryRequired, prepareCollaborationPasswordChange } from '../collaboration.ts';
 import { isUser, type User, type Account } from '../types/auth';
 
 const e = h;
@@ -55,8 +56,12 @@ export function PasswordScreen({ user, onDone, onBack, onLogout, onRefresh }: {
     if (password !== repeat) { setError('Пароли не совпадают.'); return; }
     setBusy(true); setError('');
     try {
-      const result = await accountRequest('change-password', { currentPassword, password, repeatPassword: repeat, revokeOthers });
+      const collaboration=await prepareCollaborationPasswordChange(user,currentPassword,password);
+      if(collaboration.recoveryRequired&&!user.mustChangePassword)throw Error('Не удалось открыть E2EE-ключ совместной работы. Сначала разблокируйте его системно или текущим паролем.');
+      const collaborationRewrap=collaboration.rewrap?{identityVersion:collaboration.rewrap.version,passwordWrapper:collaboration.rewrap.wrapper}:undefined;
+      const result = await accountRequest('change-password', { currentPassword, password, repeatPassword: repeat, revokeOthers,...(collaborationRewrap?{collaborationRewrap}:{}) });
       if (!isUser(result.user)) throw new Error('response');
+      if(collaboration.recoveryRequired)await markCollaborationRecoveryRequired(user.id);
       setCurrent(''); setPassword(''); setRepeat(''); onDone(result.user);
     } catch (caught) {
       setError(authMessage(caught) + (!(caught instanceof AuthError) || caught.code === 'network' ? ' ' + uncertain : ''));

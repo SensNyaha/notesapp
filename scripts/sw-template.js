@@ -44,10 +44,17 @@ self.addEventListener('push', event => {
     else if(value?.type==='tasks-reminder'&&uuid.test(value.accountId)&&uuid.test(value.vaultId)&&uuid.test(value.objectId)&&uuid.test(value.configId)&&uuid.test(value.occurrenceId)
       &&typeof value.body==='string'&&value.body.trim()&&Array.from(value.body).length<=200){
       id=value.occurrenceId;body=value.body;data={type:'tasks-reminder',accountId:value.accountId,vaultId:value.vaultId,objectId:value.objectId,configId:value.configId,occurrenceId:value.occurrenceId};
+    } else if(value?.type==='tasks-collaboration'&&uuid.test(value.id)&&uuid.test(value.accountId)
+      &&['friend_request','vault_invite','comment','role_changed','member_removed','key_changed'].includes(value.eventType)
+      &&(value.vaultId===undefined||uuid.test(value.vaultId))&&(value.objectId===undefined||uuid.test(value.objectId))){
+      const bodies={friend_request:'Новая заявка в контакты',vault_invite:'Приглашение в хранилище',comment:'Новый комментарий',
+        role_changed:'Изменены права доступа',member_removed:'Изменён доступ к хранилищу',key_changed:'Изменился E2EE-ключ совместной работы'};
+      id=value.id;body=bodies[value.eventType];data={type:'tasks-collaboration',accountId:value.accountId,eventType:value.eventType,
+        ...(value.vaultId?{vaultId:value.vaultId}:{}),...(value.objectId?{objectId:value.objectId}:{})};
     }
   } catch {}
   event.waitUntil(self.registration.showNotification('Tasks', {
-    body,icon:'/icons/icon-192.png',badge:'/icons/icon-192.png',tag:'tasks-'+id,renotify:data.type==='tasks-reminder',data,
+    body,icon:'/icons/icon-192.png',badge:'/icons/icon-192.png',tag:'tasks-'+id,renotify:data.type!=='tasks-test',data,
   }));
 });
 self.addEventListener('notificationclick', event => {

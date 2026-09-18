@@ -6,7 +6,7 @@ import { createVault, openVault, closeVault, saveNote, readNote, vaultName, head
   readStash, moveStash, discardStash, discardPurgedObjects, registerDraftFlush, edit, hasUnsaved, closeAllVault, resolveConflict, renameDevice,
   acknowledgeReminder, readTags, createTag, renameTag, deleteTag, copyNote, readVaultPushMode, setVaultPushMode,
   archiveNote,restoreArchivedNote,trashNote,restoreTrashedNote,permanentlyDeleteNote,noteHistory,restoreNoteVersion,noteLifecycle,
-  outboxReviewItems,decideOutboxReview,OutboxReviewRequired,enableSystemUnlock,unlockVaultSystem,lockVault,forgetSystemUnlock,setSystemAutoLock,lockAfterBackground,deleteVault,vaultEntryMode,
+  outboxReviewItems,decideOutboxReview,OutboxReviewRequired,enableSystemUnlock,unlockVaultSystem,lockVault,forgetSystemUnlock,setSystemAutoLock,lockAfterBackground,deleteVault,vaultEntryMode,enableVaultSharing,
   type Note, type TagDefinition, type VaultPushMode, type NoteLifecycleState, type OutboxReviewItem } from '../planner';
 import { AUTO_LOCK_VALUES, type AutoLockMs } from '../crypto/system-unlock';
 import { localTime } from '../../shared/reminders.mjs';
@@ -16,6 +16,9 @@ import { Attachments, RichTextEditor, sanitizeNoteHtml } from './RichTextEditor'
 import { noteSearchScore } from '../search';
 import { AuthError } from '../auth';
 import { createNoteZip, downloadBytes, noteZipFileName } from '../portable';
+import { changeMemberRole, collaborationIsUnlocked, contactState, createComment, deleteComment, inviteToVault, leaveSharedVault,
+  loadComments, loadOwnerKeyring, removeVaultMember, regrantMember, sharedVaultMembers, trustFingerprint, unlockMemberVault, updateComment,
+  ContactKeyChanged, type ContactInfo, type DecryptedComment, type VaultMemberInfo } from '../collaboration.ts';
 
 interface Draft extends Note { vault: string; object: string; revision: string | null; dirty: boolean; key: CryptoKey }
 interface OpenedNote extends Note { vault: string; object: string; revision: string; key: CryptoKey }
@@ -45,7 +48,7 @@ export function Planner({ user,reminderTarget,onReminderHandled,onSyncState }: {
       if (s.vaults.some(v => v.header.id === vid && !v.deleted)) s.lastVaultId = vid;
     }).catch(() => setError('Не удалось запомнить выбранное хранилище'));
   }
-  const [screen, setScreen] = useState<'list' | 'create' | 'open' | 'transfer' | 'stash' | 'close-all' | 'system-unlock' | 'conflict' | 'device'|'reminder'|'schedule'|'tags'|'archive'|'trash'|'history'|'outbox-review'>('list');
+  const [screen, setScreen] = useState<'list' | 'create' | 'open' | 'transfer' | 'stash' | 'close-all' | 'system-unlock' | 'conflict' | 'device'|'reminder'|'schedule'|'tags'|'archive'|'trash'|'history'|'outbox-review'|'sharing'>('list');
   const [password,setPassword]=useState('');
   const [autoLockMs,setAutoLockMs]=useState<AutoLockMs>(900_000);
   const [comparison,setComparison]=useState<{objectId:string;versions:string[];chosen:string}>();
@@ -70,6 +73,9 @@ export function Planner({ user,reminderTarget,onReminderHandled,onSyncState }: {
   const [searchSort,setSearchSort]=useState<'relevance'|'newest'|'oldest'>('relevance');
   const [hideCompleted,setHideCompleted]=useState(false),[menuOpen,setMenuOpen]=useState(false);
   const [history,setHistory]=useState<HistoryState|null>(null);
+  const [members,setMembers]=useState<VaultMemberInfo[]>([]),[sharingContacts,setSharingContacts]=useState<ContactInfo[]>([]);
+  const [inviteUserId,setInviteUserId]=useState(''),[inviteRole,setInviteRole]=useState<'editor'|'viewer'>('editor');
+  const [comments,setComments]=useState<DecryptedComment[]>([]),[commentsOpen,setCommentsOpen]=useState(false),[commentText,setCommentText]=useState('');
   const [tagName,setTagName]=useState(''),[tagColor,setTagColor]=useState('#356AE6'),[editingTag,setEditingTag]=useState('');
   const [status, setStatus] = useState(''); const [error, setError] = useState(''); const [busy, setBusy] = useState(false);
   const [syncStatus,setSyncStatus]=useState<'local'|'syncing'|'synced'|'offline'|'error'>('local');
@@ -150,17 +156,28 @@ export function Planner({ user,reminderTarget,onReminderHandled,onSyncState }: {
       :caught instanceof Error?caught.message:'Не удалось разблокировать хранилище';
   }
   async function activateVault(vid:string){
-    select(vid);showDraft(null);showViewing(null);
+    select(vid);showDraft(null);showViewing(null);setCommentsOpen(false);setComments([]);
     if(!vid){setScreen('list');return;}
     const local=await readState(user.id),current=local?.vaults.find(item=>item.header.id===vid&&!item.deleted);
     if(!current){setSelected('');setScreen('list');setError('Хранилище больше не доступно.');return;}
+    if(current.shared&&current.role&&current.role!=='owner'){
+      if(current.membershipRevoked){setScreen('list');setError('Доступ к shared vault отозван. Доступна только ранее загруженная локальная копия.');return;}
+      if(current.key){setScreen('list');setError('');return;}
+      if(!collaborationIsUnlocked(user.id)){setScreen('list');setError('Сначала откройте E2EE-ключ совместной работы в разделе «Контакты и совместная работа».');return;}
+      const attempt=++unlockAttempt.current;setBusy(true);setError('');
+      try{await unlockMemberVault(user,vid);if(attempt!==unlockAttempt.current||!alive.current)return;
+        setStatus('Совместное хранилище разблокировано E2EE-ключом аккаунта.');setScreen('list');await load();void sync();}
+      catch(caught){if(attempt===unlockAttempt.current&&alive.current)setError(unlockError(caught));}
+      finally{if(attempt===unlockAttempt.current&&alive.current)setBusy(false);}return;
+    }
     const mode=vaultEntryMode(current);
-    if(mode==='open'){setScreen('list');setError('');return;}
+    if(mode==='open'){if(current.shared&&current.role==='owner'&&current.keyring)await loadOwnerKeyring(user,vid);setScreen('list');setError('');return;}
     setPhrase('');setRepeat('');setPassword('');setConfirmed(false);setError('');setScreen('open');
     if(mode==='phrase')return;
     const attempt=++unlockAttempt.current;setBusy(true);
     try{
       await unlockVaultSystem(user,vid);
+      const updated=await readState(user.id),opened=updated?.vaults.find(item=>item.header.id===vid);if(opened?.shared&&opened.role==='owner'&&opened.keyring)await loadOwnerKeyring(user,vid);
       if(attempt!==unlockAttempt.current||!alive.current)return;
       setStatus('Хранилище разблокировано системной проверкой.');setScreen('list');await load();void sync();
     }catch(caught){if(attempt===unlockAttempt.current&&alive.current)setError(unlockError(caught));}
@@ -252,8 +269,11 @@ export function Planner({ user,reminderTarget,onReminderHandled,onSyncState }: {
   function form(next: typeof screen, vid = '') { showViewing(null);select(vid); setName(''); setPhrase(''); setRepeat(''); setPassword(''); setConfirmed(false); setError(''); setScreen(next); }
   async function submit(event: Event) {
     event.preventDefault(); await run(async () => {
-      if (screen === 'open') await openVault(user, selected, phrase);
-      else {
+      if (screen === 'open') {
+        await openVault(user, selected, phrase);
+        const local=await readState(user.id),opened=local?.vaults.find(item=>item.header.id===selected);
+        if(opened?.shared&&opened.role==='owner'&&opened.keyring)await loadOwnerKeyring(user,selected);
+      } else {
         if (phrase !== repeat) throw Error('Фраза и повтор не совпадают');
         if (screen === 'transfer' && !confirmed) throw Error('Подтвердите последствия переноса');
         select(screen === 'transfer' ? await transferVault(user, selected, name, phrase) : await createVault(user, name, phrase));
@@ -295,7 +315,7 @@ export function Planner({ user,reminderTarget,onReminderHandled,onSyncState }: {
   }
   function openRevision(current:NonNullable<State['vaults'][number]>,revision:ReturnType<typeof heads>[number]){
     const value=notes[revision.id];if(!value||!current.key)return;
-    showDraft(null);showViewing({...value,vault:current.header.id,object:revision.objectId,revision:revision.id,key:current.key});
+    showDraft(null);setCommentsOpen(false);setComments([]);setCommentText('');showViewing({...value,vault:current.header.id,object:revision.objectId,revision:revision.id,key:current.key});
     if(value.reminder)void acknowledgeReminder(user,{vaultId:current.header.id,objectId:revision.objectId,configId:value.reminder.id});
   }
   function editRevision(current:NonNullable<State['vaults'][number]>,revision:ReturnType<typeof heads>[number]){
@@ -306,6 +326,32 @@ export function Planner({ user,reminderTarget,onReminderHandled,onSyncState }: {
   function tagChips(vid:string,ids:string[]|undefined){const byId=new Map(activeTags(vid).map(tag=>[tag.id,tag]));return (ids??[]).map(tagId=>byId.get(tagId)).filter((tag):tag is TagDefinition=>Boolean(tag));}
   async function duplicate(current:NonNullable<State['vaults'][number]>,revision:string){
     await flush();await copyNote(user,current.header.id,revision);showViewing(null);setMenuOpen(false);setStatus('Копия создана и сохранена на устройстве.');void sync();
+  }
+  async function withTofu(fn:()=>Promise<unknown>){
+    for(let attempt=0;attempt<10;attempt++)try{return await fn();}catch(caught){
+      if(!(caught instanceof ContactKeyChanged))throw caught;
+      const accepted=confirm('E2EE fingerprint пользователя изменился.\n\nПредыдущий: '+caught.previous+'\nНовый: '+caught.current+'\n\nПодтвердить новый ключ для этого контакта?');
+      if(!accepted)throw Error('Операция отменена: новый E2EE fingerprint не подтверждён.');
+      await trustFingerprint(user,caught.userId,caught.current,true);
+    }
+    throw Error('Слишком много изменений E2EE-ключей. Обновите список участников.');
+  }
+  async function refreshSharing(current:NonNullable<State['vaults'][number]>){
+    const contacts=await contactState(user);setSharingContacts(contacts.contacts);
+    setMembers(current.shared?await sharedVaultMembers(user,current.header.id):[]);
+  }
+  async function openSharing(current:NonNullable<State['vaults'][number]>){
+    setInviteUserId('');setInviteRole('editor');setPhrase('');setError('');setScreen('sharing');
+    try{await refreshSharing(current);}catch(caught){setError(caught instanceof Error?caught.message:'Не удалось загрузить настройки совместного доступа');}
+  }
+  async function refreshComments(){
+    const current=viewingRef.current;if(!current)return;
+    setComments(await loadComments(user,current.vault,current.object));
+  }
+  async function toggleComments(){
+    if(commentsOpen){setCommentsOpen(false);return;}
+    setCommentsOpen(true);setCommentText('');setError('');
+    try{await refreshComments();}catch(caught){setError(caught instanceof Error?caught.message:'Не удалось загрузить комментарии');}
   }
   function exportViewingZip(){
     if(!viewing)return;
@@ -386,6 +432,50 @@ export function Planner({ user,reminderTarget,onReminderHandled,onSyncState }: {
           AUTO_LOCK_VALUES.map(value=>e('option',{value:String(value),key:value},autoLockLabel(value))))),
         e('p',{class:'hint'},'Пока PWA находится на экране, хранилище не блокируется по таймеру. «Никогда» отключает background-таймер. После закрытия, перезагрузки или перезапуска PWA защищённый root key отсутствует в runtime, поэтому потребуется системная проверка либо фраза.'),
         feedback,e('button',{class:'primary',disabled:busy},busy?'Сохраняем…':configured?'Сохранить настройку':'Включить системную разблокировку')));
+  }
+  if(screen==='sharing'&&v){
+    const owner=v.role==='owner'||!v.role,available=sharingContacts.filter(contact=>!members.some(member=>member.user.id===contact.id));
+    return e('section',{class:'card planner'},
+      e('button',{disabled:busy,onClick:()=>setScreen('list')},'Назад'),
+      e('h1',null,'Совместный доступ'),
+      e('p',{class:'hint'},names[v.header.id]||'Хранилище'),
+      !collaborationIsUnlocked(user.id)&&e('p',{class:'auth-notice'},'E2EE-ключ совместной работы сейчас заблокирован. Откройте его в разделе «Контакты и совместная работа».'),
+      !v.shared&&owner&&e('div',null,
+        e('p',null,'Личное хранилище можно сделать совместным без смены его root key. Существующие напоминания будут вынесены в личные E2EE-настройки аккаунта.'),
+        e('form',{onSubmit:(ev:Event)=>{ev.preventDefault();const secret=phrase;setPhrase('');void run(async()=>{
+          await enableVaultSharing(user,v.header.id,secret);setStatus('Совместный доступ включён. Root key не менялся.');void sync();
+          const current=(await readState(user.id))?.vaults.find(item=>item.header.id===v.header.id);if(current)await refreshSharing(current);
+        });}},
+          e('label',null,'Фраза хранилища',e('input',{type:'password',required:true,autoComplete:'off',value:phrase,onInput:(ev:Event)=>setPhrase((ev.target as HTMLInputElement).value)})),
+          e('button',{class:'primary',disabled:busy||!collaborationIsUnlocked(user.id)},'Включить совместный доступ'))),
+      v.shared&&e('div',null,
+        e('p',{class:v.membershipRevoked?'error':'auth-notice'},v.membershipRevoked
+          ?'Серверный доступ отозван. Ни сервер, ни другой участник не могут удалить уже скопированный ciphertext и старые ключи с этого устройства.'
+          :'Ваша роль: '+(v.role==='owner'?'Владелец':v.role==='editor'?'Редактор':'Просмотр')+'. Сервер не получает ключи содержимого.'),
+        owner&&e('form',{onSubmit:(ev:Event)=>{ev.preventDefault();const target=sharingContacts.find(contact=>contact.id===inviteUserId);if(!target)return;void run(async()=>{
+          await withTofu(()=>inviteToVault(user,v.header.id,target,inviteRole));setInviteUserId('');setStatus('Приглашение отправлено.');await refreshSharing(v);
+        });}},
+          e('h2',null,'Пригласить участника'),
+          available.length?e('div',{class:'actions compact'},
+            e('select',{value:inviteUserId,required:true,onChange:(ev:Event)=>setInviteUserId((ev.target as HTMLSelectElement).value)},
+              e('option',{value:''},'Выберите контакт'),available.map(contact=>e('option',{key:contact.id,value:contact.id,disabled:!contact.identity},contact.login+(contact.identity?'':' · нет E2EE-ключа')))),
+            e('select',{value:inviteRole,onChange:(ev:Event)=>setInviteRole((ev.target as HTMLSelectElement).value as 'editor'|'viewer')},
+              e('option',{value:'editor'},'Редактор'),e('option',{value:'viewer'},'Просмотр')),
+            e('button',{class:'primary',disabled:busy||!inviteUserId||!collaborationIsUnlocked(user.id)},'Пригласить'))
+            :e('p',{class:'muted'},'Нет доступных контактов для приглашения. Добавьте пользователя через раздел контактов.')),
+        e('h2',null,'Участники'),
+        members.map(member=>e('article',{class:'note-row',key:member.user.id},
+          e('strong',null,member.user.login+(member.user.id===user.id?' · вы':'')),
+          e('small',null,member.role==='owner'?'Владелец':member.role==='editor'?'Редактор':'Просмотр'),
+          member.identity?e('small',{class:'mono'},'Fingerprint '+member.identity.fingerprint.slice(0,10)+'…'+member.identity.fingerprint.slice(-8)):e('small',{class:'error'},'E2EE-ключ отсутствует — требуется повторная выдача после создания ключа'),
+          owner&&member.role!=='owner'&&e('div',{class:'actions compact'},
+            e('select',{value:member.role,disabled:busy,onChange:(ev:Event)=>void run(async()=>{await changeMemberRole(user,v.header.id,member.user.id,(ev.target as HTMLSelectElement).value as 'editor'|'viewer');await refreshSharing(v);})},
+              e('option',{value:'editor'},'Редактор'),e('option',{value:'viewer'},'Просмотр')),
+            e('button',{disabled:busy||!member.identity||!collaborationIsUnlocked(user.id),onClick:()=>void run(async()=>{await withTofu(()=>regrantMember(user,v.header.id,member));setStatus('Новый key envelope выдан участнику.');await refreshSharing(v);})},'Выдать ключ заново'),
+            e('button',{class:'danger-button',disabled:busy||!collaborationIsUnlocked(user.id),onClick:()=>{if(confirm('Удалить '+member.user.login+' из хранилища? Будет создан новый key epoch для всех будущих изменений. Уже скопированные старые данные отозвать невозможно.'))void run(async()=>{await withTofu(()=>removeVaultMember(user,v.header.id,member.user.id));setStatus('Участник удалён. Новый key epoch создан для оставшихся участников.');await refreshSharing(v);});}},'Удалить')))),
+        !owner&&!v.membershipRevoked&&e('button',{class:'danger-button',disabled:busy,onClick:()=>{if(confirm('Выйти из совместного хранилища? Серверный доступ будет удалён. Уже загруженная локальная копия останется только для чтения.'))void run(async()=>{await leaveSharedVault(user,v.header.id);setScreen('list');setStatus('Вы вышли из совместного хранилища.');});}},'Выйти из хранилища'),
+        e('button',{disabled:busy,onClick:()=>void run(async()=>refreshSharing(v))},'Обновить участников')),
+      feedback);
   }
   if(screen==='outbox-review')return e('section',{class:'card planner'},e('button',{disabled:busy,onClick:()=>setScreen('list')},'Назад'),
     e('h1',null,'Проверка локальных изменений'),e('p',{class:'auth-notice'},'Предыдущая серверная сессия была завершена. Ничего из локальной очереди не будет отправлено, пока вы не решите судьбу каждой заметки.'),
@@ -483,29 +573,43 @@ export function Planner({ user,reminderTarget,onReminderHandled,onSyncState }: {
       feedback);
   }
   if(viewing&&!draft){const current=state?.vaults.find(item=>item.header.id===viewing.vault),versions=current?heads(current).filter(item=>item.objectId===viewing.object):[],competing=versions.length>1,
-    revision=versions.find(item=>item.id===viewing.revision),lifecycle=current&&revision?statusOf(current,revision,viewing):'active';return e('section',{class:'card note-view'},
+    revision=versions.find(item=>item.id===viewing.revision),lifecycle=current&&revision?statusOf(current,revision,viewing):'active',readOnly=Boolean(current?.membershipRevoked||current?.role==='viewer');return e('section',{class:'card note-view'},
     e('div',{class:'actions note-view-actions'},e('button',{onClick:()=>{showViewing(null);setMenuOpen(false);}},'Назад'),
-      e('div',{class:'actions compact'},e('button',{disabled:competing,onClick:()=>setMenuOpen(!menuOpen),'aria-expanded':menuOpen&&!competing},'Действия'),lifecycle==='active'&&!competing&&e('button',{class:'primary',onClick:()=>showDraft({...viewing,dirty:false})},'Редактировать'))),
+      e('div',{class:'actions compact'},e('button',{disabled:competing,onClick:()=>setMenuOpen(!menuOpen),'aria-expanded':menuOpen&&!competing},'Действия'),lifecycle==='active'&&!competing&&!readOnly&&e('button',{class:'primary',onClick:()=>showDraft({...viewing,dirty:false})},'Редактировать'))),
     competing&&e('div',{class:'error',role:'status'},'Заметка изменена на нескольких устройствах. Выберите версию, прежде чем редактировать.',
       e('button',{onClick:()=>{setComparison({objectId:viewing.object,versions:versions.map(item=>item.id),chosen:versions[0].id});showViewing(null);setMenuOpen(false);setScreen('conflict');}},'Сравнить версии')),
     menuOpen&&!competing&&e('div',{class:'note-action-menu',role:'menu'},
-      lifecycle==='active'&&e('button',{onClick:()=>{setMenuOpen(false);void run(()=>updateViewing({pinned:!viewing.pinned}));}},viewing.pinned?'Открепить':'Закрепить'),
-      lifecycle==='active'&&e('button',{onClick:()=>showDraft({...viewing,dirty:false})},'Изменить теги'),
-      lifecycle==='active'&&e('button',{disabled:busy,onClick:()=>{if(current)void run(()=>duplicate(current,viewing.revision));}},'Создать копию'),
+      lifecycle==='active'&&!readOnly&&e('button',{onClick:()=>{setMenuOpen(false);void run(()=>updateViewing({pinned:!viewing.pinned}));}},viewing.pinned?'Открепить':'Закрепить'),
+      lifecycle==='active'&&!readOnly&&e('button',{onClick:()=>showDraft({...viewing,dirty:false})},'Изменить теги'),
+      lifecycle==='active'&&!readOnly&&e('button',{disabled:busy,onClick:()=>{if(current)void run(()=>duplicate(current,viewing.revision));}},'Создать копию'),
       e('button',{disabled:busy,onClick:exportViewingZip},'Экспортировать ZIP'),
       current&&e('button',{disabled:busy,onClick:()=>void run(()=>openHistory(current,viewing.object,lifecycle==='archived'?'archive':lifecycle==='trashed'?'trash':'list'))},'История версий'),
-      lifecycle==='active'&&current&&e('button',{disabled:busy,onClick:()=>void run(()=>archiveCurrent(current,viewing.object))},'Архивировать'),
-      lifecycle==='archived'&&current&&revision&&e('button',{disabled:busy,onClick:()=>void run(()=>restoreArchive(current,revision,viewing))},'Вернуть из архива'),
-      lifecycle!=='trashed'&&current&&e('button',{class:'menu-danger',disabled:busy,onClick:()=>{if(confirm('Переместить заметку в корзину? Она будет окончательно удалена через 30 дней.'))void run(()=>trashCurrent(current,viewing.object));}},'Удалить'),
-      lifecycle==='trashed'&&current&&e('button',{disabled:busy,onClick:()=>void run(()=>restoreTrash(current,viewing.object))},'Восстановить'),
-      lifecycle==='trashed'&&current&&e('button',{class:'menu-danger',disabled:busy,onClick:()=>{if(confirm('Удалить заметку и всю историю навсегда? Восстановить её средствами приложения будет невозможно.'))void run(()=>purgeCurrent(current,viewing.object));}},'Удалить навсегда')),
+      lifecycle==='active'&&current&&!readOnly&&e('button',{disabled:busy,onClick:()=>void run(()=>archiveCurrent(current,viewing.object))},'Архивировать'),
+      lifecycle==='archived'&&current&&revision&&!readOnly&&e('button',{disabled:busy,onClick:()=>void run(()=>restoreArchive(current,revision,viewing))},'Вернуть из архива'),
+      lifecycle!=='trashed'&&current&&!readOnly&&e('button',{class:'menu-danger',disabled:busy,onClick:()=>{if(confirm('Переместить заметку в корзину? Она будет окончательно удалена через 30 дней.'))void run(()=>trashCurrent(current,viewing.object));}},'Удалить'),
+      lifecycle==='trashed'&&current&&!readOnly&&e('button',{disabled:busy,onClick:()=>void run(()=>restoreTrash(current,viewing.object))},'Восстановить'),
+      lifecycle==='trashed'&&current&&!readOnly&&(!current.shared||current.role==='owner')&&e('button',{class:'menu-danger',disabled:busy,onClick:()=>{if(confirm('Удалить заметку и всю историю навсегда? Восстановить её средствами приложения будет невозможно.'))void run(()=>purgeCurrent(current,viewing.object));}},'Удалить навсегда')),
+    readOnly&&e('p',{class:'auth-notice'},current?.membershipRevoked?'Доступ отозван. Это только ранее загруженная локальная копия; изменения не отправляются на сервер.':'Роль «Просмотр»: содержимое заметки нельзя изменять. Комментарии разрешены отдельно.'),
     lifecycle!=='active'&&e('p',{class:lifecycle==='trashed'?'lifecycle-banner trash':'lifecycle-banner'},lifecycle==='archived'?'Заметка находится в архиве. Напоминание приостановлено.':'Заметка находится в корзине. Она будет удалена автоматически через 30 дней.'),
     e('h1',null,viewing.title||'Без заголовка'),
     tagChips(viewing.vault,viewing.tagIds).length>0&&e('div',{class:'tag-list'},tagChips(viewing.vault,viewing.tagIds).map(tag=>e('span',{class:'tag-chip',style:{'--tag-color':tag.color},key:tag.id},tag.name))),
     viewing.html?e('div',{class:'note-view-text rich-note-content',dangerouslySetInnerHTML:{__html:sanitizeNoteHtml(viewing.html)}})
       :viewing.text?e('div',{class:'note-view-text'},viewing.text):e('p',{class:'muted'},'В заметке пока нет текста.'),
-    Boolean(viewing.checklist?.length)&&e('section',{class:'checklist-view'},e('h2',null,'Чек-лист'),viewing.checklist!.map(item=>e('label',{class:'checklist-view-row',key:item.id},e('input',{type:'checkbox',checked:item.done,disabled:busy,onChange:(ev:Event)=>void run(()=>updateViewing({checklist:viewing.checklist!.map(current=>current.id===item.id?{...current,done:(ev.target as HTMLInputElement).checked}:current)}))}),e('span',{class:item.done?'completed':''},item.text||'Пустой пункт')))),
+    Boolean(viewing.checklist?.length)&&e('section',{class:'checklist-view'},e('h2',null,'Чек-лист'),viewing.checklist!.map(item=>e('label',{class:'checklist-view-row',key:item.id},e('input',{type:'checkbox',checked:item.done,disabled:busy||readOnly,onChange:(ev:Event)=>void run(()=>updateViewing({checklist:viewing.checklist!.map(current=>current.id===item.id?{...current,done:(ev.target as HTMLInputElement).checked}:current)}))}),e('span',{class:item.done?'completed':''},item.text||'Пустой пункт')))),
     e(Attachments,{items:viewing.attachments??[]}),
+    e('section',{class:'reminder-card comments-card'},
+      e('div',{class:'section-heading'},e('h2',null,'Комментарии'),e('button',{disabled:busy||Boolean(current?.membershipRevoked),onClick:()=>void toggleComments()},commentsOpen?'Скрыть':comments.length?'Показать ('+comments.length+')':'Показать')),
+      commentsOpen&&e('div',null,
+        !comments.length&&e('p',{class:'muted'},'Комментариев пока нет.'),
+        comments.map(comment=>e('article',{class:'note-row',key:comment.id},
+          e('strong',null,comment.author.login+(comment.author.id===user.id?' · вы':'')),
+          e('small',null,new Date(comment.createdAt).toLocaleString('ru-RU')+(comment.updatedAt!==comment.createdAt?' · изменён':'')),
+          e('p',{class:'note-preview'},comment.text),
+          comment.author.id===user.id&&e('button',{disabled:busy,onClick:()=>{const next=prompt('Изменить комментарий',comment.text);if(next!==null&&next.trim()&&next!==comment.text)void run(async()=>{await updateComment(user,viewing.vault,viewing.object,comment.id,next);await refreshComments();});}},'Изменить'),
+          (comment.author.id===user.id||current?.role==='owner')&&e('button',{class:'menu-danger',disabled:busy,onClick:()=>{if(confirm('Удалить комментарий?'))void run(async()=>{await deleteComment(user,viewing.vault,comment.id);await refreshComments();});}},'Удалить'))),
+        !current?.membershipRevoked&&e('form',{onSubmit:(ev:Event)=>{ev.preventDefault();const text=commentText;setCommentText('');void run(async()=>{await createComment(user,viewing.vault,viewing.object,text);await refreshComments();setStatus('Комментарий отправлен.');});}},
+          e('label',null,'Новый комментарий',e('textarea',{rows:3,maxLength:4000,required:true,value:commentText,onInput:(ev:Event)=>setCommentText((ev.target as HTMLTextAreaElement).value)})),
+          e('button',{class:'primary',disabled:busy||!commentText.trim()},'Отправить')))),
     viewing.reminder&&e('section',{class:'reminder-card'},e('h2',null,'Напоминание'),
       e('p',null,new Date(viewing.reminder.local+'Z').toLocaleString('ru-RU',{timeZone:'UTC'}),' · ',
         viewing.reminder.state==='active'?'Активно':viewing.reminder.state==='done'?'Выполнено':'Выключено'),

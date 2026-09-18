@@ -58,15 +58,23 @@ export async function resetAccount(db, { id, password, expectedVersion, role = '
       .run(hash, now + TEMPORARY_MS, id, role, expectedVersion);
     if (!result.changes) fail('account_changed', 409);
     db.prepare('UPDATE sessions SET revoked=1 WHERE user_id=?').run(id);
+    // Admin reset intentionally leaves the E2EE collaboration identity untouched. The administrator
+    // cannot rewrap it because the collaboration root is unavailable server-side. A trusted device
+    // may later unlock the same identity via local PRF and rewrap it to the new password; otherwise
+    // the user must explicitly replace the collaboration identity and request regrant from vault owners.
     return accountRow(db.prepare('SELECT * FROM users WHERE id=?').get(id));
   });
 }
-export async function changePassword(db, access, { currentPassword, password, repeatPassword, revokeOthers }, clock = Date.now) {
+export async function changePassword(db, access, { currentPassword, password, repeatPassword, revokeOthers, collaborationRewrap }, clock = Date.now) {
   const user = requireUser(db, access, clock(), { allowTemporary: true });
   const previous = db.prepare('SELECT * FROM users WHERE id=?').get(user.id);
   if (!validPassword(password) || password !== repeatPassword) fail('invalid_new_password');
   if (!await verifyPassword(previous.password_hash, currentPassword)) fail('wrong_password');
   if (password === currentPassword) fail('same_password');
+  const identity = db.prepare('SELECT version FROM collaboration_identities WHERE user_id=?').get(user.id);
+  if (identity && !user.mustChangePassword && (!collaborationRewrap || collaborationRewrap.identityVersion !== identity.version)) fail('collaboration_rewrap_required', 409);
+  if (identity && collaborationRewrap && collaborationRewrap.identityVersion !== identity.version) fail('identity_changed', 409);
+  if (!identity && collaborationRewrap) fail('identity_changed', 409);
   const hash = await hashPassword(password);
   return transaction(db, () => {
     const now = clock();
@@ -75,6 +83,11 @@ export async function changePassword(db, access, { currentPassword, password, re
       credential_version=credential_version+1 WHERE id=? AND credential_version=?`)
       .run(hash, user.id, previous.credential_version);
     if (!result.changes) fail('account_changed', 409);
+    if (identity && collaborationRewrap) {
+      const rewrapped = db.prepare('UPDATE collaboration_identities SET password_wrapper=?,updated_at=? WHERE user_id=? AND version=?')
+        .run(JSON.stringify(collaborationRewrap.passwordWrapper), now, user.id, identity.version);
+      if (!rewrapped.changes) fail('identity_changed', 409);
+    }
     if (user.mustChangePassword || revokeOthers) db.prepare('UPDATE sessions SET revoked=1 WHERE user_id=?').run(user.id);
     else db.prepare('UPDATE sessions SET revoked=1 WHERE access_hash=?').run(digest(access));
     const pair = createSession(db, user.id, now);

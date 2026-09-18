@@ -2,7 +2,7 @@ import { randomBytes, randomUUID, createHash, createPublicKey, verify } from 'no
 import { requireUser, AccountError, fail } from '../auth/accounts.mjs';
 import { verifyPassword } from '../auth/password.mjs';
 const hash = token => createHash('sha256').update(token).digest('hex');
-export function registerVaultAccess(app, db, { own, action, post, obj, uuid, b64, sealed, guard, accessOf, clock }) {
+export function registerVaultAccess(app, db, { member, own, action, post, obj, uuid, b64, sealed, guard, accessOf, clock }) {
   const pub = obj({ kty: { const: 'EC' }, crv: { const: 'P-256' }, x: b64(43), y: b64(43) });
   post('access/setup', obj({ vaultId: uuid, pack: obj({ publicKey: pub, box: sealed }) }), (req, user) => {
     const row = own(user, req.body.vaultId);
@@ -13,16 +13,16 @@ export function registerVaultAccess(app, db, { own, action, post, obj, uuid, b64
     return { pack: JSON.parse(db.prepare('SELECT access_pack FROM vaults WHERE id=?').get(row.id).access_pack) };
   });
   post('access/challenge', obj({ vaultId: uuid, deviceId: uuid }), (req, user) => {
-    const row=own(user,req.body.vaultId); if(!row.access_pack)fail('access_not_ready',409);
+    const row=member(user,req.body.vaultId); if(!row.access_pack)fail('access_not_ready',409);
     db.prepare('DELETE FROM vault_challenges WHERE expires<=?').run(clock());
     if(db.prepare('SELECT count(*) n FROM vault_challenges WHERE vault_id=?').get(row.id).n>=100)fail('rate_limited',429);
     const id=randomUUID(), nonce=randomBytes(32).toString('base64url');
-    db.prepare('INSERT INTO vault_challenges VALUES(?,?,?,?,?,?)').run(id,row.id,req.body.deviceId,row.lock_epoch,nonce,clock()+60000);
+    db.prepare('INSERT INTO vault_challenges(id,vault_id,device_id,epoch,nonce,expires,user_id) VALUES(?,?,?,?,?,?,?)').run(id,row.id,req.body.deviceId,row.lock_epoch,nonce,clock()+60000,user.id);
     return { challenge: ['tasks-vault-access',1,user.id,row.id,row.lock_epoch,req.body.deviceId,id,nonce] };
   });
   post('access/grant', obj({ vaultId:uuid, deviceId:uuid, challengeId:uuid, signature:b64(86) }), (req,user)=>{
-    const row=own(user,req.body.vaultId), c=db.prepare('SELECT * FROM vault_challenges WHERE id=?').get(req.body.challengeId);
-    if(!c||c.vault_id!==row.id||c.device_id!==req.body.deviceId||c.epoch!==row.lock_epoch||c.expires<=clock())fail('invalid_challenge',403);
+    const row=member(user,req.body.vaultId), c=db.prepare('SELECT * FROM vault_challenges WHERE id=?').get(req.body.challengeId);
+    if(!c||c.vault_id!==row.id||c.user_id!==user.id||c.device_id!==req.body.deviceId||c.epoch!==row.lock_epoch||c.expires<=clock())fail('invalid_challenge',403);
     const message=JSON.stringify(['tasks-vault-access',1,user.id,row.id,row.lock_epoch,c.device_id,c.id,c.nonce]);
     const signature=Buffer.from(req.body.signature,'base64url');
     let valid=false;
@@ -31,8 +31,8 @@ export function registerVaultAccess(app, db, { own, action, post, obj, uuid, b64
     if(!valid)fail('invalid_proof',403);
     const token=randomBytes(32).toString('base64url');
     db.prepare('DELETE FROM vault_challenges WHERE id=?').run(c.id);
-    db.prepare('DELETE FROM vault_grants WHERE vault_id=? AND device_id=?').run(row.id,c.device_id);
-    db.prepare('INSERT INTO vault_grants VALUES(?,?,?,?)').run(hash(token),row.id,c.device_id,row.lock_epoch);
+    db.prepare('DELETE FROM vault_grants WHERE vault_id=? AND device_id=? AND user_id=?').run(row.id,c.device_id,user.id);
+    db.prepare('INSERT INTO vault_grants(token_hash,vault_id,device_id,epoch,user_id) VALUES(?,?,?,?,?)').run(hash(token),row.id,c.device_id,row.lock_epoch,user.id);
     return {token,epoch:row.lock_epoch};
   });
   const counters=new Map();let inFlight=0;
@@ -69,6 +69,7 @@ export function registerVaultAccess(app, db, { own, action, post, obj, uuid, b64
     let grants;try{const text=req.headers['x-vault-grants'];if(typeof text!=='string'||text.length>1024)throw Error();grants=JSON.parse(text);}catch{fail('vault_locked',423);}
     const token=grants?.[row.id];
     if(typeof token!=='string'||! /^[A-Za-z0-9_-]{43}$/.test(token))fail('vault_locked',423);
-    if(!db.prepare('SELECT 1 FROM vault_grants WHERE token_hash=? AND vault_id=? AND epoch=? AND device_id=?').get(hash(token),row.id,row.lock_epoch,req.headers['x-tasks-device']??''))fail('vault_locked',423);
+    const actor=requireUser(db,accessOf(req),clock());
+    if(!db.prepare('SELECT 1 FROM vault_grants WHERE token_hash=? AND vault_id=? AND epoch=? AND device_id=? AND user_id=?').get(hash(token),row.id,row.lock_epoch,req.headers['x-tasks-device']??'',actor.id))fail('vault_locked',423);
   };
 }

@@ -14,6 +14,7 @@ import { createBackup } from '../server/cli/backup.mjs';
 import { prepareRestore } from '../server/cli/restore.mjs';
 import { generatePassword, hiddenPassword } from '../server/cli/user.mjs';
 import { validPassword } from '../server/auth/password.mjs';
+import { stripSchema13 } from './schema-helpers.mjs';
 
 const admin = { login: 'AdminTest', password: 'Admin9Example' };
 const temporary = 'Temporary9Example', permanent = 'Permanent8Example';
@@ -158,11 +159,12 @@ test('schema 2 backup migrates to current schema preserving admin, installation 
   const owner = f.db.prepare("SELECT * FROM users WHERE role='admin'").get();
   const pair = createSession(f.db, owner.id, f.now());
   const before = f.db.prepare('SELECT * FROM installation').get();
+  stripSchema13(f.db);
   f.db.exec('DROP TABLE webauthn_challenges; DROP TABLE webauthn_credentials; DROP TABLE note_lifecycle; DROP TRIGGER reminder_record_changed; DROP TRIGGER reminder_vault_deleted; DROP TABLE reminder_occurrences; DROP TABLE reminder_deliveries; DROP TABLE reminders; DROP TABLE reminder_settings; DROP INDEX records_object; DROP TRIGGER push_revoke_session; DROP TABLE push_tests; DROP TABLE push_subscriptions; DROP TABLE push_test_limits; DROP TABLE push_config; DROP TABLE vault_grants; DROP TABLE vault_challenges; DROP TABLE vault_closures; DROP TABLE records; DROP TABLE vaults; ALTER TABLE users DROP COLUMN must_change_password; ALTER TABLE users DROP COLUMN temporary_expires; ALTER TABLE users DROP COLUMN credential_version; PRAGMA user_version=2;');
   const source = join(f.dir, 'tasks.sqlite'), backup = join(f.dir, 'schema2.sqlite');
   assert.equal((await createBackup(source, backup)).schemaVersion, 2);
   migrate(f.db);
-  assert.equal(f.db.prepare('PRAGMA user_version').get().user_version, 12);
+  assert.equal(f.db.prepare('PRAGMA user_version').get().user_version, 13);
   assert.deepEqual(f.db.prepare('SELECT * FROM installation').get(), before);
   assert.equal(currentUser(f.db, pair.access, f.now()).mustChangePassword, false);
   assert.equal(f.db.prepare('SELECT password_hash FROM users WHERE id=?').get(owner.id).password_hash, owner.password_hash);

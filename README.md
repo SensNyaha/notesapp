@@ -2,7 +2,7 @@
 
 Локально развёртываемая PWA для заметок, напоминаний и планирования со сквозным шифрованием содержимого.
 
-Текущая рабочая версия: **0.15.0**, SQLite schema **12**. Сервер и PWA слушают порт **3100**. Полная карта документации находится в [`docs/README.md`](docs/README.md), фактическое покрытие функций — в [`docs/IMPLEMENTATION_STATUS.md`](docs/IMPLEMENTATION_STATUS.md), дальнейший порядок разработки — в [`TODO.md`](TODO.md).
+Текущая рабочая версия: **0.16.0**, SQLite schema **13**. Сервер и PWA слушают порт **3100**. Полная карта документации находится в [`docs/README.md`](docs/README.md), фактическое покрытие функций — в [`docs/IMPLEMENTATION_STATUS.md`](docs/IMPLEMENTATION_STATUS.md), дальнейший порядок разработки — в [`TODO.md`](TODO.md).
 
 ## Что работает
 
@@ -25,6 +25,10 @@
 - архив, корзина на 30 дней, окончательное удаление и история версий;
 - экспорт любой заметки в ZIP с `note.md`, manifest и вложениями; импорт Tasks ZIP и обычного Markdown;
 - переносимый зашифрованный backup одного E2EE-хранилища с восстановлением только в новый vault и отдельным паролем backup; portable v1 ограничен 64 МиБ незашифрованного содержимого;
+- контакты по точному логину, подтверждение запросов и локальный TOFU-контроль fingerprint E2EE-идентичности;
+- совместные E2EE-хранилища с ролями владелец / редактор / просмотр, выдачей member envelopes и ротацией keyring epoch при отзыве участника;
+- зашифрованные комментарии к заметкам; viewer может комментировать и экспортировать, но не менять содержимое; permanent purge shared-заметки доступен владельцу;
+- персональные напоминания в shared vault шифруются account-wide collaboration key и не становятся общими для участников;
 - открытые названия закрытых хранилищ и диагностика свободного места для администратора;
 - транзакционные миграции, WAL-aware backup/restore и автоматические проверки.
 Архив, корзина, история и расширенные повторяющиеся напоминания реализованы, но их реальные сценарии на установленной PWA ещё отмечены как требующие пользовательской приёмки.
@@ -96,7 +100,7 @@ docker compose restart app
 docker compose stop app
 ```
 
-Ожидаемый health текущей версии содержит `status: ok`, `version: 0.15.0`, `database: ok`, постоянный `installationId`, `bootCount` и время сервера.
+Ожидаемый health текущей версии содержит `status: ok`, `version: 0.16.0`, `database: ok`, постоянный `installationId`, `bootCount` и время сервера.
 
 ## Запуск без Docker
 
@@ -117,7 +121,7 @@ npm run build
 npm run check
 ```
 
-`npm run build` уже включает typecheck, Vite production build и создание Service Worker. На версии **0.15.0** набор содержит **86 тестов**. Они проверяют сервер, миграции, password/Passkey authentication, сессии, WebAuthn, PRF/auto-lock, portable backup encryption/validation/restore, ZIP/Markdown import/export, duplicate policy, удаление vault, шифрование, синхронизацию, поиск, напоминания, push и PWA shell.
+`npm run build` уже включает typecheck, Vite production build и создание Service Worker. На версии **0.16.0** набор содержит **95 тестов**. Они проверяют сервер, миграции, password/Passkey authentication, сессии, WebAuthn, PRF/auto-lock, portable backup encryption/validation/restore, ZIP/Markdown import/export, contacts/shared-vault API, collaboration crypto/key rotation, E2EE comments, TOFU fingerprint, отзыв участника с encrypted stash, удаление vault, синхронизацию, поиск, напоминания, push и PWA shell.
 
 Автоматические проверки не заменяют проверку установленной PWA, Safari, реальной доставки push и адаптивных экранов. Тестовый push при закрытой PWA ранее подтверждён пользователем на iOS 26.6.1.
 
@@ -162,7 +166,7 @@ docker compose exec -T app node server/cli/restore.mjs /data/tasks-backup.sqlite
 
 Команда восстановления не перезаписывает существующий каталог. Переключение `DATA_DIR` и откат версии выполняются только после проверки совместимости schema. Git сам по себе не восстанавливает SQLite, WAL, IndexedDB или Docker volume.
 
-Проверенные контрольные снимки перед миграциями хранятся в игнорируемой папке `backups/`: перед schema 10 — `before-stage13-schema10-20260914.sqlite` (SHA-256 `6CAF1A76AB5E127C3CC581BCEA2F511CD4882D95B3139328EF96954193A8468C`), перед schema 11 — `before-stage14b-schema11-20260917.sqlite` (SHA-256 `97B156375076D710B047E69ADE68B9E460DC2FE3294E14692FB9689BEF541F1D`), перед schema 12 / версией 0.15.0 — `before-stage14c-schema12-20260917.sqlite` (SHA-256 `92153DF4FCB669BD0D4EA161B94C0C8F7E69BDE6C5CEE7DC1C5163C250F8B91F`).
+Проверенные контрольные снимки перед миграциями хранятся в игнорируемой папке `backups/`: перед schema 10 — `before-stage13-schema10-20260914.sqlite` (SHA-256 `6CAF1A76AB5E127C3CC581BCEA2F511CD4882D95B3139328EF96954193A8468C`), перед schema 11 — `before-stage14b-schema11-20260917.sqlite` (SHA-256 `97B156375076D710B047E69ADE68B9E460DC2FE3294E14692FB9689BEF541F1D`), перед schema 12 — `before-stage14c-schema12-20260917.sqlite` (SHA-256 `92153DF4FCB669BD0D4EA161B94C0C8F7E69BDE6C5CEE7DC1C5163C250F8B91F`), перед schema 13 / версией 0.16.0 — `before-stage16-schema13-20260918.sqlite` (SHA-256 `0D5A8D6D3834DA2DFFD34F4EC61B8772067E88F1EEDF3D8A5E5FAA1BE442C50C`).
 
 ## Команды администратора
 
@@ -187,7 +191,9 @@ docker compose exec app npm run admin:recover -- adminlogin --generate
 - Изменяющие запросы защищены exact-origin, JSON и CSRF-токеном.
 - Фраза, root key хранилища и WebAuthn PRF output не отправляются серверу.
 - Сервер хранит непрозрачные зашифрованные ревизии. Открытыми являются необходимые ID, расписание доставки, явно разрешённый push-текст, название хранилища и lifecycle корзины.
-- Сброс пароля аккаунта не расшифровывает хранилища.
+- Для shared vault сервер видит membership/role, keyring version/epoch, публичные collaboration identities и зашифрованные member envelopes/comments; vault keys, collaboration private key и текст комментариев сервер не получает.
+- Удаление участника ротирует keyring для будущих записей и отзывает серверный доступ, но не может стереть уже полученную офлайн-копию на чужом устройстве.
+- Сброс пароля аккаунта не расшифровывает хранилища и не уничтожает collaboration identity; доверенное устройство может перепривязать тот же E2EE-ключ к новому паролю.
 - Потерянную фразу нельзя восстановить на сервере. Перенос возможен только с устройства, где ключ ещё доступен.
 - Поиск выполняется на клиенте по расшифрованным данным открытых хранилищ.
 - Окончательно удалённый объект получает постоянный tombstone, чтобы старое офлайн-устройство не воскресило его.

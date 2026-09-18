@@ -11,12 +11,14 @@ import { Planner } from './components/Planner';
 import { Notifications } from './components/Notifications';
 import { ServerStorage } from './components/ServerStorage';
 import { DataTransfer } from './components/DataTransfer';
+import { CollaborationScreen } from './components/Collaboration';
 import { detachPush, browserUnsubscribe } from './push';
 import { profiles, profileActivity, readState, eraseState, exclusive, announce, changes } from './storage';
 import { flushDraft, hasUnsaved, synchronize, requireOutboxReview, OutboxReviewRequired, lockAfterBackground } from './planner';
 import { session, signOut, authMessage, AuthError } from './auth';
 import type { User } from './types/auth';
 import { updateReminderZone, type ReminderTarget } from './reminders';
+import { clearCollaborationLocalRuntime } from './collaboration.ts';
 
 const e = h;
 
@@ -47,7 +49,7 @@ function DefinitionList({ rows }: { rows: DefinitionRow[] }) {
 function App() {
   const [user, setUser] = useState<User | null>(null);
   const userRef = useRef<User | null>(null); userRef.current = user;
-  const [page, setPage] = useState<'home' | 'password' | 'users' | 'devices' | 'passkeys' | 'diagnostics' | 'notifications' | 'data'>('home');
+  const [page, setPage] = useState<'home' | 'password' | 'users' | 'devices' | 'passkeys' | 'diagnostics' | 'notifications' | 'data' | 'collaboration'>('home');
   const [localProfiles, setLocalProfiles] = useState<User[]>([]);
   const localMode = useRef(false);
   const [notice, setNotice] = useState('');
@@ -144,7 +146,7 @@ function App() {
         if (s && hasUnsaved(s) && !confirm('Есть заметки или стеш, не сохранённые на сервере. Выйти и удалить их вместе с ключами с этого устройства?')) return false;
         await signOut();
         await browserUnsubscribe().catch(() => {}); // Server session revocation already cancels its subscriptions.
-        if (user) { await eraseState(user.id); announce('logout:' + user.id); }
+        if (user) { clearCollaborationLocalRuntime(user.id);await eraseState(user.id); announce('logout:' + user.id); }
         return true;
       });
       if (!completed) return;
@@ -275,14 +277,16 @@ function App() {
       e('button', { onClick: () => void flushDraft().then(() => setPage('notifications')).catch(() => setAuthError('Сохраните черновик')) }, 'Уведомления'),
       e('button', { onClick: () => void flushDraft().then(() => setPage('devices')).catch(() => setAuthError('Сохраните черновик')) }, 'Устройства'),
       e('button', { onClick: () => void flushDraft().then(() => setPage('passkeys')).catch(() => setAuthError('Сохраните черновик')) }, 'Ключи доступа'),
+      e('button', { onClick: () => void flushDraft().then(() => setPage('collaboration')).catch(() => setAuthError('Сохраните черновик')) }, 'Контакты и совместная работа'),
       e('button', { onClick: () => void flushDraft().then(() => setPage('data')).catch(() => setAuthError('Сохраните черновик')) }, 'Данные'),
       e('button', { onClick: () => void flushDraft().then(() => setPage('password')).catch(() => setAuthError('Сохраните черновик')) }, 'Изменить пароль'),
       user.role === 'admin' && e('button', { onClick: () => void flushDraft().then(() => setPage('users')).catch(() => setAuthError('Сохраните черновик')) }, 'Пользователи'),
-      e('button', { onClick: () => void flushDraft().then(detachPush).then(() => { setUser(null); void profiles().then(setLocalProfiles); }).catch(error => setAuthError(error instanceof Error?error.message:'Сохраните черновик и проверьте сеть')) }, 'Войти снова / другой аккаунт')),
+      e('button', { onClick: () => void flushDraft().then(detachPush).then(() => { clearCollaborationLocalRuntime(user.id);setUser(null); void profiles().then(setLocalProfiles); }).catch(error => setAuthError(error instanceof Error?error.message:'Сохраните черновик и проверьте сеть')) }, 'Войти снова / другой аккаунт')),
     reminderTarget&&reminderTarget.accountId!==user.id&&e('p',{class:'auth-notice',role:'status'},'Уведомление относится к другому аккаунту. Войдите в нужный аккаунт, чтобы открыть заметку.'),
     page === 'home' && e(Planner, { user, key: user.id, reminderTarget, onReminderHandled:()=>setReminderTarget(undefined),
       onSyncState:(next:'syncing'|'online'|'offline'|'auth'|'error'|'idle')=>{setSyncing(next==='syncing');if(next!=='syncing'&&next!=='idle')setConnection(next);} }),
     page === 'notifications' && e(Notifications, { user, key: user.id }),
+    page === 'collaboration' && e(CollaborationScreen,{user,key:user.id,onBack:()=>setPage('home')}),
     page === 'data' && e(DataTransfer, { user, key: user.id }),
     updateNotice,
     page === 'diagnostics' && e('div', null,

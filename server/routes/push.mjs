@@ -86,7 +86,37 @@ export function registerPush(app, db, { guard, accessOf, clock, config, send = (
     db.prepare('DELETE FROM push_tests WHERE expires_at<?').run(now-7*86400000);
     db.prepare("UPDATE push_tests SET status='unknown' WHERE status='sending' AND lease_until<=?").run(now);
     db.prepare("UPDATE push_tests SET status='expired' WHERE status='scheduled' AND expires_at<=?").run(now);
+    db.prepare("UPDATE collaboration_deliveries SET status='unknown' WHERE status='sending' AND lease_until<=?").run(now);
+    db.prepare("UPDATE collaboration_deliveries SET status='expired' WHERE status='scheduled' AND expires_at<=?").run(now);
+    db.prepare('DELETE FROM collaboration_deliveries WHERE expires_at<?').run(now-7*86400000);
     await runReminders();
+    for(let i=0;i<8&&!stopping;i++){
+      let job;
+      db.exec('BEGIN IMMEDIATE');
+      try{
+        job=db.prepare(`SELECT d.*,p.endpoint,p.p256dh,p.auth FROM collaboration_deliveries d
+          JOIN push_subscriptions p ON p.id=d.subscription_id JOIN sessions s ON s.id=p.session_id
+          WHERE d.status='scheduled' AND d.due_at<=? AND d.expires_at>? AND s.revoked=0 AND s.refresh_expires>? AND s.absolute_expires>?
+          ORDER BY d.due_at LIMIT 1`).get(clock(),clock(),clock(),clock());
+        if(job)db.prepare("UPDATE collaboration_deliveries SET status='sending',attempts=attempts+1,lease_until=? WHERE id=?").run(clock()+30000,job.id);
+        db.exec('COMMIT');
+      }catch(error){db.exec('ROLLBACK');throw error;}
+      if(!job)break;
+      try{
+        const k=keys();if(!validEndpoint(job.endpoint))throw Object.assign(Error(),{statusCode:400});
+        const payload={type:'tasks-collaboration',id:job.id,accountId:job.user_id,eventType:job.event_type,
+          ...(job.vault_id?{vaultId:job.vault_id}:{}),...(job.object_id?{objectId:job.object_id}:{})};
+        await send({endpoint:job.endpoint,keys:{p256dh:job.p256dh,auth:job.auth}},JSON.stringify(payload),
+          {vapidDetails:{subject:config.origin,publicKey:k.public_key,privateKey:k.private_key},TTL:Math.max(1,Math.floor((job.expires_at-clock())/1000)),
+            timeout:5000,urgency:'normal',topic:job.id.replaceAll('-','')});
+        db.prepare("UPDATE collaboration_deliveries SET status='accepted' WHERE id=? AND status='sending'").run(job.id);
+      }catch(error){
+        if(error.statusCode===404||error.statusCode===410){db.prepare('DELETE FROM push_subscriptions WHERE id=?').run(job.subscription_id);continue;}
+        const retry=(error.statusCode===429||error.statusCode>=500)&&job.attempts<3&&clock()+5000<job.expires_at;
+        db.prepare("UPDATE collaboration_deliveries SET status=?,due_at=? WHERE id=? AND status='sending'")
+          .run(retry?'scheduled':error.statusCode?'failed':'unknown',clock()+(job.attempts?15000:5000),job.id);
+      }
+    }
     for(let i=0;i<4&&!stopping;i++){
       let job;
       db.exec('BEGIN IMMEDIATE');

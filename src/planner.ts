@@ -5,6 +5,8 @@ import { readState, writeState, exclusive, announce, setRuntimeVaultKey, clearRu
 import { session, accountRequest, listPasskeys } from './auth.ts';
 import { createSystemUnlockWrapper, generatePrfSalt, unlockSystemWrapper, updateSystemUnlockAutoLock, type AutoLockMs } from './crypto/system-unlock.ts';
 import { evaluateVaultPrf, webAuthnPrfPossible } from './webauthn-prf.ts';
+import { clearVaultEpochKeys, getCollaborationRuntime, getVaultEpochKey, setVaultEpochKey } from './crypto/collaboration.ts';
+import { initializeSharedVault, personalReminder, setPersonalReminderLocal, syncPersonalReminderConfigs, unlockMemberVault } from './collaboration.ts';
 import type { User } from './types/auth';
 import { createAccess, signAccess } from './crypto/access.ts';
 import { validPlan } from '../shared/reminders.mjs';
@@ -42,6 +44,16 @@ export const DEFAULT_TAGS:ReadonlyArray<TagDefinition>=Object.freeze([
 ].map(([tagId,name,color])=>Object.freeze({id:tagId,name,color,deleted:false,op:'000000000000-default'})));
 export const context = (user: string, v: Header, objectId: string, revisionId: string): Context =>
   ({ accountId: user, vaultId: v.id, keyId: v.keyId, objectId, revisionId });
+const cryptoAccount=(user:string,v:Pick<Vault,'ownerId'>)=>v.ownerId??user;
+const vaultContext=(user:string,v:Vault,objectId:string,revisionId:string)=>context(cryptoAccount(user,v),v.header,objectId,revisionId);
+function revisionKey(user:string,v:Vault,r:Pick<Revision,'keyEpoch'>){
+  const epoch=r.keyEpoch??0,key=epoch===0?(v.key??getVaultEpochKey(user,v.header.id,0)):getVaultEpochKey(user,v.header.id,epoch);
+  if(!key)throw Error('Ключ этой версии хранилища недоступен.');return key;
+}
+function writeKey(user:string,v:Vault){
+  const epoch=v.keyring?.currentEpoch??0,key=epoch===0?(v.key??getVaultEpochKey(user,v.header.id,0)):getVaultEpochKey(user,v.header.id,epoch);
+  if(!key)throw Error('Актуальный ключ совместного хранилища недоступен.');return{key,epoch};
+}
 function validAttachment(item:unknown):item is NoteAttachment{
   return Boolean(item&&typeof item==='object'&&'id'in item&&typeof item.id==='string'
     &&'name'in item&&typeof item.name==='string'&&item.name.length<=200&&'type'in item&&typeof item.type==='string'&&item.type.length<=100
@@ -81,17 +93,17 @@ function note(value: unknown): Note {
     ?{author:author as {name:string;time:number}}:{}),...(importSource?{importSource:importSource as Note['importSource']}:{}) };
 }
 export async function readNote(user: string, v: Vault, r: Revision): Promise<Note> {
-  if (!v.key) throw Error('Откройте хранилище');
-  const value=await unseal(v.key, context(user, v.header, r.objectId, r.id), r.parent, r.sealed) as Note&{resolves?:string[]};
+  const value=await unseal(revisionKey(user,v,r),vaultContext(user,v,r.objectId,r.id),r.parent,r.sealed) as Note&{resolves?:string[]};
   if(JSON.stringify(value.resolves??[])!==JSON.stringify(r.resolves??[]))throw Error('Повреждена связь конфликтующих версий');
-  return note(value);
+  const normalized=note(value);
+  if(v.shared){const{reminder:_,...contents}=normalized,personal=personalReminder(user,v.header.id,r.objectId);return{...contents,...(personal?{reminder:personal}:{})};}
+  return normalized;
 }
 function validTag(value:unknown):value is TagDefinition{return Boolean(value&&typeof value==='object'&&'id'in value&&typeof value.id==='string'&&value.id.length<=100
   &&'name'in value&&typeof value.name==='string'&&value.name.trim()&&value.name.length<=60&&'color'in value&&typeof value.color==='string'&&/^#[0-9A-Fa-f]{6}$/.test(value.color)
   &&'deleted'in value&&typeof value.deleted==='boolean'&&'op'in value&&typeof value.op==='string'&&value.op.length<=100);}
 async function readCatalogRevision(user:string,v:Vault,r:Revision):Promise<TagCatalog|null>{
-  if(!v.key)throw Error('Откройте хранилище');
-  const value=await unseal(v.key,context(user,v.header,r.objectId,r.id),r.parent,r.sealed) as Partial<TagCatalog>&{resolves?:string[]};
+  const value=await unseal(revisionKey(user,v,r),vaultContext(user,v,r.objectId,r.id),r.parent,r.sealed) as Partial<TagCatalog>&{resolves?:string[]};
   if(JSON.stringify(value.resolves??[])!==JSON.stringify(r.resolves??[]))throw Error('Повреждена связь версий каталога тегов');
   // A previous PWA may save the compatibility note. Its parent still keeps the real catalog recoverable.
   if(value.kind!=='tag-catalog'){
@@ -115,7 +127,7 @@ export async function readTags(user:string,v:Vault):Promise<TagDefinition[]>{ret
 export async function readVaultPushMode(user:string,v:Vault):Promise<VaultPushMode>{return(await readCatalog(user,v)).push.mode;}
 export async function vaultName(user: string, v: Vault) {
   if (!v.key) return v.displayName ? v.displayName+' (закрыто)' : 'Название ещё не синхронизировано (закрыто) · ' + v.header.id.slice(0, 8);
-  const result = await unseal(v.key, context(user, v.header, v.header.id, v.header.revisionId), null, v.header.name);
+  const result = await unseal(v.key, vaultContext(user,v,v.header.id,v.header.revisionId), null, v.header.name);
   if (typeof result !== 'string') throw Error('Повреждённое имя хранилища'); return result;
 }
 export async function edit<T>(user: User, fn: (s: State) => Promise<T>): Promise<T> {
@@ -144,9 +156,28 @@ async function makeVault(user: string, name: string, phrase: string): Promise<Va
 export const createVault = (user: User, name: string, phrase: string) => edit(user, async s => {
   const v = await makeVault(user.id, name, phrase); s.vaults.push(v); return v.header.id;
 });
+export async function enableVaultSharing(user:User,vid:string,phrase:string){
+  if(!getCollaborationRuntime(user.id))throw Error('Сначала откройте ключ совместной работы паролем аккаунта.');
+  const state=await readState(user.id),source=state?.vaults.find(v=>v.header.id===vid);
+  if(!source||source.deleted||!source.key)throw Error('Сначала откройте хранилище.');
+  if(source.role&&source.role!=='owner')throw Error('Только владелец может включить совместный доступ.');
+  if(source.shared)return source.keyring;
+  const reminders:{objectId:string;revisionId:string;plan:ReminderPlan}[]=[];
+  for(const revision of heads(source)){const value=await readNote(user.id,source,revision);if(value.reminder)reminders.push({objectId:revision.objectId,revisionId:revision.id,plan:value.reminder});}
+  for(const item of reminders)await setPersonalReminderLocal(user,vid,item.objectId,item.plan);
+  if(reminders.length)await edit(user,async s=>{
+    const v=vault(s,vid);for(const item of reminders){
+      const current=heads(v).find(r=>r.objectId===item.objectId);if(!current||current.id!==item.revisionId)throw Error('Заметка изменилась. Повторите включение совместного доступа.');
+      const value=await readNote(user.id,v,current),{reminder:_,...contents}=value;
+      await addRevision(user.id,v,item.objectId,current.id,{...contents,author:{name:s.deviceName??'Устройство',time:Date.now()}});
+    }
+  });
+  return initializeSharedVault(user,vid,phrase);
+}
 export const openVault = (user: User, vid: string, phrase: string) => edit(user, async s => {
   const v = vault(s, vid, false);
-  try { v.key = await rememberKey(await unwrapWithPhrase(context(user.id, v.header, v.header.keyId, v.header.revisionId), phrase, v.header.wrapper));
+  if(v.role&&v.role!=='owner')throw Error('Участники открывают совместное хранилище через ключ совместной работы, а не фразу владельца.');
+  try { v.key = await rememberKey(await unwrapWithPhrase(vaultContext(user.id,v,v.header.keyId,v.header.revisionId), phrase, v.header.wrapper));
     v.displayName=await vaultName(user.id, v);
   } catch { delete v.key; throw Error('Неверная фраза или повреждённые данные.'); }
   if (v.deleted) await stashDeleted(s, v);
@@ -155,21 +186,22 @@ export const openVault = (user: User, vid: string, phrase: string) => edit(user,
 export const closeVault = (user: User, vid: string) => edit(user, async s => {
   const v = vault(s, vid); if (v.transfer) throw Error('Сначала завершите перенос');
   if (v.deleted) await stashDeleted(s, v);
-  clearRuntimeVaultKey(user.id,vid);delete v.key;delete v.systemUnlock;delete v.grant;v.needsGrant=false;
+  clearRuntimeVaultKey(user.id,vid);if(v.shared)clearVaultEpochKeys(user.id,vid);delete v.key;delete v.systemUnlock;delete v.grant;v.needsGrant=false;
 });
 export const lockVault = (user:User,vid:string) => edit(user,async s=>{
   const v=vault(s,vid,false);if(!v.systemUnlock)throw Error('Системная разблокировка не включена');
-  clearRuntimeVaultKey(user.id,vid);delete v.key;
+  clearRuntimeVaultKey(user.id,vid);if(v.shared)clearVaultEpochKeys(user.id,vid);delete v.key;
 });
 export const forgetSystemUnlock = (user:User,vid:string) => edit(user,async s=>{
   const v=vault(s,vid,false);if(!v.systemUnlock)return;
-  clearRuntimeVaultKey(user.id,vid);delete v.key;delete v.systemUnlock;
+  clearRuntimeVaultKey(user.id,vid);if(v.shared)clearVaultEpochKeys(user.id,vid);delete v.key;delete v.systemUnlock;
 });
 const systemContext=(userId:string,v:Vault)=>({accountId:userId,vaultId:v.header.id,keyId:v.header.keyId});
 export async function enableSystemUnlock(user:User,vid:string,phrase:string,autoLockMs:AutoLockMs=900_000){
   phraseCheck(phrase);if(!webAuthnPrfPossible())throw Error('Системная WebAuthn-разблокировка недоступна в этом браузере.');
   const initial=await readState(user.id),v=initial?.vaults.find(v=>v.header.id===vid);if(!v||v.deleted)throw Error('Хранилище не найдено');
-  let root:CryptoKey;try{root=await unwrapWithPhrase(context(user.id,v.header,v.header.keyId,v.header.revisionId),phrase,v.header.wrapper);}
+  if(v.role&&v.role!=='owner')throw Error('Системная разблокировка phrase-wrapper доступна только владельцу.');
+  let root:CryptoKey;try{root=await unwrapWithPhrase(vaultContext(user.id,v,v.header.keyId,v.header.revisionId),phrase,v.header.wrapper);}
   catch{throw Error('Неверная фраза или повреждённые данные.');}
   const passkeys=await listPasskeys();if(!passkeys.length)throw Error('Сначала добавьте ключ доступа в настройках аккаунта.');
   const prfSalt=generatePrfSalt(),evaluation=await evaluateVaultPrf(passkeys,prfSalt);
@@ -198,10 +230,12 @@ export async function setSystemAutoLock(user:User,vid:string,value:AutoLockMs){
     await edit(user,async s=>{const current=vault(s,vid,false);if(JSON.stringify(current.systemUnlock)!==JSON.stringify(wrapper)||(current.epoch??0)!==(v.epoch??0))throw Error('Настройки хранилища изменились.');current.systemUnlock=updated;});
   }finally{evaluation.output.fill(0);}
 }
-async function addRevision(user: string, v: Vault, objectId: string, parent: string | null, value: Note) {
-  if (!v.key || v.deleted || v.transfer) throw Error('Хранилище недоступно для записи');
-  const rid = id(), r: Revision = { id: rid, objectId, parent, sealed: await seal(v.key, context(user, v.header, objectId, rid), parent, value), pending: true, reminderPending:true };
-  v.records.push(r); return r;
+async function addRevision(user:string,v:Vault,objectId:string,parent:string|null,value:Note){
+  if(v.deleted||v.transfer||v.membershipRevoked||v.role==='viewer')throw Error(v.membershipRevoked?'Доступ к совместному хранилищу отозван. Локальная копия доступна только для чтения.':v.role==='viewer'?'Хранилище доступно только для просмотра.':'Хранилище недоступно для записи');
+  const {key,epoch}=writeKey(user,v),rid=id(),stored=v.shared?((({reminder:_,...contents})=>contents)(value)):value,r:Revision={id:rid,objectId,parent,
+    sealed:await seal(key,vaultContext(user,v,objectId,rid),parent,stored),pending:true,reminderPending:true,
+    ...(v.shared?{keyEpoch:epoch}:{})};
+  v.records.push(r);return r;
 }
 function oneHead(v:Vault,objectId:string){
   const versions=heads(v).filter(r=>r.objectId===objectId);if(versions.length!==1)throw Error('Сначала разрешите конфликт версий заметки.');return versions[0];
@@ -256,11 +290,11 @@ export const restoreNoteVersion=(user:User,vid:string,objectId:string,revisionId
   await addRevision(user.id,v,objectId,current.id,{...contents,...(reminder?{reminder}:{}),lifecycle:present.lifecycle??{state:'active',changedAt:Date.now()},author:{name:s.deviceName??'Устройство',time:Date.now()}});
 });
 async function writeCatalog(user:string,v:Vault,tags:TagDefinition[],push:{mode:VaultPushMode;op:string}){
-  if(!v.key||v.deleted||v.transfer)throw Error('Хранилище недоступно для записи');
-  const versions=catalogHeads(v),parent=versions[0]?.id??null,resolves=versions.slice(1).map(r=>r.id),rid=id();
+  if(v.deleted||v.transfer||v.membershipRevoked||v.role==='viewer')throw Error(v.membershipRevoked?'Доступ к совместному хранилищу отозван. Локальная копия доступна только для чтения.':v.role==='viewer'?'Хранилище доступно только для просмотра.':'Хранилище недоступно для записи');
+  const versions=catalogHeads(v),parent=versions[0]?.id??null,resolves=versions.slice(1).map(r=>r.id),rid=id(),{key,epoch}=writeKey(user,v);
   const value={kind:'tag-catalog' as const,title:'Служебные данные тегов',text:'Обновите приложение, чтобы управлять тегами этого хранилища.',tags,push,...(resolves.length?{resolves}:{})};
-  v.records.push({id:rid,objectId:v.header.id,parent,...(resolves.length?{resolves}:{}),pending:true,
-    sealed:await seal(v.key,context(user,v.header,v.header.id,rid),parent,value)});
+  v.records.push({id:rid,objectId:v.header.id,parent,...(resolves.length?{resolves}:{}),pending:true,...(v.shared?{keyEpoch:epoch}:{}),
+    sealed:await seal(key,vaultContext(user,v,v.header.id,rid),parent,value)});
 }
 function nextTagOp(tags:TagDefinition[]){const generation=Math.max(0,...tags.map(tag=>Number.parseInt(tag.op.slice(0,12),10)||0))+1;return String(generation).padStart(12,'0')+'-'+id();}
 function nextCatalogOp(tags:TagDefinition[],push:{op:string}){const generation=Math.max(Number.parseInt(push.op.slice(0,12),10)||0,...tags.map(tag=>Number.parseInt(tag.op.slice(0,12),10)||0))+1;return String(generation).padStart(12,'0')+'-'+id();}
@@ -285,20 +319,30 @@ export const deleteTag=(user:User,vid:string,tagId:string)=>edit(user,async s=>{
   const v=vault(s,vid),tags=await readTags(user.id,v),tag=tags.find(item=>item.id===tagId&&!item.deleted);if(!tag)throw Error('Тег уже удалён');
   const op=nextTagOp(tags);await writeTags(user.id,v,tags.map(item=>item.id===tagId?{...item,deleted:true,op}:item));
 });
-export const saveNote = (user: User, vid: string, objectId: string, parent: string | null, value: Note, draftKey?: CryptoKey) => edit(user, async s => {
-  const v = vault(s, vid, false); if (v.deleted) {
-    await addStash(s, vid, value); return { id: parent ?? objectId, stashed: true };
-  }
-  // An already-open editor may finish encrypting its draft after another tab closed the vault.
-  // Never persist the temporary key again or put this draft into an independently accessible stash.
-  const writable = v.key ? v : { ...v, key: draftKey };
-  const r = await addRevision(user.id, writable, objectId, parent, {...value,author:{name:s.deviceName??'Устройство',time:Date.now()}}); return { id: r.id, stashed: false };
-});
-export const copyNote=(user:User,vid:string,revisionId:string)=>edit(user,async s=>{
-  const v=vault(s,vid),revision=heads(v).find(r=>r.id===revisionId);if(!revision)throw Error('Версия заметки изменилась');
-  const source=await readNote(user.id,v,revision),reminder=source.reminder?{...source.reminder,id:id(),state:'off' as const}:undefined,{author:_,lifecycle:__,...contents}=source;
-  const created=await addRevision(user.id,v,id(),null,{...contents,title:source.title?source.title+' — копия':'Копия заметки',pinned:false,reminder,author:{name:s.deviceName??'Устройство',time:Date.now()}});return created.id;
-});
+export async function saveNote(user:User,vid:string,objectId:string,parent:string|null,value:Note,draftKey?:CryptoKey){
+  const before=await readState(user.id),beforeVault=before?.vaults.find(v=>v.header.id===vid),shared=Boolean(beforeVault?.shared);
+  if(beforeVault?.membershipRevoked)throw Error('Доступ к совместному хранилищу отозван. Локальная копия доступна только для чтения.');
+  if(beforeVault?.role==='viewer')throw Error('Хранилище доступно только для просмотра.');
+  if(shared)await setPersonalReminderLocal(user,vid,objectId,value.reminder??null);
+  return edit(user,async s=>{
+    const v=vault(s,vid,false);if(v.deleted){await addStash(s,vid,value);return{id:parent??objectId,stashed:true};}
+    // An already-open editor may finish encrypting its draft after another tab closed the vault.
+    // Never persist the temporary key again or put this draft into an independently accessible stash.
+    const writable=v.key?v:{...v,key:draftKey};
+    const r=await addRevision(user.id,writable,objectId,parent,{...value,author:{name:s.deviceName??'Устройство',time:Date.now()}});
+    return{id:r.id,stashed:false};
+  });
+}
+export async function copyNote(user:User,vid:string,revisionId:string){
+  const result=await edit(user,async s=>{
+    const v=vault(s,vid),revision=heads(v).find(r=>r.id===revisionId);if(!revision)throw Error('Версия заметки изменилась');
+    const source=await readNote(user.id,v,revision),reminder=source.reminder?{...source.reminder,id:id(),state:'off' as const}:undefined,{author:_,lifecycle:__,...contents}=source,objectId=id();
+    const created=await addRevision(user.id,v,objectId,null,{...contents,title:source.title?source.title+' — копия':'Копия заметки',pinned:false,reminder,author:{name:s.deviceName??'Устройство',time:Date.now()}});
+    return{id:created.id,objectId,shared:Boolean(v.shared),reminder};
+  });
+  if(result.shared&&result.reminder)await setPersonalReminderLocal(user,vid,result.objectId,result.reminder);
+  return result.id;
+}
 function stashContext(s: State, sid: string): Context {
   return { accountId: s.user.id, vaultId: s.user.id, keyId: s.user.id, objectId: sid, revisionId: sid };
 }
@@ -314,6 +358,12 @@ async function stashDeleted(s: State, v: Vault) {
   if (!v.key) return;
   for (const r of heads(v).filter(r => r.pending)) await addStash(s, v.header.id, await readNote(s.user.id, v, r));
   v.records = []; delete v.key; delete v.transfer;
+}
+async function stashRevokedChanges(s:State,v:Vault){
+  if(!v.key)return;
+  for(const r of heads(v).filter(r=>r.pending&&r.objectId!==v.header.id))await addStash(s,v.header.id,await readNote(s.user.id,v,r));
+  v.records=v.records.filter(r=>!r.pending);
+  v.purgePending=[];
 }
 async function stashPurgedObject(s:State,v:Vault,objectId:string){
   if(!v.key){
@@ -343,9 +393,9 @@ export const resolveConflict=(user:User,vid:string,objectId:string,expected:stri
   const selected=versions.find(r=>r.id===chosen);if(!selected)throw Error('Выберите версию');
   const others=versions.filter(r=>r.id!==chosen),resolves=others.map(r=>r.id);
   const author={name:s.deviceName??'Устройство',time:Date.now()};
-  const rid=id(),value=await readNote(user.id,v,selected);
-  v.records.push({id:rid,objectId,parent:chosen,resolves,pending:true,reminderPending:true,
-    sealed:await seal(v.key!,context(user.id,v.header,objectId,rid),chosen,{...value,author,resolves})});
+  const rid=id(),value=await readNote(user.id,v,selected),{key,epoch}=writeKey(user.id,v);
+  v.records.push({id:rid,objectId,parent:chosen,resolves,pending:true,reminderPending:true,...(v.shared?{keyEpoch:epoch}:{}),
+    sealed:await seal(key,vaultContext(user.id,v,objectId,rid),chosen,{...value,author,resolves})});
   if(keepBoth)for(const r of others){const copy=await readNote(user.id,v,r),{lifecycle:_,author:__,...contents}=copy;
     await addRevision(user.id,v,id(),null,{...contents,...(copy.reminder?{reminder:{...copy.reminder,id:id(),state:'off' as const}}:{}),author});}
 });
@@ -495,9 +545,16 @@ async function vaultRequest(account: string, path: string, body?: unknown, crede
 async function commit(user:User,fn:(s:State)=>Promise<void>){
   await exclusive(async()=>{const s=await readState(user.id);if(!s)throw Error('Локальный аккаунт закрыт');await fn(s);await writeState(s);announce();});
 }
-const wire=(r:Revision)=>{const{pending:_,reminderPending:__,lifecyclePending:___,...value}=r;return value;};
-function lock(v:Vault,epoch?:number,accountId?:string){if(accountId)clearRuntimeVaultKey(accountId,v.header.id);delete v.key;delete v.grant;v.needsGrant=false;if(epoch!==undefined){if(v.systemUnlock&&v.systemUnlock.lockEpoch!==epoch)delete v.systemUnlock;v.epoch=epoch;}}
-const accessContext=(user:string,v:Vault)=>context(user,v.header,v.header.keyId,v.header.keyId);
+const wire=(r:Revision)=>{const{pending:_,reminderPending:__,lifecyclePending:___,authorUserId:____,createdAt:_____,...value}=r;return value;};
+function lock(v:Vault,epoch?:number,accountId?:string){if(accountId){clearRuntimeVaultKey(accountId,v.header.id);clearVaultEpochKeys(accountId,v.header.id);}delete v.key;delete v.grant;v.needsGrant=false;if(epoch!==undefined){if(v.systemUnlock&&v.systemUnlock.lockEpoch!==epoch)delete v.systemUnlock;v.epoch=epoch;}}
+function applyRemoteVaultMetadata(userId:string,v:Vault,item:any){
+  const previousVersion=v.keyring?.version??0,nextVersion=item.keyring?.version??0,role=item.role as Vault['role'];
+  if(role)v.role=role;if(typeof item.ownerId==='string')v.ownerId=item.ownerId;v.shared=Boolean(item.shared);delete v.membershipRevoked;
+  v.keyring=item.keyring?{version:item.keyring.version,currentEpoch:item.keyring.currentEpoch,...(item.keyring.ownerBox?{ownerBox:item.keyring.ownerBox}:{})}:undefined;
+  v.memberEnvelope=item.envelope?{keyringVersion:item.envelope.keyringVersion,identityVersion:item.envelope.identityVersion,keyEnvelope:item.envelope.keyEnvelope}:undefined;
+  if(v.role!=='owner'&&previousVersion>0&&nextVersion>0&&previousVersion!==nextVersion){clearVaultEpochKeys(userId,v.header.id);delete v.key;delete v.grant;v.needsGrant=true;}
+}
+const accessContext=(user:string,v:Vault)=>vaultContext(user,v,v.header.keyId,v.header.keyId);
 async function grantForOpenVault(user:User,vid:string){
   const actor=await session();if(actor?.id!==user.id)throw Error('Войдите в этот аккаунт');
   await commit(user,async s=>{s.deviceId??=id();});
@@ -525,7 +582,7 @@ export async function deleteVault(user:User,vid:string){
   if(!current.key)throw Error('Удалить можно только открытое на этом устройстве хранилище');
   if(current.transfer)throw Error('Сначала завершите перенос');
   if(current.pending){
-    clearRuntimeVaultKey(user.id,vid);await commit(user,async s=>{s.vaults=s.vaults.filter(v=>v.header.id!==vid);s.reminderSeen=(s.reminderSeen??[]).filter(item=>item.vaultId!==vid);if(s.lastVaultId===vid)delete s.lastVaultId;});return;
+    clearRuntimeVaultKey(user.id,vid);clearVaultEpochKeys(user.id,vid);await commit(user,async s=>{s.vaults=s.vaults.filter(v=>v.header.id!==vid);s.reminderSeen=(s.reminderSeen??[]).filter(item=>item.vaultId!==vid);if(s.lastVaultId===vid)delete s.lastVaultId;});return;
   }
   let grant=initial.deviceId&&current.grant?{deviceId:initial.deviceId,token:current.grant}:await grantForOpenVault(user,vid);
   try{await vaultRequest(user.id,'/delete',{vaultId:vid,confirmed:true},{deviceId:grant.deviceId,grants:{[vid]:grant.token}});}
@@ -534,7 +591,7 @@ export async function deleteVault(user:User,vid:string){
     grant=await grantForOpenVault(user,vid);
     await vaultRequest(user.id,'/delete',{vaultId:vid,confirmed:true},{deviceId:grant.deviceId,grants:{[vid]:grant.token}});
   }
-  clearRuntimeVaultKey(user.id,vid);
+  clearRuntimeVaultKey(user.id,vid);clearVaultEpochKeys(user.id,vid);
   await commit(user,async s=>{s.vaults=s.vaults.filter(v=>v.header.id!==vid);s.reminderSeen=(s.reminderSeen??[]).filter(item=>item.vaultId!==vid);if(s.lastVaultId===vid)delete s.lastVaultId;});
 }
 export async function closeAllVault(user:User,vid:string,password:string){
@@ -584,7 +641,7 @@ async function refreshOutboxReviewRemote(user:User){
   for(const local of state.vaults.filter(v=>affected.has(v.header.id))){
     const item=remote.vaults.find((row:any)=>row.id===local.header.id);if(!item)continue;
     await commit(user,async s=>{const v=vault(s,local.header.id,false);if(item.deleted){v.deleted=true;return;}if(JSON.stringify(v.header)!==JSON.stringify(item.header)){v.syncError='Заголовок хранилища изменён';return;}
-      const epoch=item.epoch??0;if(epoch>(v.epoch??0))lock(v,epoch,user.id);v.epoch=epoch;v.access=item.access??undefined;if(typeof item.displayName==='string')v.displayName=item.displayName;});
+      const epoch=item.epoch??0;if(epoch>(v.epoch??0))lock(v,epoch,user.id);v.epoch=epoch;v.access=item.access??undefined;applyRemoteVaultMetadata(user.id,v,item);if(typeof item.displayName==='string')v.displayName=item.displayName;});
     if(item.deleted)continue;let currentState=await readState(user.id),currentVault=currentState?.vaults.find(v=>v.header.id===local.header.id);if(!currentState||!currentVault||currentVault.syncError)continue;
     if((currentVault.epoch??0)>0&&!currentVault.grant&&currentVault.key&&currentVault.needsGrant&&currentVault.access){
       const challenge=await vaultRequest(user.id,'/access/challenge',{vaultId:currentVault.header.id,deviceId:currentState.deviceId},{deviceId:currentState.deviceId,grants:{}}),c=challenge.challenge;
@@ -594,7 +651,7 @@ async function refreshOutboxReviewRemote(user:User){
     }
     let after=0;try{for(;;){const current=await readState(user.id);if(!current)break;const v=current.vaults.find(v=>v.header.id===local.header.id);if(!v)break;
       const grants:Record<string,string>={};if(v.grant)grants[v.header.id]=v.grant;const page=await vaultRequest(user.id,'/'+v.header.id+'?after='+after,undefined,{deviceId:current.deviceId,grants});
-      if(!Array.isArray(page.records)||page.records.length>5)throw Error('Некорректный ответ сервера');await commit(user,async s=>{const target=vault(s,v.header.id,false);for(const r of page.records){const existing=target.records.find(x=>x.id===r.id);if(!existing)target.records.push(r);else if(JSON.stringify(wire(existing))!==JSON.stringify(r))throw Error('Версия заметки изменена на сервере');}});
+      if(!Array.isArray(page.records)||page.records.length>5)throw Error('Некорректный ответ сервера');await commit(user,async s=>{const target=vault(s,v.header.id,false);for(const r of page.records){const existing=target.records.find(x=>x.id===r.id);if(!existing)target.records.push(r);else{if(JSON.stringify(wire(existing))!==JSON.stringify(wire(r)))throw Error('Версия заметки изменена на сервере');existing.authorUserId=r.authorUserId;existing.createdAt=r.createdAt;}}});
       if(page.next===null)break;if(!Number.isSafeInteger(page.next)||page.next<=after)throw Error('Некорректная страница данных');after=page.next;}}
     catch(error){if(error instanceof APIError&&error.code==='vault_locked')await commit(user,async s=>lock(vault(s,local.header.id,false),undefined,user.id));else throw error;}
   }
@@ -645,11 +702,19 @@ export async function synchronize(user:User){
         const epoch=item.epoch??0;
         if(epoch<(v.epoch??0))throw Error('Сервер вернул устаревшую блокировку');
         if(epoch>(v.epoch??0))lock(v,epoch,user.id);
-        v.epoch=epoch;v.access=item.access??undefined;
+        v.epoch=epoch;v.access=item.access??undefined;applyRemoteVaultMetadata(user.id,v,item);
         if(v.closeOperation&&epoch>(v.closeBaseEpoch??0)){delete v.closeOperation;delete v.closeBaseEpoch;}
       });
     }
-    const ids=(await readState(user.id))?.vaults.filter(v=>!v.deleted).map(v=>v.header.id)??[];
+    const remoteIds=new Set(remote.vaults.map((item:any)=>item.id));
+    await commit(user,async s=>{for(const v of s.vaults){
+      if(v.shared&&v.role&&v.role!=='owner'&&!v.deleted&&!remoteIds.has(v.header.id)){
+        await stashRevokedChanges(s,v);
+        v.membershipRevoked=true;v.role='viewer';delete v.grant;v.needsGrant=false;
+        v.syncError='Доступ к совместному хранилищу отозван. Несинхронизированные изменения сохранены в личном локальном stash; shared vault оставлен как read-only копия ранее полученных данных.';
+      }
+    }});
+    const ids=(await readState(user.id))?.vaults.filter(v=>!v.deleted&&!v.membershipRevoked).map(v=>v.header.id)??[];
     async function recordFailure(vid:string,error:unknown){
       await commit(user,async s=>{
         const v=vault(s,vid,false);
@@ -668,7 +733,11 @@ export async function synchronize(user:User){
         await commit(user,async state=>{vault(state,vid,false).pending=false;});
       }
       ({s,v}=await snapshot(vid));
-      if(!v.access&&v.key){
+      if(v.shared&&v.role&&v.role!=='owner'&&!v.key&&getCollaborationRuntime(user.id)&&v.memberEnvelope){
+        try{await unlockMemberVault(user,vid);}catch{/* Keep ciphertext synchronized; explicit unlock can surface key/identity errors. */}
+        ({s,v}=await snapshot(vid));
+      }
+      if(!v.access&&v.key&&(!v.role||v.role==='owner')){
         const pack=await createAccess(v.key,accessContext(user.id,v));
         const result=await api('/access/setup',{vaultId:vid,pack});
         await commit(user,async state=>{vault(state,vid,false).access=result.pack;});
@@ -685,7 +754,10 @@ export async function synchronize(user:User){
           if(!current.key||!current.needsGrant||current.epoch!==granted.epoch)throw new APIError('vault_locked');
           current.grant=granted.token;current.needsGrant=false;});
       }
-      if(v.key&&!remote.vaults.find((item:any)=>item.id===vid)?.displayName){
+      ({s,v}=await snapshot(vid));
+      if(v.shared&&getCollaborationRuntime(user.id))await syncPersonalReminderConfigs(user,vid);
+      ({s,v}=await snapshot(vid));
+      if(v.key&&(!v.role||v.role==='owner')&&!remote.vaults.find((item:any)=>item.id===vid)?.displayName){
         const displayName=await vaultName(user.id,v);
         await api('/label',{vaultId:vid,displayName},[vid]);
         await commit(user,async state=>{vault(state,vid,false).displayName=displayName;});
@@ -698,7 +770,7 @@ export async function synchronize(user:User){
       await commit(user,async state=>{
         const current=vault(state,vid,false);if(current.deleted)return;
         for(const r of incoming){const local=current.records.find(x=>x.id===r.id);
-          if(!local)current.records.push(r);else{if(JSON.stringify(wire(local))!==JSON.stringify(r))throw Error('Версия заметки изменена на сервере');local.pending=false;}}
+          if(!local)current.records.push(r);else{if(JSON.stringify(wire(local))!==JSON.stringify(wire(r)))throw Error('Версия заметки изменена на сервере');local.pending=false;local.authorUserId=r.authorUserId;local.createdAt=r.createdAt;}}
       });
       ({v}=await snapshot(vid));
       const outgoing=v.transfer?[]:v.records.filter(r=>r.pending);
@@ -720,7 +792,7 @@ export async function synchronize(user:User){
           current.objectStates??={};current.objectStates[objectId]={state:'purged',recordId:objectState.recordId};state.reminderSeen=(state.reminderSeen??[]).filter(item=>item.vaultId!==vid||item.objectId!==objectId);});
       }
       ({v}=await snapshot(vid));
-      if(v.key){
+      if(v.key&&(!v.shared||getCollaborationRuntime(user.id))){
         const pendingSeen=(await readState(user.id))?.reminderSeen?.filter(x=>x.vaultId===vid)??[];
         for(const target of pendingSeen){const current=(await snapshot(vid)).v,latest=heads(current).filter(r=>r.objectId===target.objectId);
           if(latest.length===1&&current.key){const value=await readNote(user.id,current,latest[0]);
@@ -747,7 +819,7 @@ export async function synchronize(user:User){
       if(!target||target.pending||target.deleted||target.syncError||target.records.some(r=>r.reminderPending))continue;
       const received=await fetchRecords(transfer.target);
       for(const rid of transfer.revisions){const expected=target.records.find(r=>r.id===rid),actual=received.find(r=>r.id===rid);
-        if(!expected||!actual||JSON.stringify(wire(expected))!==JSON.stringify(actual))throw Error('Проверка перенесённой заметки не прошла');}
+        if(!expected||!actual||JSON.stringify(wire(expected))!==JSON.stringify(wire(actual)))throw Error('Проверка перенесённой заметки не прошла');}
       await api('/transfer',{source:vid,target:transfer.target,revisions:transfer.revisions,confirmed:true},[vid,transfer.target]);
       await commit(user,async state=>{const current=vault(state,vid,false);current.deleted=true;current.records=[];lock(current,undefined,user.id);delete current.systemUnlock;delete current.transfer;
         state.reminderSeen=(state.reminderSeen??[]).filter(x=>x.vaultId!==vid);});
@@ -757,10 +829,10 @@ export async function synchronize(user:User){
 }
 export async function lockAfterBackground(user:User,durationMs:number){
   let changed=false;await exclusive(async()=>{const s=await readState(user.id);if(!s)return;
-    for(const v of s.vaults){const limit=v.systemUnlock?.autoLockMs??0;if(limit>0&&durationMs>=limit&&v.key){clearRuntimeVaultKey(user.id,v.header.id);delete v.key;changed=true;}}
+    for(const v of s.vaults){const limit=v.systemUnlock?.autoLockMs??0;if(limit>0&&durationMs>=limit&&v.key){clearRuntimeVaultKey(user.id,v.header.id);if(v.shared)clearVaultEpochKeys(user.id,v.header.id);delete v.key;changed=true;}}
     if(changed)await writeState(s);});if(changed)announce('vault-lock');return changed;
 }
-export const hasUnsaved = (s: State) => Boolean(s.reminderSeen?.length)||s.stash.length > 0 || s.vaults.some(v => v.pending || v.transfer || Boolean(v.purgePending?.length)||Boolean(v.purgedObjects?.length)||v.records.some(r => r.pending||r.reminderPending||r.lifecyclePending));
+export const hasUnsaved = (s: State) => Boolean(s.reminderSeen?.length)||Boolean(Object.values(s.personalReminderConfigs??{}).some(item=>item.pending))||s.stash.length > 0 || s.vaults.some(v => v.pending || v.transfer || Boolean(v.purgePending?.length)||Boolean(v.purgedObjects?.length)||v.records.some(r => r.pending||r.reminderPending||r.lifecyclePending));
 let flushHandler: (() => Promise<void>) | undefined;
 export function registerDraftFlush(fn?: () => Promise<void>) { flushHandler = fn; }
 export async function flushDraft() { await flushHandler?.(); }

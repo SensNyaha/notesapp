@@ -3,19 +3,25 @@ import type { WrappedKey } from './crypto/vault';
 import type { Sealed } from './crypto/records';
 import type { AccessPack } from './crypto/access';
 import type { VaultSystemUnlock } from './crypto/system-unlock';
+import { clearCollaborationRuntime, clearVaultEpochKeys, getVaultEpochKey, setVaultEpochKey,
+  type CollaborationPrfWrapper, type VaultMemberEnvelope, type PersonalReminderBox } from './crypto/collaboration.ts';
 export interface Header { id: string; keyId: string; revisionId: string; wrapper: WrappedKey; name: Sealed }
 export interface LifecyclePending { state:'active'|'trash';expected:string|null }
 export interface ObjectState { state:'active'|'trash'|'purged';recordId:string;trashedAt?:number;purgeAfter?:number }
-export interface Revision { id: string; objectId: string; parent: string | null; sealed: Sealed; pending?: boolean; reminderPending?:boolean; resolves?:string[];
-  lifecyclePending?:LifecyclePending }
+export interface Revision { id: string; objectId: string; parent: string | null; sealed: Sealed; pending?: boolean; reminderPending?:boolean; resolves?:string[];keyEpoch?:number;
+  authorUserId?:string;createdAt?:number;lifecyclePending?:LifecyclePending }
 export interface Vault { header: Header; displayName?:string; key?: CryptoKey; pending?: boolean; deleted?: boolean; records: Revision[];
   transfer?: { target: string; revisions: string[] }; epoch?:number; access?:AccessPack; grant?:string;
   needsGrant?:boolean; closeOperation?:string; closeBaseEpoch?:number; syncError?:string; systemUnlock?:VaultSystemUnlock;
+  role?:'owner'|'editor'|'viewer';ownerId?:string;shared?:boolean;membershipRevoked?:boolean;keyring?:{version:number;currentEpoch:number;ownerBox?:Sealed};
+  memberEnvelope?:{keyringVersion:number;identityVersion:number;keyEnvelope:VaultMemberEnvelope};
   objectStates?:Record<string,ObjectState>;purgePending?:string[];purgedObjects?:string[] }
 export interface Stashed { id: string; sealed: Sealed; source: string }
 export interface ReminderSeen { vaultId:string;objectId:string;configId:string;occurrenceId?:string }
 export interface State { user: User; vaults: Vault[]; stash: Stashed[]; stashKey?: CryptoKey; deviceId?:string; deviceName?:string; deviceNameDirty?:boolean; deviceRegistered?:boolean; lastVaultId?:string;
-  reminderSeen?:ReminderSeen[]; lastOpenedAt?:number; sessionReviewRequired?:boolean; reviewAccepted?:string[] }
+  reminderSeen?:ReminderSeen[]; lastOpenedAt?:number; sessionReviewRequired?:boolean; reviewAccepted?:string[];
+  collaboration?:{systemUnlock?:CollaborationPrfWrapper;trustedFingerprints?:Record<string,string>;recoveryRequired?:boolean};
+  personalReminderConfigs?:Record<string,{revisionId:string;payload:PersonalReminderBox;pending?:boolean;deleted?:boolean}> }
 let connection: Promise<IDBDatabase> | undefined;
 function database() {
   return connection ??= new Promise((resolve, reject) => {
@@ -30,8 +36,14 @@ export function setRuntimeVaultKey(accountId:string,vaultId:string,key:CryptoKey
 export function clearRuntimeVaultKey(accountId:string,vaultId:string){runtimeVaultKeys.delete(runtimeId(accountId,vaultId));}
 export function clearRuntimeVaultKeys(accountId:string){for(const id of runtimeVaultKeys.keys())if(id.startsWith(accountId+':'))runtimeVaultKeys.delete(id);}
 export function hasRuntimeVaultKey(accountId:string,vaultId:string){return runtimeVaultKeys.has(runtimeId(accountId,vaultId));}
-function hydrate(state:State|undefined){if(!state)return state;for(const v of state.vaults)if(v.systemUnlock){const key=runtimeVaultKeys.get(runtimeId(state.user.id,v.header.id));if(key)v.key=key;else delete v.key;}return state;}
-function persistent(state:State):State{const vaults=state.vaults.map(v=>{if(!v.systemUnlock)return v;if(v.key)runtimeVaultKeys.set(runtimeId(state.user.id,v.header.id),v.key);const{key:_,...rest}=v;return rest;});return{...state,vaults};}
+function hydrate(state:State|undefined){if(!state)return state;for(const v of state.vaults){
+  if(v.role&&v.role!=='owner'){const key=getVaultEpochKey(state.user.id,v.header.id,0);if(key)v.key=key;else delete v.key;continue;}
+  if(v.systemUnlock){const key=runtimeVaultKeys.get(runtimeId(state.user.id,v.header.id));if(key)v.key=key;else delete v.key;}
+}return state;}
+function persistent(state:State):State{const vaults=state.vaults.map(v=>{
+  if(v.role&&v.role!=='owner'){if(v.key)setVaultEpochKey(state.user.id,v.header.id,0,v.key);const{key:_,...rest}=v;return rest;}
+  if(!v.systemUnlock)return v;if(v.key)runtimeVaultKeys.set(runtimeId(state.user.id,v.header.id),v.key);const{key:_,...rest}=v;return rest;
+});return{...state,vaults};}
 export async function readState(id: string): Promise<State | undefined> {
   const db = await database(); return new Promise((resolve, reject) => {
     const t = db.transaction('accounts'), r = t.objectStore('accounts').get(id);
@@ -53,7 +65,7 @@ export async function writeState(state: State) {
   });
 }
 export async function eraseState(id: string) {
-  clearRuntimeVaultKeys(id);
+  clearRuntimeVaultKeys(id);clearCollaborationRuntime(id);clearVaultEpochKeys(id);
   const db = await database(); await new Promise<void>((resolve, reject) => {
     const t = db.transaction('accounts', 'readwrite'); t.objectStore('accounts').delete(id);
     t.oncomplete = () => resolve(); t.onabort = () => reject(t.error);

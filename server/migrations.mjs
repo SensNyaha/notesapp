@@ -1,6 +1,6 @@
 import { randomUUID } from 'node:crypto';
 
-export const SCHEMA_VERSION = 12;
+export const SCHEMA_VERSION = 13;
 
 export function migrate(db) {
   db.exec('BEGIN IMMEDIATE');
@@ -165,6 +165,193 @@ export function migrate(db) {
         expires INTEGER NOT NULL
       ) STRICT;
       CREATE INDEX webauthn_challenges_expiry ON webauthn_challenges(expires);
+    `);
+    if(version<13)db.exec(`
+      CREATE TABLE collaboration_identities(
+        user_id TEXT PRIMARY KEY NOT NULL REFERENCES users(id) ON DELETE CASCADE,
+        version INTEGER NOT NULL CHECK(version>=1),
+        public_key TEXT NOT NULL CHECK(length(public_key) BETWEEN 80 AND 1024),
+        private_box TEXT NOT NULL CHECK(length(private_box) BETWEEN 80 AND 8192),
+        password_wrapper TEXT NOT NULL CHECK(length(password_wrapper) BETWEEN 80 AND 8192),
+        created_at INTEGER NOT NULL,
+        updated_at INTEGER NOT NULL
+      ) STRICT;
+      CREATE TABLE contact_requests(
+        id TEXT PRIMARY KEY NOT NULL,
+        sender_id TEXT NOT NULL REFERENCES users(id) ON DELETE CASCADE,
+        recipient_id TEXT NOT NULL REFERENCES users(id) ON DELETE CASCADE,
+        created_at INTEGER NOT NULL,
+        CHECK(sender_id<>recipient_id), UNIQUE(sender_id,recipient_id)
+      ) STRICT;
+      CREATE INDEX contact_requests_recipient ON contact_requests(recipient_id,created_at);
+      CREATE TABLE contacts(
+        user_a TEXT NOT NULL REFERENCES users(id) ON DELETE CASCADE,
+        user_b TEXT NOT NULL REFERENCES users(id) ON DELETE CASCADE,
+        created_at INTEGER NOT NULL,
+        CHECK(user_a<user_b), PRIMARY KEY(user_a,user_b)
+      ) STRICT;
+      CREATE TABLE vault_members(
+        vault_id TEXT NOT NULL REFERENCES vaults(id) ON DELETE CASCADE,
+        user_id TEXT NOT NULL REFERENCES users(id) ON DELETE CASCADE,
+        role TEXT NOT NULL CHECK(role IN('owner','editor','viewer')),
+        joined_at INTEGER NOT NULL,
+        PRIMARY KEY(vault_id,user_id)
+      ) STRICT;
+      CREATE UNIQUE INDEX vault_one_owner ON vault_members(vault_id) WHERE role='owner';
+      CREATE INDEX vault_members_user ON vault_members(user_id,vault_id);
+      INSERT INTO vault_members(vault_id,user_id,role,joined_at)
+        SELECT id,user_id,'owner',0 FROM vaults;
+      CREATE TABLE vault_keyrings(
+        vault_id TEXT PRIMARY KEY NOT NULL REFERENCES vaults(id) ON DELETE CASCADE,
+        version INTEGER NOT NULL CHECK(version>=1),
+        current_epoch INTEGER NOT NULL CHECK(current_epoch>=0),
+        owner_box TEXT NOT NULL CHECK(length(owner_box) BETWEEN 40 AND 32768),
+        updated_at INTEGER NOT NULL
+      ) STRICT;
+      CREATE TABLE vault_invites(
+        id TEXT PRIMARY KEY NOT NULL,
+        vault_id TEXT NOT NULL REFERENCES vaults(id) ON DELETE CASCADE,
+        inviter_id TEXT NOT NULL REFERENCES users(id) ON DELETE CASCADE,
+        recipient_id TEXT NOT NULL REFERENCES users(id) ON DELETE CASCADE,
+        role TEXT NOT NULL CHECK(role IN('editor','viewer')),
+        keyring_version INTEGER NOT NULL CHECK(keyring_version>=1),
+        identity_version INTEGER NOT NULL CHECK(identity_version>=1),
+        key_envelope TEXT NOT NULL CHECK(length(key_envelope) BETWEEN 80 AND 65536),
+        created_at INTEGER NOT NULL,
+        UNIQUE(vault_id,recipient_id)
+      ) STRICT;
+      CREATE INDEX vault_invites_recipient ON vault_invites(recipient_id,created_at);
+      CREATE TABLE vault_member_envelopes(
+        vault_id TEXT NOT NULL REFERENCES vaults(id) ON DELETE CASCADE,
+        user_id TEXT NOT NULL REFERENCES users(id) ON DELETE CASCADE,
+        keyring_version INTEGER NOT NULL CHECK(keyring_version>=1),
+        identity_version INTEGER NOT NULL CHECK(identity_version>=1),
+        key_envelope TEXT NOT NULL CHECK(length(key_envelope) BETWEEN 80 AND 65536),
+        updated_at INTEGER NOT NULL,
+        PRIMARY KEY(vault_id,user_id)
+      ) STRICT;
+      CREATE TABLE comments(
+        id TEXT PRIMARY KEY NOT NULL,
+        vault_id TEXT NOT NULL REFERENCES vaults(id) ON DELETE CASCADE,
+        object_id TEXT NOT NULL,
+        author_user_id TEXT NOT NULL REFERENCES users(id),
+        key_epoch INTEGER NOT NULL CHECK(key_epoch>=0),
+        payload TEXT NOT NULL CHECK(length(payload) BETWEEN 20 AND 1399000),
+        created_at INTEGER NOT NULL,
+        updated_at INTEGER NOT NULL,
+        deleted_at INTEGER
+      ) STRICT;
+      CREATE INDEX comments_note ON comments(vault_id,object_id,created_at);
+      CREATE TABLE personal_reminder_configs(
+        user_id TEXT NOT NULL REFERENCES users(id) ON DELETE CASCADE,
+        vault_id TEXT NOT NULL REFERENCES vaults(id) ON DELETE CASCADE,
+        object_id TEXT NOT NULL,
+        revision_id TEXT NOT NULL,
+        payload TEXT NOT NULL CHECK(length(payload) BETWEEN 20 AND 1399000),
+        updated_at INTEGER NOT NULL,
+        PRIMARY KEY(user_id,vault_id,object_id)
+      ) STRICT;
+      CREATE INDEX personal_reminder_configs_vault ON personal_reminder_configs(user_id,vault_id);
+      CREATE TABLE collaboration_deliveries(
+        id TEXT PRIMARY KEY NOT NULL,
+        user_id TEXT NOT NULL REFERENCES users(id) ON DELETE CASCADE,
+        subscription_id TEXT NOT NULL REFERENCES push_subscriptions(id) ON DELETE CASCADE,
+        event_type TEXT NOT NULL CHECK(event_type IN('friend_request','vault_invite','comment','role_changed','member_removed','key_changed')),
+        vault_id TEXT,
+        object_id TEXT,
+        created_at INTEGER NOT NULL,
+        due_at INTEGER NOT NULL,
+        expires_at INTEGER NOT NULL,
+        status TEXT NOT NULL CHECK(status IN('scheduled','sending','accepted','expired','failed','unknown')),
+        attempts INTEGER NOT NULL DEFAULT 0 CHECK(attempts>=0),
+        lease_until INTEGER NOT NULL DEFAULT 0
+      ) STRICT;
+      CREATE INDEX collaboration_delivery_due ON collaboration_deliveries(status,due_at);
+
+      ALTER TABLE records ADD COLUMN author_user_id TEXT;
+      ALTER TABLE records ADD COLUMN created_at INTEGER NOT NULL DEFAULT 0;
+      UPDATE records SET author_user_id=(SELECT user_id FROM vaults WHERE vaults.id=records.vault_id)
+        WHERE author_user_id IS NULL;
+      CREATE INDEX records_author ON records(vault_id,author_user_id,created_at);
+      ALTER TABLE vault_grants ADD COLUMN user_id TEXT;
+      UPDATE vault_grants SET user_id=(SELECT user_id FROM vaults WHERE vaults.id=vault_grants.vault_id) WHERE user_id IS NULL;
+      CREATE INDEX vault_grants_user ON vault_grants(vault_id,user_id);
+      ALTER TABLE vault_challenges ADD COLUMN user_id TEXT;
+      UPDATE vault_challenges SET user_id=(SELECT user_id FROM vaults WHERE vaults.id=vault_challenges.vault_id) WHERE user_id IS NULL;
+      CREATE INDEX vault_challenges_user ON vault_challenges(vault_id,user_id);
+
+      DROP TRIGGER reminder_record_changed;
+      DROP TRIGGER reminder_vault_deleted;
+      CREATE TEMP TABLE reminders_backup AS SELECT * FROM reminders;
+      CREATE TEMP TABLE reminder_occurrences_backup AS SELECT * FROM reminder_occurrences;
+      CREATE TEMP TABLE reminder_deliveries_backup AS SELECT * FROM reminder_deliveries;
+      DROP TABLE reminder_deliveries;
+      DROP TABLE reminder_occurrences;
+      DROP TABLE reminders;
+      CREATE TABLE reminders(
+        id TEXT PRIMARY KEY,
+        user_id TEXT NOT NULL REFERENCES users(id),
+        vault_id TEXT NOT NULL REFERENCES vaults(id),
+        object_id TEXT NOT NULL,
+        config_id TEXT NOT NULL,
+        record_id TEXT NOT NULL,
+        local_at TEXT NOT NULL,
+        due_at INTEGER,
+        plan_state TEXT NOT NULL CHECK(plan_state IN('active','off','done')),
+        body TEXT,
+        paused INTEGER NOT NULL DEFAULT 0 CHECK(paused IN(0,1)),
+        fired_at INTEGER,
+        seen_at INTEGER,
+        next_nudge INTEGER,
+        cycle INTEGER NOT NULL DEFAULT 0 CHECK(cycle>=0),
+        schedule TEXT NOT NULL DEFAULT '{"repeat":{"type":"once"},"end":{"type":"never"},"allDay":false,"important":false}',
+        UNIQUE(user_id,vault_id,object_id)
+      ) STRICT;
+      CREATE TABLE reminder_occurrences(
+        id TEXT PRIMARY KEY,
+        reminder_id TEXT NOT NULL REFERENCES reminders(id) ON DELETE CASCADE,
+        config_id TEXT NOT NULL,
+        sequence INTEGER NOT NULL CHECK(sequence>0),
+        scheduled_local TEXT NOT NULL,
+        due_at INTEGER,
+        snooze_local TEXT,
+        effective_due_at INTEGER,
+        status TEXT NOT NULL CHECK(status IN('scheduled','fired','seen','done','skipped','missed')),
+        fired_at INTEGER,
+        seen_at INTEGER,
+        completed_at INTEGER,
+        next_nudge INTEGER,
+        cycle INTEGER NOT NULL DEFAULT 0 CHECK(cycle>=0),
+        UNIQUE(reminder_id,sequence)
+      ) STRICT;
+      CREATE INDEX reminder_occurrence_due ON reminder_occurrences(status,effective_due_at);
+      CREATE TABLE reminder_deliveries(
+        id TEXT PRIMARY KEY,
+        reminder_id TEXT NOT NULL REFERENCES reminders(id) ON DELETE CASCADE,
+        subscription_id TEXT NOT NULL REFERENCES push_subscriptions(id) ON DELETE CASCADE,
+        cycle INTEGER NOT NULL CHECK(cycle>0),
+        status TEXT NOT NULL CHECK(status IN('scheduled','sending','accepted','expired','failed','unknown')),
+        due_at INTEGER NOT NULL,
+        expires_at INTEGER NOT NULL,
+        attempts INTEGER NOT NULL DEFAULT 0 CHECK(attempts>=0),
+        lease_until INTEGER NOT NULL DEFAULT 0,
+        occurrence_id TEXT
+      ) STRICT;
+      CREATE INDEX reminder_delivery_due ON reminder_deliveries(status,due_at);
+      INSERT INTO reminders SELECT * FROM reminders_backup;
+      INSERT INTO reminder_occurrences SELECT * FROM reminder_occurrences_backup;
+      INSERT INTO reminder_deliveries SELECT * FROM reminder_deliveries_backup;
+      DROP TABLE reminders_backup;
+      DROP TABLE reminder_occurrences_backup;
+      DROP TABLE reminder_deliveries_backup;
+      CREATE TRIGGER reminder_record_changed AFTER INSERT ON records BEGIN
+        UPDATE reminders SET paused=1 WHERE vault_id=NEW.vault_id AND object_id=NEW.object_id;
+        DELETE FROM reminder_deliveries WHERE reminder_id IN(
+          SELECT id FROM reminders WHERE vault_id=NEW.vault_id AND object_id=NEW.object_id);
+      END;
+      CREATE TRIGGER reminder_vault_deleted AFTER UPDATE OF deleted ON vaults WHEN NEW.deleted=1 BEGIN
+        DELETE FROM reminders WHERE vault_id=NEW.id;
+      END;
     `);
     db.exec(`PRAGMA user_version = ${SCHEMA_VERSION}`);
     db.exec('COMMIT');

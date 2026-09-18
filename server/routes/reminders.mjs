@@ -36,7 +36,7 @@ function ensureOccurrences(db,row,zone,until){
 }
 function refreshDue(db,reminderId){const next=db.prepare("SELECT effective_due_at FROM reminder_occurrences WHERE reminder_id=? AND status IN('scheduled','fired') ORDER BY effective_due_at LIMIT 1").get(reminderId);db.prepare('UPDATE reminders SET due_at=? WHERE id=?').run(next?.effective_due_at??null,reminderId);}
 
-export function registerReminders(app,db,{action,guard,own,permit,clock}){
+export function registerReminders(app,db,{action,guard,member,permit,clock}){
   const settings=user=>{db.prepare('INSERT OR IGNORE INTO reminder_settings(user_id) VALUES(?)').run(user.id);return db.prepare('SELECT zone,nudge_hours,all_day_time FROM reminder_settings WHERE user_id=?').get(user.id);};
   const post=(path,schema,fn)=>app.post('/api/reminders/'+path,{preHandler:guard,schema:{body:schema}},action(fn));
   app.get('/api/reminders/settings',action((_req,user)=>settings(user)));
@@ -74,8 +74,8 @@ export function registerReminders(app,db,{action,guard,own,permit,clock}){
       (SELECT status FROM reminder_deliveries d WHERE d.occurrence_id=o.id ORDER BY d.cycle DESC,d.due_at DESC LIMIT 1) delivery
       FROM reminders r JOIN reminder_occurrences o ON o.reminder_id=r.id WHERE r.user_id=? ORDER BY coalesce(o.effective_due_at,o.due_at),o.sequence`).all(user.id)};}));
   post('set',obj({vaultId:uuid,objectId:uuid,recordId:uuid,plan:{anyOf:[plan,{type:'null'}]}}),(req,user)=>{
-    const {vaultId,objectId,recordId,plan:p}=req.body;permit(req,own(user,vaultId));const heads=reminderHeads(db,vaultId,objectId);if(heads.length!==1||heads[0]!==recordId)fail('reminder_conflict',409);
-    const old=db.prepare('SELECT * FROM reminders WHERE vault_id=? AND object_id=?').get(vaultId,objectId);if(!p){if(old)db.prepare('DELETE FROM reminders WHERE id=?').run(old.id);return{ok:true};}
+    const {vaultId,objectId,recordId,plan:p}=req.body;permit(req,member(user,vaultId));const heads=reminderHeads(db,vaultId,objectId);if(heads.length!==1||heads[0]!==recordId)fail('reminder_conflict',409);
+    const old=db.prepare('SELECT * FROM reminders WHERE user_id=? AND vault_id=? AND object_id=?').get(user.id,vaultId,objectId);if(!p){if(old)db.prepare('DELETE FROM reminders WHERE id=?').run(old.id);return{ok:true};}
     if(!validPlan(p))fail('invalid_reminder',400);const source=normalizePlan(p),pref=settings(user),normalized={...source,local:atAllDayTime(source.local,source.allDay,pref.all_day_time)},due=zonedTime(normalized.local,pref.zone),body=normalized.state==='active'&&normalized.mode!=='neutral'&&normalized.text?normalized.text:null,schedule=JSON.stringify(scheduleOf(normalized));
     if(normalized.state==='active'&&due===null)fail('invalid_local_time',400);if(normalized.end.type==='date'&&normalized.local.slice(0,10)>normalized.end.date)fail('invalid_reminder',400);if(!old&&db.prepare('SELECT count(*) n FROM reminders WHERE user_id=?').get(user.id).n>=1000)fail('reminder_limit',409);
     if(old&&old.config_id===normalized.id){if(old.local_at!==normalized.local||old.schedule!==schedule)fail('id_conflict',409);

@@ -79,6 +79,8 @@ test('offline shell works; API and non-public paths bypass the Service Worker ca
   const ids=['11111111-1111-4111-8111-111111111111','22222222-2222-4222-8222-222222222222','33333333-3333-4333-8333-333333333333','44444444-4444-4444-8444-444444444444','55555555-5555-4555-8555-555555555555'];
   handlers.push({data:{json:()=>({type:'tasks-reminder',accountId:ids[0],vaultId:ids[1],objectId:ids[2],configId:ids[3],occurrenceId:ids[4],body:'Разрешённый текст'})},waitUntil(promise){pending=promise;}});
   await pending;assert.equal(notifications.length,2);assert.equal(notifications[1][1].body,'Разрешённый текст');
+  handlers.push({data:{json:()=>({type:'tasks-collaboration',id:ids[4],accountId:ids[0],eventType:'comment',vaultId:ids[1],objectId:ids[2],body:'PRIVATE COMMENT'})},waitUntil(promise){pending=promise;}});
+  await pending;assert.equal(notifications.length,3);assert.equal(notifications[2][1].body,'Новый комментарий');assert.ok(!JSON.stringify(notifications[2]).includes('PRIVATE COMMENT'));
   windows=[{url:'http://localhost:3100/',navigate:async path=>{navigated=path;},focus:async()=>{focused++;}}];
   const reminderClick={notification:{close(){closed++;},data:notifications[1][1].data},waitUntil(promise){pending=promise;}};
   handlers.notificationclick(reminderClick);await pending;assert.equal(navigated,'/#reminder='+ids.join('.'));assert.equal(focused,1);

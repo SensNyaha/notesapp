@@ -2,6 +2,7 @@ import cookie from '@fastify/cookie';
 import { diskUsage } from '../diagnostics.mjs';
 import { registerVaults } from './vaults.mjs';
 import { registerPush } from './push.mjs';
+import { registerCollaboration } from './collaboration.mjs';
 import { randomBytes, timingSafeEqual } from 'node:crypto';
 import { hashPassword, verifyPassword, normalizeLogin, validPassword } from '../auth/password.mjs';
 import { bootstrapFromEnvironment, insertFirstAdmin, needsSetup } from '../auth/users.mjs';
@@ -129,10 +130,17 @@ export async function registerAuth(app, db, config, clock = Date.now, push = {},
   const passwordField = { type: 'string', maxLength: 256 };
   const uuidField = { type:'string', pattern:'^[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}$' };
   const deviceNameField = { type:'string', minLength:1, maxLength:80 };
+  const b64Field=(min,max=min)=>({type:'string',pattern:'^[A-Za-z0-9_-]+$',minLength:min,maxLength:max});
   const objectBody = (properties, required = Object.keys(properties)) => ({ type: 'object', additionalProperties: false, properties, required });
+  const collaborationPasswordWrapper=objectBody({
+    v:{const:1},purpose:{const:'collaboration-password'},alg:{const:'A256GCM'},iv:b64Field(16),ciphertext:b64Field(64),
+    kdf:objectBody({name:{const:'PBKDF2-SHA256'},iterations:{type:'integer',minimum:600000,maximum:2000000},salt:b64Field(22)})
+  });
+  const collaborationRewrap=objectBody({identityVersion:{type:'integer',minimum:1},passwordWrapper:collaborationPasswordWrapper});
   function accessOf(request) { return request.cookies[names.access]; }
   registerWebAuthn(app, db, { guard, accessOf, clock, config, writeCookies, cookieNames: names, implementations: webauthn });
-  registerVaults(app, db, { guard, accessOf, clock });
+  const vaultAccess=registerVaults(app, db, { guard, accessOf, clock });
+  registerCollaboration(app,db,{guard,accessOf,clock,vaultAccess});
   registerPush(app, db, { guard, accessOf, clock, config, ...push });
   function accountAction(action, { hash = true, passwordChange = false, admin = !passwordChange } = {}) {
     return async (request, reply) => {
@@ -187,7 +195,8 @@ export async function registerAuth(app, db, config, clock = Date.now, push = {},
   }) } }, accountAction(async request => ({ user: await resetAccount(db, request.body, authorizeAdmin(request), clock) })));
   app.post('/api/auth/change-password', { preHandler: guard, schema: { body: objectBody({
     currentPassword: passwordField, password: passwordField, repeatPassword: passwordField, revokeOthers: { type: 'boolean' },
-  }) } }, accountAction(async (request, reply) => {
+    collaborationRewrap,
+  }, ['currentPassword','password','repeatPassword','revokeOthers']) } }, accountAction(async (request, reply) => {
     const result = await changePassword(db, accessOf(request), request.body, clock);
     writeCookies(reply, result.pair);
     return { user: result.user };
