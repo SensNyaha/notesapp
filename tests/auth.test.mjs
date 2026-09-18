@@ -19,7 +19,7 @@ async function fixture(t, options = {}) {
   const stream = new Writable({ write(chunk, _encoding, cb) { logs += chunk.toString(); cb(); } });
   const auth = { origin: 'http://localhost:3100', secure: false, ...options };
   let app = await createApp({ dataDir: dir, auth, clock: () => now, logger: { level: 'error', stream } });
-  t.after(async () => { await app.close(); await rm(dir, { recursive: true, force: true }); });
+  t.after(async () => { await app.close(); await rm(dir, { recursive: true, force: true, maxRetries: 5, retryDelay: 50 }); });
   const jar = new Map();
   const cookies = () => [...jar].map(([name, value]) => `${name}=${value}`).join('; ');
   function absorb(response) {
@@ -112,7 +112,7 @@ test('ENV bootstrap is one-time, preserves password and validates partial config
     const dir = await mkdtemp(join(tmpdir(), 'tasks-bad-env-'));
     try {
       await assert.rejects(createApp({ dataDir: dir, auth: { bootstrap }, logger: false }), /Invalid bootstrap configuration/);
-    } finally { await rm(dir, { recursive: true, force: true }); }
+    } finally { await rm(dir, { recursive: true, force: true, maxRetries: 5, retryDelay: 50 }); }
   }
 });
 

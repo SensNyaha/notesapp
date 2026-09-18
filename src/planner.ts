@@ -17,8 +17,12 @@ export type VaultPushMode='neutral'|'title';
 export type NoteLifecycleState='active'|'archived'|'trashed';
 export interface NoteLifecycle { state:NoteLifecycleState;changedAt:number }
 export interface Note { title: string; text: string; html?:string;attachments?:NoteAttachment[];checklist?:ChecklistItem[];tagIds?:string[];pinned?:boolean;reminder?:ReminderPlan;
-  lifecycle?:NoteLifecycle;author?:{name:string;time:number} }
+  lifecycle?:NoteLifecycle;author?:{name:string;time:number};importSource?:{kind:'tasks-note-v1';vaultId:string;objectId:string} }
+export interface PortableVaultRevision { revisionId:string;objectId:string;parent:string|null;resolves:string[];note:Note }
+export interface PortableVaultSnapshot { format:'tasks-vault-snapshot';version:1;sourceVaultId:string;name:string;exportedAt:number;
+  tags:TagDefinition[];pushMode:VaultPushMode;revisions:PortableVaultRevision[] }
 interface TagCatalog { kind:'tag-catalog';title:string;text:string;tags:TagDefinition[];push?:{mode:VaultPushMode;op:string} }
+const uuid=/^[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}$/;
 const id = () => crypto.randomUUID();
 function automaticDeviceName(){
   const ua=navigator.userAgent;const platform=/iPhone/.test(ua)?'iPhone':/iPad/.test(ua)?'iPad':/Android/.test(ua)?'Android':/Windows/.test(ua)?'Windows':/Macintosh/.test(ua)?'Mac':'Устройство';
@@ -55,6 +59,7 @@ function note(value: unknown): Note {
   const tagIds='tagIds'in value?value.tagIds:undefined;
   const pinned='pinned'in value?value.pinned:undefined;
   const lifecycle='lifecycle'in value?value.lifecycle:undefined;
+  const importSource='importSource'in value?value.importSource:undefined;
   if(reminder!==undefined&&!validPlan(reminder))throw Error('Повреждено напоминание');
   if(html!==undefined&&typeof html!=='string')throw Error('Повреждено форматирование заметки');
   if(attachments!==undefined&&(!Array.isArray(attachments)||attachments.length>15||!attachments.every(validAttachment)
@@ -67,10 +72,13 @@ function note(value: unknown): Note {
   if(pinned!==undefined&&typeof pinned!=='boolean')throw Error('Повреждён признак закрепления заметки');
   if(lifecycle!==undefined&&(!lifecycle||typeof lifecycle!=='object'||!('state'in lifecycle)||!['active','archived','trashed'].includes(String(lifecycle.state))
     ||!('changedAt'in lifecycle)||!Number.isSafeInteger(lifecycle.changedAt)))throw Error('Повреждён жизненный цикл заметки');
+  if(importSource!==undefined&&(!importSource||typeof importSource!=='object'||!('kind'in importSource)||importSource.kind!=='tasks-note-v1'
+    ||!('vaultId'in importSource)||typeof importSource.vaultId!=='string'||!uuid.test(importSource.vaultId)
+    ||!('objectId'in importSource)||typeof importSource.objectId!=='string'||!uuid.test(importSource.objectId)))throw Error('Повреждён источник импортированной заметки');
   return { title: value.title, text: value.text, ...(html!==undefined?{html}:{}), ...(attachments?{attachments:attachments as NoteAttachment[]}:{}),
     ...(checklist?{checklist:checklist as ChecklistItem[]}:{}),...(tagIds?{tagIds:tagIds as string[]}:{}),...(pinned!==undefined?{pinned}:{}),
     ...(reminder?{reminder}:{}),...(lifecycle?{lifecycle:lifecycle as NoteLifecycle}:{}), ...(author&&typeof author==='object'&&'name'in author&&typeof author.name==='string'&&'time'in author&&Number.isSafeInteger(author.time)
-    ?{author:author as {name:string;time:number}}:{}) };
+    ?{author:author as {name:string;time:number}}:{}),...(importSource?{importSource:importSource as Note['importSource']}:{}) };
 }
 export async function readNote(user: string, v: Vault, r: Revision): Promise<Note> {
   if (!v.key) throw Error('Откройте хранилище');
@@ -349,6 +357,112 @@ export const transferVault = (user: User, source: string, name: string, phrase: 
   if(catalogHeads(v).length){const catalog=await readCatalog(user.id,v);await writeCatalog(user.id,target,catalog.tags,catalog.push);}
   s.vaults.push(target); v.transfer = { target: target.header.id, revisions: target.records.map(r => r.id) };
   return target.header.id;
+});
+
+export async function exportVaultSnapshot(user:User,vid:string):Promise<PortableVaultSnapshot>{
+  const s=await readState(user.id),v=s?.vaults.find(item=>item.header.id===vid);
+  if(!s||!v||v.deleted||!v.key)throw Error('Для резервной копии сначала откройте хранилище.');
+  if(v.transfer)throw Error('Сначала завершите перенос хранилища.');
+  const excluded=new Set([...(v.purgePending??[]),...(v.purgedObjects??[]),
+    ...Object.entries(v.objectStates??{}).filter(([,state])=>state.state==='purged').map(([objectId])=>objectId)]);
+  const revisions:PortableVaultRevision[]=[];
+  for(const r of v.records)if(r.objectId!==v.header.id&&!excluded.has(r.objectId))revisions.push({
+    revisionId:r.id,objectId:r.objectId,parent:r.parent,resolves:[...(r.resolves??[])],note:await readNote(user.id,v,r)
+  });
+  const catalog=await readCatalog(user.id,v);
+  return{format:'tasks-vault-snapshot',version:1,sourceVaultId:v.header.id,name:await vaultName(user.id,v),
+    exportedAt:Date.now(),tags:catalog.tags.map(tag=>({...tag})),pushMode:catalog.push.mode,revisions};
+}
+
+export function validateVaultSnapshot(value:unknown):PortableVaultSnapshot{
+  if(!value||typeof value!=='object'||Array.isArray(value))throw Error('Некорректная резервная копия.');
+  const row=value as Record<string,unknown>,fields=['format','version','sourceVaultId','name','exportedAt','tags','pushMode','revisions'];
+  if(Object.keys(row).length!==fields.length||fields.some(field=>!Object.hasOwn(row,field))||row.format!=='tasks-vault-snapshot'||row.version!==1
+    ||typeof row.sourceVaultId!=='string'||!uuid.test(row.sourceVaultId)||typeof row.name!=='string'||!row.name.trim()||row.name.length>200
+    ||!Number.isSafeInteger(row.exportedAt)||!Array.isArray(row.tags)||row.tags.length>500||!row.tags.every(validTag)
+    ||!['neutral','title'].includes(String(row.pushMode))||!Array.isArray(row.revisions)||row.revisions.length>10000)throw Error('Некорректная резервная копия.');
+  const revisions:PortableVaultRevision[]=[];const byId=new Map<string,PortableVaultRevision>();
+  for(const item of row.revisions){
+    if(!item||typeof item!=='object'||Array.isArray(item))throw Error('Некорректная история резервной копии.');
+    const r=item as Record<string,unknown>,keys=['revisionId','objectId','parent','resolves','note'];
+    if(Object.keys(r).length!==keys.length||keys.some(key=>!Object.hasOwn(r,key))||typeof r.revisionId!=='string'||!uuid.test(r.revisionId)
+      ||typeof r.objectId!=='string'||!uuid.test(r.objectId)||(r.parent!==null&&(typeof r.parent!=='string'||!uuid.test(r.parent)))
+      ||!Array.isArray(r.resolves)||r.resolves.length>100||!r.resolves.every(x=>typeof x==='string'&&uuid.test(x))||new Set(r.resolves).size!==r.resolves.length
+      ||byId.has(r.revisionId))throw Error('Некорректная история резервной копии.');
+    const normalized={revisionId:r.revisionId,objectId:r.objectId,parent:r.parent as string|null,resolves:[...r.resolves] as string[],note:note(r.note)};
+    revisions.push(normalized);byId.set(normalized.revisionId,normalized);
+  }
+  for(const r of revisions)for(const ref of [...(r.parent?[r.parent]:[]),...r.resolves]){
+    const linked=byId.get(ref);if(!linked||linked.objectId!==r.objectId)throw Error('Резервная копия содержит повреждённые связи версий.');
+  }
+  const ordered:PortableVaultRevision[]=[],visiting=new Set<string>(),done=new Set<string>();
+  const visit=(revision:PortableVaultRevision)=>{
+    if(done.has(revision.revisionId))return;
+    if(visiting.has(revision.revisionId))throw Error('Резервная копия содержит цикл в истории версий.');
+    visiting.add(revision.revisionId);
+    for(const ref of [...(revision.parent?[revision.parent]:[]),...revision.resolves])visit(byId.get(ref)!);
+    visiting.delete(revision.revisionId);done.add(revision.revisionId);ordered.push(revision);
+  };
+  for(const revision of revisions)visit(revision);
+  return{format:'tasks-vault-snapshot',version:1,sourceVaultId:row.sourceVaultId as string,name:row.name as string,exportedAt:row.exportedAt as number,
+    tags:(row.tags as TagDefinition[]).map(tag=>({...tag})),pushMode:row.pushMode as VaultPushMode,revisions:ordered};
+}
+
+export const importVaultSnapshot=(user:User,input:unknown,name:string,phrase:string)=>edit(user,async s=>{
+  const snapshot=validateVaultSnapshot(input);phraseCheck(phrase);const target=await makeVault(user.id,name,phrase);
+  const objectMap=new Map<string,string>(),revisionMap=new Map<string,string>(),reminders=new Map<string,string>();
+  for(const source of snapshot.revisions){if(!objectMap.has(source.objectId))objectMap.set(source.objectId,id());revisionMap.set(source.revisionId,id());}
+  const noteByRevision=new Map<string,Note>();
+  for(const source of snapshot.revisions){
+    const objectId=objectMap.get(source.objectId)!,rid=revisionMap.get(source.revisionId)!;
+    const parent=source.parent?revisionMap.get(source.parent)!:null,resolves=source.resolves.map(value=>revisionMap.get(value)!);
+    let copied:Note={...source.note,...(source.note.attachments?{attachments:source.note.attachments.map(item=>({...item}))}:{}),
+      ...(source.note.checklist?{checklist:source.note.checklist.map(item=>({...item}))}:{})};
+    if(copied.reminder){let reminderId=reminders.get(source.objectId);if(!reminderId){reminderId=id();reminders.set(source.objectId,reminderId);}copied={...copied,reminder:{...copied.reminder,id:reminderId,state:'off'}};}
+    noteByRevision.set(rid,copied);
+    target.records.push({id:rid,objectId,parent,...(resolves.length?{resolves}:{}),pending:true,
+      sealed:await seal(target.key!,context(user.id,target.header,objectId,rid),parent,{...copied,...(resolves.length?{resolves}:{})})});
+  }
+  const importedHeads=heads(target);
+  for(const objectId of new Set(importedHeads.map(r=>r.objectId))){
+    const versions=importedHeads.filter(r=>r.objectId===objectId);if(versions.length!==1)continue;
+    const head=versions[0],value=noteByRevision.get(head.id)!;
+    if(value.reminder)head.reminderPending=true;
+    if(value.lifecycle?.state==='trashed')head.lifecyclePending={state:'trash',expected:null};
+  }
+  await writeCatalog(user.id,target,snapshot.tags,snapshot.pushMode==='title'?{mode:'title',op:'999999999999-import'}:{mode:'neutral',op:'999999999999-import'});
+  s.vaults.push(target);return target.header.id;
+});
+
+export interface PortableNoteImport {note:Note;tags:TagDefinition[];source?:{kind:'tasks-note-v1';vaultId:string;objectId:string}}
+function validPortableNote(input:PortableNoteImport){
+  const normalized=note(input.note);
+  if(!Array.isArray(input.tags)||input.tags.length>500||!input.tags.every(validTag))throw Error('Некорректные теги импортируемой заметки.');
+  if(input.source&&(!uuid.test(input.source.vaultId)||!uuid.test(input.source.objectId)))throw Error('Некорректный источник импортируемой заметки.');
+  return{note:normalized,tags:input.tags,source:input.source};
+}
+async function duplicateImported(userId:string,v:Vault,source:NonNullable<PortableNoteImport['source']>){
+  for(const r of heads(v)){const value=await readNote(userId,v,r);if(value.importSource?.vaultId===source.vaultId&&value.importSource.objectId===source.objectId)return true;}return false;
+}
+export async function noteImportIsDuplicate(user:User,vid:string,input:PortableNoteImport){
+  const checked=validPortableNote(input),s=await readState(user.id),v=s?.vaults.find(item=>item.header.id===vid);
+  if(!s||!v||v.deleted||!v.key)throw Error('Для импорта откройте целевое хранилище.');
+  return checked.source?duplicateImported(user.id,v,checked.source):false;
+}
+export const importPortableNote=(user:User,vid:string,input:PortableNoteImport,duplicatePolicy:'skip'|'copy')=>edit(user,async s=>{
+  const checked=validPortableNote(input),v=vault(s,vid);if(v.deleted||v.transfer)throw Error('Хранилище недоступно для импорта.');
+  const duplicate=checked.source?await duplicateImported(user.id,v,checked.source):false;if(duplicate&&duplicatePolicy==='skip')return{imported:false,duplicate:true};
+  const catalog=await readCatalog(user.id,v),tags=[...catalog.tags.map(tag=>({...tag}))],mapped:string[]=[];let changed=false;
+  for(const sourceId of checked.note.tagIds??[]){const sourceTag=checked.tags.find(tag=>tag.id===sourceId&&!tag.deleted);if(!sourceTag)continue;
+    let targetTag=tags.find(tag=>!tag.deleted&&tag.name.localeCompare(sourceTag.name,'ru',{sensitivity:'accent'})===0);
+    if(!targetTag){targetTag={id:id(),name:sourceTag.name,color:sourceTag.color.toUpperCase(),deleted:false,op:nextTagOp(tags)};tags.push(targetTag);changed=true;}mapped.push(targetTag.id);
+  }
+  if(changed)await writeCatalog(user.id,v,tags,catalog.push);
+  const {author:_,tagIds:__,reminder,...contents}=checked.note,objectId=id();
+  const value:Note={...contents,tagIds:mapped,...(reminder?{reminder:{...reminder,id:id(),state:'off'}}:{}),
+    ...(checked.source?{importSource:checked.source}:{}),author:{name:s.deviceName??'Устройство',time:Date.now()}};
+  const created=await addRevision(user.id,v,objectId,null,value);if(value.lifecycle?.state==='trashed')created.lifecyclePending={state:'trash',expected:null};
+  return{imported:true,duplicate};
 });
 class APIError extends Error {
   code: string;

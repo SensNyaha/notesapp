@@ -2,7 +2,7 @@
 
 Локально развёртываемая PWA для заметок, напоминаний и планирования со сквозным шифрованием содержимого.
 
-Текущая рабочая версия: **0.14.0**, SQLite schema **12**. Сервер и PWA слушают порт **3100**. Полная карта документации находится в [`docs/README.md`](docs/README.md), фактическое покрытие функций — в [`docs/IMPLEMENTATION_STATUS.md`](docs/IMPLEMENTATION_STATUS.md), дальнейший порядок разработки — в [`TODO.md`](TODO.md).
+Текущая рабочая версия: **0.15.0**, SQLite schema **12**. Сервер и PWA слушают порт **3100**. Полная карта документации находится в [`docs/README.md`](docs/README.md), фактическое покрытие функций — в [`docs/IMPLEMENTATION_STATUS.md`](docs/IMPLEMENTATION_STATUS.md), дальнейший порядок разработки — в [`TODO.md`](TODO.md).
 
 ## Что работает
 
@@ -23,6 +23,8 @@
 - разовые и повторяющиеся напоминания, экран «Сегодня», snooze и история срабатываний;
 - Web Push на все активные устройства аккаунта и повтор непросмотренного события;
 - архив, корзина на 30 дней, окончательное удаление и история версий;
+- экспорт любой заметки в ZIP с `note.md`, manifest и вложениями; импорт Tasks ZIP и обычного Markdown;
+- переносимый зашифрованный backup одного E2EE-хранилища с восстановлением только в новый vault и отдельным паролем backup; portable v1 ограничен 64 МиБ незашифрованного содержимого;
 - открытые названия закрытых хранилищ и диагностика свободного места для администратора;
 - транзакционные миграции, WAL-aware backup/restore и автоматические проверки.
 Архив, корзина, история и расширенные повторяющиеся напоминания реализованы, но их реальные сценарии на установленной PWA ещё отмечены как требующие пользовательской приёмки.
@@ -94,7 +96,7 @@ docker compose restart app
 docker compose stop app
 ```
 
-Ожидаемый health текущей версии содержит `status: ok`, `version: 0.14.0`, `database: ok`, постоянный `installationId`, `bootCount` и время сервера.
+Ожидаемый health текущей версии содержит `status: ok`, `version: 0.15.0`, `database: ok`, постоянный `installationId`, `bootCount` и время сервера.
 
 ## Запуск без Docker
 
@@ -115,7 +117,7 @@ npm run build
 npm run check
 ```
 
-`npm run build` уже включает typecheck, Vite production build и создание Service Worker. На версии **0.14.0** набор содержит **81 тест**. Они проверяют сервер, миграции, password/Passkey authentication, сессии, WebAuthn challenge/replay/origin/RP ID/UV, PRF-wrapper и auto-lock lifecycle, выбор unlock-flow, удаление vault с доказательством владения ключом, шифрование, синхронизацию, поиск, напоминания, push и PWA shell.
+`npm run build` уже включает typecheck, Vite production build и создание Service Worker. На версии **0.15.0** набор содержит **86 тестов**. Они проверяют сервер, миграции, password/Passkey authentication, сессии, WebAuthn, PRF/auto-lock, portable backup encryption/validation/restore, ZIP/Markdown import/export, duplicate policy, удаление vault, шифрование, синхронизацию, поиск, напоминания, push и PWA shell.
 
 Автоматические проверки не заменяют проверку установленной PWA, Safari, реальной доставки push и адаптивных экранов. Тестовый push при закрытой PWA ранее подтверждён пользователем на iOS 26.6.1.
 
@@ -136,7 +138,7 @@ docker compose -f compose.yaml -f compose.ca.yaml logs --tail 100 app
 
 ## Резервное копирование и восстановление
 
-Каталоги `data/` и `backups/` исключены из Git. Backup содержит хеши аккаунтов, серверные сессии, открытые служебные метаданные и зашифрованные пользовательские записи, поэтому доступ к нему нужно ограничивать.
+Каталоги `data/` и `backups/` исключены из Git. Ниже описан **административный SQLite backup сервера**: он содержит хеши аккаунтов, серверные сессии, открытые служебные метаданные и зашифрованные пользовательские записи. Пользовательский `.tasks-backup` из раздела «Данные» — другой формат: один E2EE vault на файл, отдельный пароль, расшифрование и восстановление выполняются только клиентом.
 
 Создать согласованный SQLite-снимок внутри volume:
 
@@ -160,7 +162,7 @@ docker compose exec -T app node server/cli/restore.mjs /data/tasks-backup.sqlite
 
 Команда восстановления не перезаписывает существующий каталог. Переключение `DATA_DIR` и откат версии выполняются только после проверки совместимости schema. Git сам по себе не восстанавливает SQLite, WAL, IndexedDB или Docker volume.
 
-Проверенные контрольные снимки перед миграциями хранятся в игнорируемой папке `backups/`: перед schema 10 — `before-stage13-schema10-20260914.sqlite` (SHA-256 `6CAF1A76AB5E127C3CC581BCEA2F511CD4882D95B3139328EF96954193A8468C`), перед schema 11 — `before-stage14b-schema11-20260917.sqlite` (SHA-256 `97B156375076D710B047E69ADE68B9E460DC2FE3294E14692FB9689BEF541F1D`), перед schema 12 / версией 0.14.0 — `before-stage14c-schema12-20260917.sqlite` (SHA-256 `92153DF4FCB669BD0D4EA161B94C0C8F7E69BDE6C5CEE7DC1C5163C250F8B91F`).
+Проверенные контрольные снимки перед миграциями хранятся в игнорируемой папке `backups/`: перед schema 10 — `before-stage13-schema10-20260914.sqlite` (SHA-256 `6CAF1A76AB5E127C3CC581BCEA2F511CD4882D95B3139328EF96954193A8468C`), перед schema 11 — `before-stage14b-schema11-20260917.sqlite` (SHA-256 `97B156375076D710B047E69ADE68B9E460DC2FE3294E14692FB9689BEF541F1D`), перед schema 12 / версией 0.15.0 — `before-stage14c-schema12-20260917.sqlite` (SHA-256 `92153DF4FCB669BD0D4EA161B94C0C8F7E69BDE6C5CEE7DC1C5163C250F8B91F`).
 
 ## Команды администратора
 

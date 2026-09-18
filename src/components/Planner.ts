@@ -15,6 +15,7 @@ import { reminderRequest, type ReminderSettings, type ReminderStatus, type Remin
 import { Attachments, RichTextEditor, sanitizeNoteHtml } from './RichTextEditor';
 import { noteSearchScore } from '../search';
 import { AuthError } from '../auth';
+import { createNoteZip, downloadBytes, noteZipFileName } from '../portable';
 
 interface Draft extends Note { vault: string; object: string; revision: string | null; dirty: boolean; key: CryptoKey }
 interface OpenedNote extends Note { vault: string; object: string; revision: string; key: CryptoKey }
@@ -306,6 +307,15 @@ export function Planner({ user,reminderTarget,onReminderHandled,onSyncState }: {
   async function duplicate(current:NonNullable<State['vaults'][number]>,revision:string){
     await flush();await copyNote(user,current.header.id,revision);showViewing(null);setMenuOpen(false);setStatus('Копия создана и сохранена на устройстве.');void sync();
   }
+  function exportViewingZip(){
+    if(!viewing)return;
+    const {vault:_,object:__,revision:___,key:____,...note}=viewing;
+    const source=note.importSource??{kind:'tasks-note-v1' as const,vaultId:viewing.vault,objectId:viewing.object};
+    const used=new Set(note.tagIds??[]),exportTags=(tags[viewing.vault]??[]).filter(tag=>used.has(tag.id)).map(tag=>({...tag}));
+    const bytes=createNoteZip({note,tags:exportTags,source});
+    downloadBytes(bytes,noteZipFileName(note.title||'note'),'application/zip');setMenuOpen(false);
+    setStatus('ZIP заметки создан. Внутри находятся note.md, manifest.json и вложения.');
+  }
   function statusOf(current:NonNullable<State['vaults'][number]>,revision:Revision,value:Note):NoteLifecycleState{return noteLifecycle(current,revision,value);}
   async function openHistory(current:NonNullable<State['vaults'][number]>,objectId:string,back:'list'|'archive'|'trash'){
     const entries=(await noteHistory(user.id,current,objectId)).sort((a,b)=>(b.note.author?.time??0)-(a.note.author?.time??0));
@@ -482,6 +492,7 @@ export function Planner({ user,reminderTarget,onReminderHandled,onSyncState }: {
       lifecycle==='active'&&e('button',{onClick:()=>{setMenuOpen(false);void run(()=>updateViewing({pinned:!viewing.pinned}));}},viewing.pinned?'Открепить':'Закрепить'),
       lifecycle==='active'&&e('button',{onClick:()=>showDraft({...viewing,dirty:false})},'Изменить теги'),
       lifecycle==='active'&&e('button',{disabled:busy,onClick:()=>{if(current)void run(()=>duplicate(current,viewing.revision));}},'Создать копию'),
+      e('button',{disabled:busy,onClick:exportViewingZip},'Экспортировать ZIP'),
       current&&e('button',{disabled:busy,onClick:()=>void run(()=>openHistory(current,viewing.object,lifecycle==='archived'?'archive':lifecycle==='trashed'?'trash':'list'))},'История версий'),
       lifecycle==='active'&&current&&e('button',{disabled:busy,onClick:()=>void run(()=>archiveCurrent(current,viewing.object))},'Архивировать'),
       lifecycle==='archived'&&current&&revision&&e('button',{disabled:busy,onClick:()=>void run(()=>restoreArchive(current,revision,viewing))},'Вернуть из архива'),

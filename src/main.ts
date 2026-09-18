@@ -10,6 +10,7 @@ import { CryptoCheck } from './components/CryptoCheck';
 import { Planner } from './components/Planner';
 import { Notifications } from './components/Notifications';
 import { ServerStorage } from './components/ServerStorage';
+import { DataTransfer } from './components/DataTransfer';
 import { detachPush, browserUnsubscribe } from './push';
 import { profiles, profileActivity, readState, eraseState, exclusive, announce, changes } from './storage';
 import { flushDraft, hasUnsaved, synchronize, requireOutboxReview, OutboxReviewRequired, lockAfterBackground } from './planner';
@@ -46,7 +47,7 @@ function DefinitionList({ rows }: { rows: DefinitionRow[] }) {
 function App() {
   const [user, setUser] = useState<User | null>(null);
   const userRef = useRef<User | null>(null); userRef.current = user;
-  const [page, setPage] = useState<'home' | 'password' | 'users' | 'devices' | 'passkeys' | 'diagnostics' | 'notifications'>('home');
+  const [page, setPage] = useState<'home' | 'password' | 'users' | 'devices' | 'passkeys' | 'diagnostics' | 'notifications' | 'data'>('home');
   const [localProfiles, setLocalProfiles] = useState<User[]>([]);
   const localMode = useRef(false);
   const [notice, setNotice] = useState('');
@@ -274,6 +275,7 @@ function App() {
       e('button', { onClick: () => void flushDraft().then(() => setPage('notifications')).catch(() => setAuthError('Сохраните черновик')) }, 'Уведомления'),
       e('button', { onClick: () => void flushDraft().then(() => setPage('devices')).catch(() => setAuthError('Сохраните черновик')) }, 'Устройства'),
       e('button', { onClick: () => void flushDraft().then(() => setPage('passkeys')).catch(() => setAuthError('Сохраните черновик')) }, 'Ключи доступа'),
+      e('button', { onClick: () => void flushDraft().then(() => setPage('data')).catch(() => setAuthError('Сохраните черновик')) }, 'Данные'),
       e('button', { onClick: () => void flushDraft().then(() => setPage('password')).catch(() => setAuthError('Сохраните черновик')) }, 'Изменить пароль'),
       user.role === 'admin' && e('button', { onClick: () => void flushDraft().then(() => setPage('users')).catch(() => setAuthError('Сохраните черновик')) }, 'Пользователи'),
       e('button', { onClick: () => void flushDraft().then(detachPush).then(() => { setUser(null); void profiles().then(setLocalProfiles); }).catch(error => setAuthError(error instanceof Error?error.message:'Сохраните черновик и проверьте сеть')) }, 'Войти снова / другой аккаунт')),
@@ -281,6 +283,7 @@ function App() {
     page === 'home' && e(Planner, { user, key: user.id, reminderTarget, onReminderHandled:()=>setReminderTarget(undefined),
       onSyncState:(next:'syncing'|'online'|'offline'|'auth'|'error'|'idle')=>{setSyncing(next==='syncing');if(next!=='syncing'&&next!=='idle')setConnection(next);} }),
     page === 'notifications' && e(Notifications, { user, key: user.id }),
+    page === 'data' && e(DataTransfer, { user, key: user.id }),
     updateNotice,
     page === 'diagnostics' && e('div', null,
     user.role==='admin'&&e(ServerStorage,{key:user.id}),
