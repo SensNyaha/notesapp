@@ -12,6 +12,7 @@ import { Notifications } from './components/Notifications';
 import { ServerStorage } from './components/ServerStorage';
 import { DataTransfer } from './components/DataTransfer';
 import { CollaborationScreen } from './components/Collaboration';
+import { ProjectsScreen } from './components/Projects';
 import { detachPush, browserUnsubscribe } from './push';
 import { profiles, profileActivity, readState, eraseState, exclusive, announce, changes } from './storage';
 import { flushDraft, hasUnsaved, synchronize, requireOutboxReview, OutboxReviewRequired, lockAfterBackground } from './planner';
@@ -49,7 +50,7 @@ function DefinitionList({ rows }: { rows: DefinitionRow[] }) {
 function App() {
   const [user, setUser] = useState<User | null>(null);
   const userRef = useRef<User | null>(null); userRef.current = user;
-  const [page, setPage] = useState<'home' | 'password' | 'users' | 'devices' | 'passkeys' | 'diagnostics' | 'notifications' | 'data' | 'collaboration'>('home');
+  const [page, setPage] = useState<'home' | 'projects' | 'password' | 'users' | 'devices' | 'passkeys' | 'diagnostics' | 'notifications' | 'data' | 'collaboration'>('home');
   const [localProfiles, setLocalProfiles] = useState<User[]>([]);
   const localMode = useRef(false);
   const [notice, setNotice] = useState('');
@@ -273,6 +274,7 @@ function App() {
     notice && e('p', { class: 'auth-notice', role: 'status' }, notice),
     e('nav', { class: 'actions', 'aria-label': 'Управление аккаунтом' },
       e('button', { onClick: () => void flushDraft().then(() => setPage('home')).catch(() => setAuthError('Сохраните черновик')) }, 'Заметки'),
+      e('button', { onClick: () => void flushDraft().then(() => setPage('projects')).catch(() => setAuthError('Сохраните черновик')) }, 'Проекты'),
       e('button', { onClick: () => void flushDraft().then(() => setPage('diagnostics')).catch(() => setAuthError('Сохраните черновик')) }, 'Диагностика'),
       e('button', { onClick: () => void flushDraft().then(() => setPage('notifications')).catch(() => setAuthError('Сохраните черновик')) }, 'Уведомления'),
       e('button', { onClick: () => void flushDraft().then(() => setPage('devices')).catch(() => setAuthError('Сохраните черновик')) }, 'Устройства'),
@@ -285,6 +287,7 @@ function App() {
     reminderTarget&&reminderTarget.accountId!==user.id&&e('p',{class:'auth-notice',role:'status'},'Уведомление относится к другому аккаунту. Войдите в нужный аккаунт, чтобы открыть заметку.'),
     page === 'home' && e(Planner, { user, key: user.id, reminderTarget, onReminderHandled:()=>setReminderTarget(undefined),
       onSyncState:(next:'syncing'|'online'|'offline'|'auth'|'error'|'idle')=>{setSyncing(next==='syncing');if(next!=='syncing'&&next!=='idle')setConnection(next);} }),
+    page === 'projects' && e(ProjectsScreen,{user,key:user.id,onBack:()=>setPage('home')}),
     page === 'notifications' && e(Notifications, { user, key: user.id }),
     page === 'collaboration' && e(CollaborationScreen,{user,key:user.id,onBack:()=>setPage('home')}),
     page === 'data' && e(DataTransfer, { user, key: user.id }),

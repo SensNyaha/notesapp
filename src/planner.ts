@@ -18,7 +18,13 @@ export interface TagDefinition { id:string;name:string;color:string;deleted:bool
 export type VaultPushMode='neutral'|'title';
 export type NoteLifecycleState='active'|'archived'|'trashed';
 export interface NoteLifecycle { state:NoteLifecycleState;changedAt:number }
+export type PlannerEntityKind='note'|'project'|'task';
+export type TaskStatus='todo'|'in_progress'|'done'|'cancelled';
+export type TaskPriority='none'|'low'|'medium'|'high';
+export interface ProjectMeta { favorite:boolean;startDate?:string;endDate?:string }
+export interface TaskMeta { status:TaskStatus;priority:TaskPriority;startDate?:string;endDate?:string;assigneeUserId?:string }
 export interface Note { title: string; text: string; html?:string;attachments?:NoteAttachment[];checklist?:ChecklistItem[];tagIds?:string[];pinned?:boolean;reminder?:ReminderPlan;
+  kind?:PlannerEntityKind;projectId?:string;project?:ProjectMeta;task?:TaskMeta;
   lifecycle?:NoteLifecycle;author?:{name:string;time:number};importSource?:{kind:'tasks-note-v1';vaultId:string;objectId:string} }
 export interface PortableVaultRevision { revisionId:string;objectId:string;parent:string|null;resolves:string[];note:Note }
 export interface PortableVaultSnapshot { format:'tasks-vault-snapshot';version:1;sourceVaultId:string;name:string;exportedAt:number;
@@ -60,9 +66,11 @@ function validAttachment(item:unknown):item is NoteAttachment{
     &&'size'in item&&typeof item.size==='number'&&Number.isSafeInteger(item.size)&&item.size>=0&&item.size<=512*1024&&'data'in item&&typeof item.data==='string'
     &&item.data.length<=700000&&/^data:[^;,]{1,100};base64,[A-Za-z0-9+/=]+$/.test(item.data));
 }
+const validDate=(value:unknown)=>typeof value==='string'&&/^\d{4}-\d\d-\d\d$/.test(value)&&!Number.isNaN(Date.parse(value+'T00:00:00Z'));
+export const entityKind=(value:Pick<Note,'kind'>):PlannerEntityKind=>value.kind??'note';
 function note(value: unknown): Note {
   if (!value || typeof value !== 'object' || !('title' in value) || typeof value.title !== 'string'
-    || !('text' in value) || typeof value.text !== 'string') throw Error('Повреждённая заметка');
+    || !('text' in value) || typeof value.text !== 'string') throw Error('Повреждённый объект хранилища');
   const author='author' in value?value.author:undefined;
   const reminder='reminder'in value?value.reminder:undefined;
   const html='html'in value?value.html:undefined;
@@ -72,24 +80,46 @@ function note(value: unknown): Note {
   const pinned='pinned'in value?value.pinned:undefined;
   const lifecycle='lifecycle'in value?value.lifecycle:undefined;
   const importSource='importSource'in value?value.importSource:undefined;
+  const kind='kind'in value?value.kind:undefined;
+  const projectId='projectId'in value?value.projectId:undefined;
+  const project='project'in value?value.project:undefined;
+  const task='task'in value?value.task:undefined;
+  if(kind!==undefined&&!['note','project','task'].includes(String(kind)))throw Error('Повреждён тип объекта');
+  if(projectId!==undefined&&(typeof projectId!=='string'||!uuid.test(projectId)))throw Error('Повреждена привязка к проекту');
   if(reminder!==undefined&&!validPlan(reminder))throw Error('Повреждено напоминание');
   if(html!==undefined&&typeof html!=='string')throw Error('Повреждено форматирование заметки');
   if(attachments!==undefined&&(!Array.isArray(attachments)||attachments.length>15||!attachments.every(validAttachment)
     ||attachments.reduce((sum,item)=>sum+item.size,0)>512*1024))throw Error('Повреждены вложения заметки');
   if(checklist!==undefined&&(!Array.isArray(checklist)||checklist.length>500||!checklist.every(item=>item&&typeof item==='object'
     &&'id'in item&&typeof item.id==='string'&&item.id.length<=100&&'text'in item&&typeof item.text==='string'&&item.text.length<=1000
-    &&'done'in item&&typeof item.done==='boolean')))throw Error('Повреждён чек-лист заметки');
+    &&'done'in item&&typeof item.done==='boolean')))throw Error('Повреждён чек-лист');
   if(tagIds!==undefined&&(!Array.isArray(tagIds)||tagIds.length>100||!tagIds.every(item=>typeof item==='string'&&item.length<=100)
-    ||new Set(tagIds).size!==tagIds.length))throw Error('Повреждены теги заметки');
-  if(pinned!==undefined&&typeof pinned!=='boolean')throw Error('Повреждён признак закрепления заметки');
+    ||new Set(tagIds).size!==tagIds.length))throw Error('Повреждены теги');
+  if(pinned!==undefined&&typeof pinned!=='boolean')throw Error('Повреждён признак закрепления');
   if(lifecycle!==undefined&&(!lifecycle||typeof lifecycle!=='object'||!('state'in lifecycle)||!['active','archived','trashed'].includes(String(lifecycle.state))
-    ||!('changedAt'in lifecycle)||!Number.isSafeInteger(lifecycle.changedAt)))throw Error('Повреждён жизненный цикл заметки');
+    ||!('changedAt'in lifecycle)||!Number.isSafeInteger(lifecycle.changedAt)))throw Error('Повреждён жизненный цикл');
+  if(project!==undefined){
+    if(!project||typeof project!=='object'||!('favorite'in project)||typeof project.favorite!=='boolean')throw Error('Повреждён проект');
+    const start='startDate'in project?project.startDate:undefined,end='endDate'in project?project.endDate:undefined;
+    if(start!==undefined&&!validDate(start)||end!==undefined&&!validDate(end)||start&&end&&String(start)>String(end))throw Error('Повреждены даты проекта');
+  }
+  if(task!==undefined){
+    if(!task||typeof task!=='object'||!('status'in task)||!['todo','in_progress','done','cancelled'].includes(String(task.status))
+      ||!('priority'in task)||!['none','low','medium','high'].includes(String(task.priority)))throw Error('Повреждена задача');
+    const start='startDate'in task?task.startDate:undefined,end='endDate'in task?task.endDate:undefined,assignee='assigneeUserId'in task?task.assigneeUserId:undefined;
+    if(start!==undefined&&!validDate(start)||end!==undefined&&!validDate(end)||start&&end&&String(start)>String(end)
+      ||assignee!==undefined&&(typeof assignee!=='string'||!uuid.test(assignee)))throw Error('Повреждены параметры задачи');
+  }
+  const normalizedKind=(kind??'note') as PlannerEntityKind;
+  if(normalizedKind==='project'&&!project||normalizedKind==='task'&&!task||normalizedKind==='project'&&projectId!==undefined)throw Error('Повреждена структура объекта');
   if(importSource!==undefined&&(!importSource||typeof importSource!=='object'||!('kind'in importSource)||importSource.kind!=='tasks-note-v1'
     ||!('vaultId'in importSource)||typeof importSource.vaultId!=='string'||!uuid.test(importSource.vaultId)
     ||!('objectId'in importSource)||typeof importSource.objectId!=='string'||!uuid.test(importSource.objectId)))throw Error('Повреждён источник импортированной заметки');
   return { title: value.title, text: value.text, ...(html!==undefined?{html}:{}), ...(attachments?{attachments:attachments as NoteAttachment[]}:{}),
     ...(checklist?{checklist:checklist as ChecklistItem[]}:{}),...(tagIds?{tagIds:tagIds as string[]}:{}),...(pinned!==undefined?{pinned}:{}),
-    ...(reminder?{reminder}:{}),...(lifecycle?{lifecycle:lifecycle as NoteLifecycle}:{}), ...(author&&typeof author==='object'&&'name'in author&&typeof author.name==='string'&&'time'in author&&Number.isSafeInteger(author.time)
+    ...(reminder?{reminder}:{}),...(kind!==undefined?{kind:normalizedKind}:{}),...(projectId!==undefined?{projectId:projectId as string}:{}),
+    ...(project?{project:project as ProjectMeta}:{}),...(task?{task:task as TaskMeta}:{}),
+    ...(lifecycle?{lifecycle:lifecycle as NoteLifecycle}:{}), ...(author&&typeof author==='object'&&'name'in author&&typeof author.name==='string'&&'time'in author&&Number.isSafeInteger(author.time)
     ?{author:author as {name:string;time:number}}:{}),...(importSource?{importSource:importSource as Note['importSource']}:{}) };
 }
 export async function readNote(user: string, v: Vault, r: Revision): Promise<Note> {
@@ -343,6 +373,92 @@ export async function copyNote(user:User,vid:string,revisionId:string){
   if(result.shared&&result.reminder)await setPersonalReminderLocal(user,vid,result.objectId,result.reminder);
   return result.id;
 }
+
+export interface WorkspaceItem {revision:Revision;value:Note;lifecycle:NoteLifecycleState}
+export interface ProjectWorkspace {vault:Vault;projects:WorkspaceItem[];tasks:WorkspaceItem[];notes:WorkspaceItem[];conflicts:string[]}
+export async function readProjectWorkspace(user:User,vid:string):Promise<ProjectWorkspace>{
+  const state=await readState(user.id),v=state?.vaults.find(item=>item.header.id===vid&&!item.deleted);
+  if(!state||!v||!v.key)throw Error('Сначала откройте хранилище в разделе «Заметки».');
+  const byObject=new Map<string,Revision[]>();for(const r of heads(v)){const list=byObject.get(r.objectId)??[];list.push(r);byObject.set(r.objectId,list);}
+  const projects:WorkspaceItem[]=[],tasks:WorkspaceItem[]=[],notes:WorkspaceItem[]=[],conflicts:string[]=[];
+  for(const [objectId,versions] of byObject){
+    if(versions.length!==1){conflicts.push(objectId);continue;}
+    const revision=versions[0],value=await readNote(user.id,v,revision),lifecycle=noteLifecycle(v,revision,value),item={revision,value,lifecycle};
+    const kind=entityKind(value);if(kind==='project')projects.push(item);else if(kind==='task')tasks.push(item);else notes.push(item);
+  }
+  return{vault:v,projects,tasks,notes,conflicts};
+}
+function cleanTitle(value:string,label:string){const text=value.trim();if(!text||text.length>200)throw Error(label+': от 1 до 200 символов');return text;}
+function projectMeta(input:ProjectMeta):ProjectMeta{
+  const value={favorite:Boolean(input.favorite),...(input.startDate?{startDate:input.startDate}:{}),...(input.endDate?{endDate:input.endDate}:{})};
+  if(value.startDate&&!validDate(value.startDate)||value.endDate&&!validDate(value.endDate)||value.startDate&&value.endDate&&value.startDate>value.endDate)throw Error('Проверьте даты проекта.');
+  return value;
+}
+function taskMeta(input:TaskMeta):TaskMeta{
+  if(!['todo','in_progress','done','cancelled'].includes(input.status)||!['none','low','medium','high'].includes(input.priority))throw Error('Некорректный статус или приоритет задачи.');
+  const value={status:input.status,priority:input.priority,...(input.startDate?{startDate:input.startDate}:{}),...(input.endDate?{endDate:input.endDate}:{}),...(input.assigneeUserId?{assigneeUserId:input.assigneeUserId}:{})};
+  if(value.startDate&&!validDate(value.startDate)||value.endDate&&!validDate(value.endDate)||value.startDate&&value.endDate&&value.startDate>value.endDate)throw Error('Проверьте даты задачи.');
+  if(value.assigneeUserId&&!uuid.test(value.assigneeUserId))throw Error('Некорректный исполнитель.');
+  return value;
+}
+export async function createProject(user:User,vid:string,input:{title:string;description?:string;favorite?:boolean;startDate?:string;endDate?:string}){
+  const objectId=id(),value:Note={kind:'project',title:cleanTitle(input.title,'Название проекта'),text:(input.description??'').slice(0,10000),
+    project:projectMeta({favorite:Boolean(input.favorite),...(input.startDate?{startDate:input.startDate}:{}),...(input.endDate?{endDate:input.endDate}:{})})};
+  const result=await saveNote(user,vid,objectId,null,value);return{objectId,revisionId:result.id};
+}
+export async function updateProject(user:User,vid:string,objectId:string,input:{title:string;description?:string;favorite?:boolean;startDate?:string;endDate?:string}){
+  const state=await readState(user.id),v=state?.vaults.find(item=>item.header.id===vid);if(!v?.key)throw Error('Откройте хранилище.');
+  const current=oneHead(v,objectId),previous=await readNote(user.id,v,current);if(entityKind(previous)!=='project')throw Error('Проект не найден.');
+  return saveNote(user,vid,objectId,current.id,{...previous,title:cleanTitle(input.title,'Название проекта'),text:(input.description??'').slice(0,10000),
+    project:projectMeta({favorite:Boolean(input.favorite),...(input.startDate?{startDate:input.startDate}:{}),...(input.endDate?{endDate:input.endDate}:{})})});
+}
+export async function setProjectArchived(user:User,vid:string,objectId:string,archived:boolean){
+  const state=await readState(user.id),v=state?.vaults.find(item=>item.header.id===vid);if(!v?.key)throw Error('Откройте хранилище.');
+  const current=oneHead(v,objectId),previous=await readNote(user.id,v,current);if(entityKind(previous)!=='project')throw Error('Проект не найден.');
+  return saveNote(user,vid,objectId,current.id,{...previous,lifecycle:{state:archived?'archived':'active',changedAt:Date.now()}});
+}
+export async function createTask(user:User,vid:string,input:{title:string;description?:string;projectId?:string;status?:TaskStatus;priority?:TaskPriority;startDate?:string;endDate?:string;assigneeUserId?:string;checklist?:ChecklistItem[];tagIds?:string[];reminder?:ReminderPlan}){
+  const objectId=id(),value:Note={kind:'task',title:cleanTitle(input.title,'Название задачи'),text:(input.description??'').slice(0,20000),
+    ...(input.projectId?{projectId:input.projectId}:{}),task:taskMeta({status:input.status??'todo',priority:input.priority??'none',
+      ...(input.startDate?{startDate:input.startDate}:{}),...(input.endDate?{endDate:input.endDate}:{}),...(input.assigneeUserId?{assigneeUserId:input.assigneeUserId}:{})}),
+    ...(input.checklist?.length?{checklist:input.checklist}:{}),...(input.tagIds?.length?{tagIds:input.tagIds}:{}),...(input.reminder?{reminder:input.reminder}:{})};
+  const result=await saveNote(user,vid,objectId,null,value);return{objectId,revisionId:result.id};
+}
+export async function updateTask(user:User,vid:string,objectId:string,input:{title:string;description?:string;projectId?:string;status:TaskStatus;priority:TaskPriority;startDate?:string;endDate?:string;assigneeUserId?:string;checklist?:ChecklistItem[];tagIds?:string[];reminder?:ReminderPlan}){
+  const state=await readState(user.id),v=state?.vaults.find(item=>item.header.id===vid);if(!v?.key)throw Error('Откройте хранилище.');
+  const current=oneHead(v,objectId),previous=await readNote(user.id,v,current);if(entityKind(previous)!=='task')throw Error('Задача не найдена.');
+  const value:Note={...previous,title:cleanTitle(input.title,'Название задачи'),text:(input.description??'').slice(0,20000),
+    projectId:input.projectId||undefined,task:taskMeta({status:input.status,priority:input.priority,...(input.startDate?{startDate:input.startDate}:{}),
+      ...(input.endDate?{endDate:input.endDate}:{}),...(input.assigneeUserId?{assigneeUserId:input.assigneeUserId}:{})}),
+    checklist:input.checklist?.length?input.checklist:undefined,tagIds:input.tagIds?.length?input.tagIds:undefined,reminder:input.reminder};
+  if(!input.projectId)delete value.projectId;if(!input.reminder)delete value.reminder;
+  return saveNote(user,vid,objectId,current.id,value);
+}
+export async function movePlannerObject(user:User,vid:string,objectId:string,projectId?:string){
+  const state=await readState(user.id),v=state?.vaults.find(item=>item.header.id===vid);if(!v?.key)throw Error('Откройте хранилище.');
+  if(projectId){const projectRevision=oneHead(v,projectId),projectValue=await readNote(user.id,v,projectRevision);if(entityKind(projectValue)!=='project'||noteLifecycle(v,projectRevision,projectValue)!=='active')throw Error('Целевой проект недоступен.');}
+  const current=oneHead(v,objectId),previous=await readNote(user.id,v,current);if(entityKind(previous)==='project')throw Error('Проекты нельзя вкладывать друг в друга.');
+  const next={...previous,projectId:projectId||undefined};if(!projectId)delete next.projectId;
+  return saveNote(user,vid,objectId,current.id,next);
+}
+export async function deleteProject(user:User,vid:string,projectId:string,withContents:boolean){
+  return edit(user,async s=>{
+    const v=vault(s,vid);if(v.shared&&v.role!=='owner')throw Error('Удалять проект в совместном хранилище может только владелец.');
+    const projectRevision=oneHead(v,projectId),project=await readNote(user.id,v,projectRevision);if(entityKind(project)!=='project')throw Error('Проект не найден.');
+    const assigned:{revision:Revision;value:Note}[]=[];
+    for(const r of heads(v)){if(r.objectId===projectId)continue;const value=await readNote(user.id,v,r);if(value.projectId===projectId)assigned.push({revision:r,value});}
+    const markPurge=async(revision:Revision,value:Note)=>{
+      const expected=lifecycleExpected(v,revision.objectId),reminder=value.reminder?{...value.reminder,state:'off' as const}:undefined;
+      const created=await addRevision(user.id,v,revision.objectId,revision.id,{...value,lifecycle:{state:'trashed',changedAt:Date.now()},reminder,author:{name:s.deviceName??'Устройство',time:Date.now()}});
+      created.lifecyclePending={state:'trash',expected};v.purgePending??=[];if(!v.purgePending.includes(revision.objectId))v.purgePending.push(revision.objectId);
+    };
+    if(withContents)for(const item of assigned)await markPurge(item.revision,item.value);
+    else for(const item of assigned){const next={...item.value,projectId:undefined,author:{name:s.deviceName??'Устройство',time:Date.now()}};delete next.projectId;await addRevision(user.id,v,item.revision.objectId,item.revision.id,next);}
+    await markPurge(projectRevision,project);
+    return{affected:assigned.length};
+  });
+}
+
 function stashContext(s: State, sid: string): Context {
   return { accountId: s.user.id, vaultId: s.user.id, keyId: s.user.id, objectId: sid, revisionId: sid };
 }

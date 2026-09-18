@@ -14,6 +14,7 @@ import { signAccess } from '../src/crypto/access.ts';
 import { createVault, openVault, closeVault, saveNote, readNote, heads, synchronize, transferVault,
   readStash, moveStash, discardStash, edit, closeAllVault, deleteVault, resolveConflict, renameDevice, acknowledgeReminder, context, vaultName,
   readTags,createTag,renameTag,deleteTag,copyNote,readVaultPushMode,setVaultPushMode,archiveNote,restoreArchivedNote,trashNote,
+  createProject,updateProject,createTask,updateTask,movePlannerObject,deleteProject,readProjectWorkspace,
   restoreTrashedNote,permanentlyDeleteNote,restoreNoteVersion,noteHistory,noteLifecycle,requireOutboxReview,outboxReviewItems,decideOutboxReview,OutboxReviewRequired } from '../src/planner.ts';
 import { readState, writeState, changes } from '../src/storage.ts';
 
@@ -325,6 +326,22 @@ test('vault persistence, offline queue, conflicts, deletion and encrypted stash 
     await writeState(beforeConcurrent);await renameTag(user,vid,tagId,'Старая офлайн-правка','#654321');offline=false;await synchronize(user);
     await writeState(deletedOnDevice);await synchronize(user);s=await readState(user.id);v=s.vaults.find(item=>item.header.id===vid);
     assert.equal((await readTags(user.id,v)).find(tag=>tag.id===tagId).deleted,true);assert.deepEqual((await readNote(user.id,v,heads(v)[0])).tagIds,[tagId]);
+  });
+  await t.test('projects and tasks stay E2EE, move safely, and project deletion can preserve contents',async()=>{
+    const vid=await createVault(user,'Планировщик','abcdef');
+    const project=await createProject(user,vid,{title:'PRIVATE PROJECT 1701',description:'PRIVATE PROJECT BODY 1702',favorite:true,startDate:'2027-04-01',endDate:'2027-04-30'});
+    const task=await createTask(user,vid,{title:'PRIVATE TASK 1703',description:'PRIVATE TASK BODY 1704',projectId:project.objectId,status:'in_progress',priority:'high',startDate:'2027-04-02',endDate:'2027-04-05',checklist:[{id:randomUUID(),text:'PRIVATE TASK CHECK 1705',done:false}]});
+    let model=await readProjectWorkspace(user,vid);assert.equal(model.projects.length,1);assert.equal(model.tasks.length,1);assert.equal(model.notes.length,0);
+    assert.equal(model.projects[0].value.project.favorite,true);assert.equal(model.tasks[0].value.projectId,project.objectId);assert.equal(model.tasks[0].value.task.status,'in_progress');
+    let local=await readState(user.id),encrypted=JSON.stringify(local.vaults.find(v=>v.header.id===vid).records);
+    assert.ok(!encrypted.includes('PRIVATE PROJECT 1701'));assert.ok(!encrypted.includes('PRIVATE PROJECT BODY 1702'));assert.ok(!encrypted.includes('PRIVATE TASK 1703'));assert.ok(!encrypted.includes('PRIVATE TASK BODY 1704'));assert.ok(!encrypted.includes('PRIVATE TASK CHECK 1705'));
+    await updateProject(user,vid,project.objectId,{title:'Проект после правки',description:'Описание',favorite:false,startDate:'2027-04-01',endDate:'2027-05-01'});
+    await updateTask(user,vid,task.objectId,{title:'Задача после правки',description:'Текст',status:'done',priority:'medium',startDate:'2027-04-02',endDate:'2027-04-06'});
+    await movePlannerObject(user,vid,task.objectId);model=await readProjectWorkspace(user,vid);
+    assert.equal(model.tasks[0].value.projectId,undefined);assert.equal(model.tasks[0].value.task.status,'done');
+    await movePlannerObject(user,vid,task.objectId,project.objectId);await deleteProject(user,vid,project.objectId,false);model=await readProjectWorkspace(user,vid);
+    assert.equal(model.projects.length,1);assert.equal(model.projects[0].lifecycle,'trashed');assert.equal(model.tasks.length,1);assert.equal(model.tasks[0].value.projectId,undefined);
+    await edit(user,async s=>{s.vaults=s.vaults.filter(v=>v.header.id!==vid);});
   });
   await t.test('archive, trash, encrypted history and permanent purge survive offline synchronization',async()=>{
     const vid=await createVault(user,'Жизненный цикл','abcdef'),oid=randomUUID(),reminder={id:randomUUID(),state:'active',local:'2027-03-20T10:00',mode:'neutral',text:''};

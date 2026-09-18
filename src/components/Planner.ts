@@ -6,7 +6,7 @@ import { createVault, openVault, closeVault, saveNote, readNote, vaultName, head
   readStash, moveStash, discardStash, discardPurgedObjects, registerDraftFlush, edit, hasUnsaved, closeAllVault, resolveConflict, renameDevice,
   acknowledgeReminder, readTags, createTag, renameTag, deleteTag, copyNote, readVaultPushMode, setVaultPushMode,
   archiveNote,restoreArchivedNote,trashNote,restoreTrashedNote,permanentlyDeleteNote,noteHistory,restoreNoteVersion,noteLifecycle,
-  outboxReviewItems,decideOutboxReview,OutboxReviewRequired,enableSystemUnlock,unlockVaultSystem,lockVault,forgetSystemUnlock,setSystemAutoLock,lockAfterBackground,deleteVault,vaultEntryMode,enableVaultSharing,
+  outboxReviewItems,decideOutboxReview,OutboxReviewRequired,enableSystemUnlock,unlockVaultSystem,lockVault,forgetSystemUnlock,setSystemAutoLock,lockAfterBackground,deleteVault,vaultEntryMode,enableVaultSharing,entityKind,
   type Note, type TagDefinition, type VaultPushMode, type NoteLifecycleState, type OutboxReviewItem } from '../planner';
 import { AUTO_LOCK_VALUES, type AutoLockMs } from '../crypto/system-unlock';
 import { localTime } from '../../shared/reminders.mjs';
@@ -128,10 +128,10 @@ export function Planner({ user,reminderTarget,onReminderHandled,onSyncState }: {
         { title: snapshot.title, text: snapshot.text,...(snapshot.html!==undefined?{html:snapshot.html}:{}),
           ...(snapshot.attachments?.length?{attachments:snapshot.attachments}:{}),...(snapshot.checklist?.length?{checklist:snapshot.checklist}:{}),
           ...(snapshot.tagIds?.length?{tagIds:snapshot.tagIds}:{}),...(snapshot.pinned?{pinned:true}:{}),...(snapshot.reminder?{reminder:snapshot.reminder}:{}),
-          ...(snapshot.lifecycle?{lifecycle:snapshot.lifecycle}:{}) }, snapshot.key);
+          ...(snapshot.projectId?{projectId:snapshot.projectId}:{}),...(snapshot.lifecycle?{lifecycle:snapshot.lifecycle}:{}) }, snapshot.key);
       const latest = draftRef.current;
       if (latest && latest.object === snapshot.object) {
-        const comparable=(value:Note)=>JSON.stringify({title:value.title,text:value.text,html:value.html,attachments:value.attachments??[],checklist:value.checklist??[],tagIds:value.tagIds??[],pinned:Boolean(value.pinned),reminder:value.reminder,lifecycle:value.lifecycle});
+        const comparable=(value:Note)=>JSON.stringify({title:value.title,text:value.text,html:value.html,attachments:value.attachments??[],checklist:value.checklist??[],tagIds:value.tagIds??[],pinned:Boolean(value.pinned),reminder:value.reminder,projectId:value.projectId,lifecycle:value.lifecycle});
         const unchanged = comparable(latest)===comparable(snapshot);
         showDraft({ ...latest, revision: result.id, dirty: !unchanged });
       }
@@ -573,7 +573,7 @@ export function Planner({ user,reminderTarget,onReminderHandled,onSyncState }: {
       feedback);
   }
   if(viewing&&!draft){const current=state?.vaults.find(item=>item.header.id===viewing.vault),versions=current?heads(current).filter(item=>item.objectId===viewing.object):[],competing=versions.length>1,
-    revision=versions.find(item=>item.id===viewing.revision),lifecycle=current&&revision?statusOf(current,revision,viewing):'active',readOnly=Boolean(current?.membershipRevoked||current?.role==='viewer');return e('section',{class:'card note-view'},
+    revision=versions.find(item=>item.id===viewing.revision),lifecycle=current&&revision?statusOf(current,revision,viewing):'active',readOnly=Boolean(current?.membershipRevoked||current?.role==='viewer'||entityKind(viewing)!=='note');return e('section',{class:'card note-view'},
     e('div',{class:'actions note-view-actions'},e('button',{onClick:()=>{showViewing(null);setMenuOpen(false);}},'Назад'),
       e('div',{class:'actions compact'},e('button',{disabled:competing,onClick:()=>setMenuOpen(!menuOpen),'aria-expanded':menuOpen&&!competing},'Действия'),lifecycle==='active'&&!competing&&!readOnly&&e('button',{class:'primary',onClick:()=>showDraft({...viewing,dirty:false})},'Редактировать'))),
     competing&&e('div',{class:'error',role:'status'},'Заметка изменена на нескольких устройствах. Выберите версию, прежде чем редактировать.',
@@ -589,7 +589,7 @@ export function Planner({ user,reminderTarget,onReminderHandled,onSyncState }: {
       lifecycle!=='trashed'&&current&&!readOnly&&e('button',{class:'menu-danger',disabled:busy,onClick:()=>{if(confirm('Переместить заметку в корзину? Она будет окончательно удалена через 30 дней.'))void run(()=>trashCurrent(current,viewing.object));}},'Удалить'),
       lifecycle==='trashed'&&current&&!readOnly&&e('button',{disabled:busy,onClick:()=>void run(()=>restoreTrash(current,viewing.object))},'Восстановить'),
       lifecycle==='trashed'&&current&&!readOnly&&(!current.shared||current.role==='owner')&&e('button',{class:'menu-danger',disabled:busy,onClick:()=>{if(confirm('Удалить заметку и всю историю навсегда? Восстановить её средствами приложения будет невозможно.'))void run(()=>purgeCurrent(current,viewing.object));}},'Удалить навсегда')),
-    readOnly&&e('p',{class:'auth-notice'},current?.membershipRevoked?'Доступ отозван. Это только ранее загруженная локальная копия; изменения не отправляются на сервер.':'Роль «Просмотр»: содержимое заметки нельзя изменять. Комментарии разрешены отдельно.'),
+    readOnly&&e('p',{class:'auth-notice'},entityKind(viewing)!=='note'?'Это задача проекта. Для изменения статуса, сроков и проекта откройте раздел «Проекты».':current?.membershipRevoked?'Доступ отозван. Это только ранее загруженная локальная копия; изменения не отправляются на сервер.':'Роль «Просмотр»: содержимое заметки нельзя изменять. Комментарии разрешены отдельно.'),
     lifecycle!=='active'&&e('p',{class:lifecycle==='trashed'?'lifecycle-banner trash':'lifecycle-banner'},lifecycle==='archived'?'Заметка находится в архиве. Напоминание приостановлено.':'Заметка находится в корзине. Она будет удалена автоматически через 30 дней.'),
     e('h1',null,viewing.title||'Без заголовка'),
     tagChips(viewing.vault,viewing.tagIds).length>0&&e('div',{class:'tag-list'},tagChips(viewing.vault,viewing.tagIds).map(tag=>e('span',{class:'tag-chip',style:{'--tag-color':tag.color},key:tag.id},tag.name))),
@@ -727,19 +727,19 @@ export function Planner({ user,reminderTarget,onReminderHandled,onSyncState }: {
       e('label',null,editingTag?'Название тега':'Новый тег',e('input',{required:true,maxLength:60,value:tagName,onInput:(ev:Event)=>setTagName((ev.target as HTMLInputElement).value)})),
       e('label',null,'Цвет',e('input',{type:'color',value:tagColor,onInput:(ev:Event)=>setTagColor((ev.target as HTMLInputElement).value)})),
       e('button',{class:'primary',disabled:busy},editingTag?'Сохранить':'Добавить'),editingTag&&e('button',{type:'button',onClick:()=>{setEditingTag('');setTagName('');}},'Отмена')),
-    catalog.map(tag=>{const count=heads(v).filter(r=>(notes[r.id]?.tagIds??[]).includes(tag.id)).length;return e('div',{class:'tag-manage-row',key:tag.id},
-      e('span',{class:'tag-chip',style:{'--tag-color':tag.color}},tag.name),e('small',null,count+' заметок'),
+    catalog.map(tag=>{const count=heads(v).filter(r=>entityKind(notes[r.id]??{title:'',text:''})!=='project'&&(notes[r.id]?.tagIds??[]).includes(tag.id)).length;return e('div',{class:'tag-manage-row',key:tag.id},
+      e('span',{class:'tag-chip',style:{'--tag-color':tag.color}},tag.name),e('small',null,count+' объектов'),
       e('button',{onClick:()=>{setEditingTag(tag.id);setTagName(tag.name);setTagColor(tag.color);}},'Изменить'),
       e('button',{class:'icon-danger',onClick:()=>{if(confirm('Удалить тег «'+tag.name+'»? Заметки останутся на месте.'))void run(async()=>{await deleteTag(user,selected,tag.id);setSelectedTags(current=>current.filter(id=>id!==tag.id));void sync();});}},'Удалить'));}),feedback);
   }
   if((screen==='archive'||screen==='trash')&&v?.key){const wanted=screen==='archive'?'archived':'trashed',normalized=query.trim().toLocaleLowerCase('ru');
     const conflictObjects=[...new Set(heads(v).map(revision=>revision.objectId))].filter(objectId=>{const versions=heads(v).filter(revision=>revision.objectId===objectId);return versions.length>1&&versions.some(revision=>notes[revision.id]&&statusOf(v,revision,notes[revision.id])===wanted);});
-    const items=heads(v).map(revision=>({revision,note:notes[revision.id]})).filter((item):item is {revision:Revision;note:Note}=>Boolean(item.note))
+    const items=heads(v).map(revision=>({revision,note:notes[revision.id]})).filter((item):item is {revision:Revision;note:Note}=>Boolean(item.note)&&entityKind(item.note!)==='note')
       .filter(item=>!conflictObjects.includes(item.revision.objectId)&&statusOf(v,item.revision,item.note)===wanted&&!(screen==='trash'&&v.purgePending?.includes(item.revision.objectId))&&selectedTags.every(tagId=>(item.note.tagIds??[]).includes(tagId)))
       .map(item=>({...item,score:normalized?noteSearchScore(query,{note:item.note,tags:tagChips(v.header.id,item.note.tagIds)}):0})).filter(item=>!normalized||item.score)
       .sort((a,b)=>normalized?(searchSort==='relevance'?b.score-a.score:searchSort==='oldest'?(a.note.author?.time??0)-(b.note.author?.time??0):(b.note.author?.time??0)-(a.note.author?.time??0))
         :sort==='title'?a.note.title.localeCompare(b.note.title,'ru'):sort==='oldest'?(a.note.author?.time??0)-(b.note.author?.time??0):(b.note.author?.time??0)-(a.note.author?.time??0));
-    const all=heads(v).map(revision=>({revision,note:notes[revision.id]})).filter((item):item is {revision:Revision;note:Note}=>Boolean(item.note)&&statusOf(v,item.revision,item.note)===wanted&&!v.purgePending?.includes(item.revision.objectId));
+    const all=heads(v).map(revision=>({revision,note:notes[revision.id]})).filter((item):item is {revision:Revision;note:Note}=>Boolean(item.note)&&entityKind(item.note!)==='note'&&statusOf(v,item.revision,item.note)===wanted&&!v.purgePending?.includes(item.revision.objectId));
     return e('section',{class:'card planner lifecycle-screen'},
       e('div',{class:'card-heading'},e('button',{onClick:()=>{setQuery('');setSelectedTags([]);setScreen('list');}},'Назад'),e('h1',null,screen==='archive'?'Архив':'Корзина'),
         screen==='trash'&&Boolean(all.length)&&e('button',{class:'danger-button',disabled:busy,onClick:()=>{if(confirm('Окончательно удалить все заметки из корзины и всю их историю?'))void run(async()=>{for(const item of all)await permanentlyDeleteNote(user,v.header.id,item.revision.objectId);setStatus('Очистка корзины поставлена в очередь синхронизации.');void sync();});}},'Очистить корзину')),
@@ -766,7 +766,7 @@ export function Planner({ user,reminderTarget,onReminderHandled,onSyncState }: {
   }
   const normalizedQuery=query.trim().toLocaleLowerCase('ru');
   const candidates=(normalizedQuery?(state?.vaults??[]).filter(current=>current.key&&!current.deleted&&!current.transfer):v?.key?[v]:[]).flatMap(current=>
-    heads(current).map(revision=>({current,revision,note:notes[revision.id]})).filter(item=>Boolean(item.note)&&statusOf(current,item.revision,item.note!)==='active'));
+    heads(current).map(revision=>({current,revision,note:notes[revision.id]})).filter(item=>Boolean(item.note)&&entityKind(item.note!)==='note'&&statusOf(current,item.revision,item.note!)==='active'));
   const visibleItems=candidates.map(item=>({...item,score:normalizedQuery?noteSearchScore(query,{note:item.note!,tags:tagChips(item.current.header.id,item.note!.tagIds)}):0})).filter(({current,note,score})=>{
     if(normalizedQuery&&!score)return false;
     if(quickFilter==='pinned'&&!note!.pinned||quickFilter==='untagged'&&(note!.tagIds??[]).some(id=>activeTags(current.header.id).some(tag=>tag.id===id))||quickFilter==='reminder'&&!note!.reminder)return false;
@@ -828,9 +828,9 @@ export function Planner({ user,reminderTarget,onReminderHandled,onSyncState }: {
           });
         }},'Удалить хранилище')),
       v.transfer && e('p', { class: 'auth-notice' }, 'Перенос подготовлен. Подключитесь к сети и завершите синхронизацию. Исходник сохранён до подтверждения.'),
-      !heads(v).some(r=>notes[r.id]&&statusOf(v,r,notes[r.id])==='active') && !normalizedQuery&&e('div', { class: 'empty-state' }, e('h2', null, 'Пока нет заметок'), e('p', null, 'Создайте первую заметку или верните заметку из архива.')),
-      heads(v).some(r=>notes[r.id]&&statusOf(v,r,notes[r.id])==='active')&&!visibleItems.length&&e('div',{class:'empty-state'},e('h2',null,'Ничего не найдено'),e('p',null,'Измените запрос или сбросьте фильтры.'),e('button',{onClick:()=>{setQuery('');setSelectedTags([]);setQuickFilter('all');}},'Сбросить фильтры')),
-      [...new Set(heads(v).map(r=>r.objectId))].filter(objectId=>{const versions=heads(v).filter(r=>r.objectId===objectId);return versions.length>1&&versions.some(r=>notes[r.id]&&statusOf(v,r,notes[r.id])==='active');}).map(objectId=>
+      !heads(v).some(r=>notes[r.id]&&entityKind(notes[r.id])==='note'&&statusOf(v,r,notes[r.id])==='active') && !normalizedQuery&&e('div', { class: 'empty-state' }, e('h2', null, 'Пока нет заметок'), e('p', null, 'Создайте первую заметку или верните заметку из архива.')),
+      heads(v).some(r=>notes[r.id]&&entityKind(notes[r.id])==='note'&&statusOf(v,r,notes[r.id])==='active')&&!visibleItems.length&&e('div',{class:'empty-state'},e('h2',null,'Ничего не найдено'),e('p',null,'Измените запрос или сбросьте фильтры.'),e('button',{onClick:()=>{setQuery('');setSelectedTags([]);setQuickFilter('all');}},'Сбросить фильтры')),
+      [...new Set(heads(v).map(r=>r.objectId))].filter(objectId=>{const versions=heads(v).filter(r=>r.objectId===objectId);return versions.length>1&&versions.some(r=>notes[r.id]&&entityKind(notes[r.id])==='note'&&statusOf(v,r,notes[r.id])==='active');}).map(objectId=>
         e('button',{disabled:busy||Boolean(v.transfer),onClick:()=>{const versions=heads(v).filter(r=>r.objectId===objectId).map(r=>r.id);
           setComparison({objectId,versions,chosen:versions[0]});setScreen('conflict');}},'Сравнить версии: '+(notes[heads(v).find(r=>r.objectId===objectId)!.id]?.title||'Без заголовка'))),
       visibleItems.map(({current,revision:r,note}) => e('div',{class:'note-list-item',key:current.header.id+'.'+r.id},e('button', { class:'note-row'+(note!.pinned?' pinned':''), disabled: Boolean(current.transfer), onClick: () => openRevision(current,r) },
