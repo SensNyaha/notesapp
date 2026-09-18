@@ -1,5 +1,8 @@
 export function stripSchema13(db){
   db.exec(`
+    DROP TABLE IF EXISTS record_attachments;
+    DROP TABLE IF EXISTS attachments;
+    DROP TABLE IF EXISTS file_uploads;
     PRAGMA foreign_keys=OFF;
     DROP TABLE IF EXISTS collaboration_deliveries;
     DROP TABLE IF EXISTS personal_reminder_configs;

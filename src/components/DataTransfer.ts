@@ -4,7 +4,7 @@ import type { User } from '../types/auth';
 import { readState, changes } from '../storage';
 import { exportVaultSnapshot, importVaultSnapshot, importPortableNote, noteImportIsDuplicate, validateVaultSnapshot, vaultName, synchronize,
   type PortableVaultSnapshot } from '../planner';
-import { backupFileName, decryptVaultBackup, downloadBytes, encryptVaultBackup, parseNoteImport, type PortableNotePackage } from '../portable';
+import { backupFileName, decryptVaultBackup, downloadBytes, encryptVaultBackup, parseNoteImportFile, type PortableNotePackage } from '../portable';
 
 const e=h;
 interface VaultChoice {id:string;name:string;open:boolean}
@@ -32,6 +32,7 @@ export function DataTransfer({user}:{user:User}){
     changes?.addEventListener('message',changed);window.addEventListener('tasks-data',changed);
     return()=>{changes?.removeEventListener('message',changed);window.removeEventListener('tasks-data',changed);};
   },[user.id]);
+  useEffect(()=>()=>{if(notePreview?.cleanup)void notePreview.cleanup();},[notePreview]);
 
   async function run(fn:()=>Promise<void>){
     setBusy(true);setError('');setStatus('');
@@ -67,7 +68,7 @@ export function DataTransfer({user}:{user:User}){
   }
   async function previewNote(){
     if(!noteFile)throw Error('Выберите .zip из Tasks или .md.');
-    const parsed=parseNoteImport(new Uint8Array(await noteFile.arrayBuffer()),noteFile.name);setNotePreview(parsed);
+    const parsed=await parseNoteImportFile(noteFile);setNotePreview(parsed);
     const duplicate=noteTarget&&parsed.source?await noteImportIsDuplicate(user,noteTarget,parsed):false;
     setNoteDuplicate(duplicate);setDuplicatePolicy(duplicate?'skip':'copy');
     setStatus(duplicate?'В целевом хранилище уже есть импорт этой Tasks-заметки.':'Файл проверен локально и готов к импорту.');
@@ -91,7 +92,7 @@ export function DataTransfer({user}:{user:User}){
       e('label',null,'Пароль резервной копии',e('input',{type:'password',autoComplete:'new-password',value:backupPassword,onInput:(ev:Event)=>setBackupPassword((ev.target as HTMLInputElement).value)})),
       e('label',null,'Повторите пароль',e('input',{type:'password',autoComplete:'new-password',value:backupRepeat,onInput:(ev:Event)=>setBackupRepeat((ev.target as HTMLInputElement).value)})),
       e('div',{class:'actions'},e('button',{class:'primary',disabled:busy||!exportVault,onClick:()=>void run(exportBackup)},busy?'Подождите…':'Создать .tasks-backup')),
-      e('p',{class:'hint'},'Лимит формата v1 — 64 МиБ незашифрованного содержимого. Пароль backup независим от пароля аккаунта и фразы vault.')),
+      e('p',{class:'hint'},'Лимит формата v1 — 64 МиБ незашифрованного содержимого. Потоковые вложения v0.18 в этот старый формат не входят: экспорт явно остановится вместо создания неполной копии. Пароль backup независим от пароля аккаунта и фразы vault.')),
 
     e('section',{class:'card'},e('h2',null,'Восстановить резервную копию'),
       e('p',{class:'hint'},'Восстановление всегда создаёт новое хранилище и не объединяет данные с существующим.'),
@@ -112,7 +113,7 @@ export function DataTransfer({user}:{user:User}){
       e('label',null,'Файл заметки',e('input',{type:'file',accept:'.zip,.md,text/markdown,application/zip',onChange:(ev:Event)=>{setNoteFile((ev.target as HTMLInputElement).files?.[0]);setNotePreview(undefined);}})),
       e('button',{disabled:busy||!noteFile||!noteTarget,onClick:()=>void run(previewNote)},'Проверить файл'),
       notePreview&&e('div',{class:'import-preview'},e('strong',null,notePreview.note.title||'Без заголовка'),
-        e('p',null,'Вложения: ',notePreview.note.attachments?.length??0,' · чек-лист: ',notePreview.note.checklist?.length??0,' · напоминание: ',notePreview.note.reminder?'есть, будет выключено':'нет'),
+        e('p',null,'Вложения: ',notePreview.files?.length??0,' · чек-лист: ',notePreview.note.checklist?.length??0,' · напоминание: ',notePreview.note.reminder?'есть, будет выключено':'нет'),
         noteDuplicate&&e('fieldset',null,e('legend',null,'Такая Tasks-заметка уже импортировалась'),e('label',{class:'check-row'},e('input',{type:'radio',name:'duplicate',checked:duplicatePolicy==='skip',onChange:()=>setDuplicatePolicy('skip')}),'Пропустить'),
           e('label',{class:'check-row'},e('input',{type:'radio',name:'duplicate',checked:duplicatePolicy==='copy',onChange:()=>setDuplicatePolicy('copy')}),'Создать ещё одну копию')),
         e('button',{class:'primary',disabled:busy,onClick:()=>void run(importNote)},noteDuplicate&&duplicatePolicy==='skip'?'Пропустить':'Импортировать'))),

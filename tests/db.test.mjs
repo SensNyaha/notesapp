@@ -18,7 +18,7 @@ test('schema 3 upgrades atomically to current version without changing installat
     db.exec("DROP TABLE note_lifecycle; DROP TRIGGER reminder_record_changed; DROP TRIGGER reminder_vault_deleted; DROP TABLE reminder_occurrences; DROP TABLE reminder_deliveries; DROP TABLE reminders; DROP TABLE reminder_settings; DROP INDEX records_object; DROP TRIGGER push_revoke_session; DROP TABLE push_tests; DROP TABLE push_subscriptions; DROP TABLE push_test_limits; DROP TABLE push_config; DROP TABLE vault_grants; DROP TABLE vault_challenges; DROP TABLE vault_closures; DROP TABLE records; DROP TABLE vaults; PRAGMA user_version=3; INSERT INTO users(id,login,password_hash,role,created_at) VALUES('owner','owner','stored-hash','admin',123);");
     const installation = db.prepare('SELECT * FROM installation').get(), user = db.prepare('SELECT * FROM users').get();
     migrate(db); migrate(db);
-    assert.equal(db.prepare('PRAGMA user_version').get().user_version,13);
+    assert.equal(db.prepare('PRAGMA user_version').get().user_version,14);
     assert.deepEqual(db.prepare('SELECT * FROM installation').get(),installation);
     assert.deepEqual(db.prepare('SELECT * FROM users').get(),user);
     assert.equal(db.prepare('SELECT count(*) n FROM vaults').get().n,0);
@@ -39,7 +39,7 @@ test('schema 4 vault headers and immutable ciphertext survive the access migrati
     const installation=db.prepare('SELECT * FROM installation').get(),users=db.prepare('SELECT * FROM users').all();
     const records=db.prepare('SELECT id,vault_id,object_id,parent_id,payload FROM records').all();
     migrate(db);migrate(db);
-    assert.equal(db.prepare('PRAGMA user_version').get().user_version,13);
+    assert.equal(db.prepare('PRAGMA user_version').get().user_version,14);
     assert.deepEqual(db.prepare('SELECT * FROM installation').get(),installation);
     assert.deepEqual(db.prepare('SELECT * FROM users').all(),users);
     assert.deepEqual(db.prepare('SELECT id,vault_id,object_id,parent_id,payload FROM records').all(),records);
@@ -66,7 +66,7 @@ test('schema 5 push migration preserves vault grants, sessions and ciphertext by
     const beforeRecords=db.prepare('SELECT id,vault_id,object_id,parent_id,payload FROM records').all();
     const beforeGrants=db.prepare('SELECT token_hash,vault_id,device_id,epoch FROM vault_grants').all();
     migrate(db);migrate(db);
-    assert.equal(db.prepare('PRAGMA user_version').get().user_version,13);
+    assert.equal(db.prepare('PRAGMA user_version').get().user_version,14);
     assert.deepEqual(tables.map(table=>db.prepare('SELECT * FROM '+table).all()),before);
     assert.deepEqual(db.prepare('SELECT id,vault_id,object_id,parent_id,payload FROM records').all(),beforeRecords);
     assert.deepEqual(db.prepare('SELECT token_hash,vault_id,device_id,epoch FROM vault_grants').all(),beforeGrants);
@@ -90,7 +90,7 @@ test('schema 6 reminder migration preserves subscriptions, VAPID keys, sessions 
       INSERT INTO push_tests VALUES('test','subscription',500,600,'scheduled',0,0);`);
     const tables=['users','sessions','vaults','push_config','push_subscriptions','push_tests','installation'];
     const before=tables.map(table=>db.prepare('SELECT * FROM '+table).all()),beforeRecords=db.prepare('SELECT id,vault_id,object_id,parent_id,payload FROM records').all();migrate(db);migrate(db);
-    assert.equal(db.prepare('PRAGMA user_version').get().user_version,13);
+    assert.equal(db.prepare('PRAGMA user_version').get().user_version,14);
     assert.deepEqual(tables.map(table=>db.prepare('SELECT * FROM '+table).all()),before);
     assert.deepEqual(db.prepare('SELECT id,vault_id,object_id,parent_id,payload FROM records').all(),beforeRecords);
     assert.deepEqual(db.prepare('SELECT name FROM sqlite_master WHERE type=\'table\' AND name LIKE \'reminder%\' ORDER BY name').all().map(x=>x.name),
@@ -121,7 +121,7 @@ test('WAL backup preserves schema 1; migration preserves installation and admini
     restoredDb.close();
     db.close();
     db = openDatabase(dir, { countBoot: false });
-    assert.equal(db.prepare('PRAGMA user_version').get().user_version, 13);
+    assert.equal(db.prepare('PRAGMA user_version').get().user_version, 14);
     assert.equal(db.prepare('SELECT boot_count FROM installation').get().boot_count, 7);
     assert.equal(db.prepare('SELECT installation_id FROM installation').get().installation_id, 'preserved-id');
     migrate(db);
@@ -135,7 +135,7 @@ test('WAL backup preserves schema 1; migration preserves installation and admini
     assert.equal(db.prepare('SELECT boot_count FROM installation').get().boot_count, 7);
     migrate(db); // Test restoration in the separate backup, never production data.
     assert.equal(db.prepare('SELECT installation_id FROM installation').get().installation_id, 'preserved-id');
-  } finally { db?.close(); await rm(dir, { recursive: true, force: true }); }
+  } finally { db?.close(); await rm(dir, { recursive: true, force: true, maxRetries: 8, retryDelay: 75 }); }
 });
 
 test('schema 7 adds discoverable labels without changing encrypted records or account data',()=>{
@@ -148,7 +148,7 @@ test('schema 7 adds discoverable labels without changing encrypted records or ac
       INSERT INTO records VALUES('record','vault','object',NULL,'opaque-payload');`);
     const tables=['users','vaults','installation'],before=tables.map(t=>db.prepare('SELECT * FROM '+t).all()),beforeRecords=db.prepare('SELECT id,vault_id,object_id,parent_id,payload FROM records').all();
     migrate(db);migrate(db);
-    assert.equal(db.prepare('PRAGMA user_version').get().user_version,13);
+    assert.equal(db.prepare('PRAGMA user_version').get().user_version,14);
     assert.deepEqual(tables.map(t=>db.prepare('SELECT * FROM '+t).all()),before);
     assert.deepEqual(db.prepare('SELECT id,vault_id,object_id,parent_id,payload FROM records').all(),beforeRecords);
     assert.equal(db.prepare('SELECT count(*) n FROM vault_labels').get().n,0);
@@ -167,7 +167,7 @@ test('schema 10 adds device session metadata without changing authentication tok
       PRAGMA user_version=10; INSERT INTO users(id,login,password_hash,role,created_at) VALUES('owner','owner','hash','admin',123);
       INSERT INTO sessions(id,user_id,access_hash,access_expires,refresh_hash,refresh_expires,absolute_expires,revoked) VALUES('session','owner','access',999,'refresh',999,999,0);`);
     const before=db.prepare('SELECT id,user_id,access_hash,access_expires,refresh_hash,refresh_expires,absolute_expires,revoked FROM sessions').get();
-    migrate(db);migrate(db);assert.equal(db.prepare('PRAGMA user_version').get().user_version,13);
+    migrate(db);migrate(db);assert.equal(db.prepare('PRAGMA user_version').get().user_version,14);
     const after=db.prepare('SELECT * FROM sessions').get();for(const [key,value] of Object.entries(before))assert.equal(after[key],value);
     assert.equal(after.device_id,null);assert.equal(after.device_name,null);assert.equal(after.client_kind,null);assert.equal(after.created_at,0);assert.equal(after.last_seen,0);
     assert.ok(db.prepare("SELECT name FROM sqlite_master WHERE type='index' AND name='sessions_user_active'").get());
@@ -181,7 +181,7 @@ test('schema 11 adds WebAuthn credentials and one-time challenges without changi
     const beforeSession=db.prepare('SELECT * FROM sessions').all();
     db.exec('DROP TABLE webauthn_challenges; DROP TABLE webauthn_credentials; PRAGMA user_version=11;');
     migrate(db);migrate(db);
-    assert.equal(db.prepare('PRAGMA user_version').get().user_version,13);
+    assert.equal(db.prepare('PRAGMA user_version').get().user_version,14);
     assert.deepEqual(db.prepare('SELECT * FROM sessions').all(),beforeSession);
     const tables=db.prepare("SELECT name FROM sqlite_master WHERE type='table' AND name LIKE 'webauthn_%' ORDER BY name").all().map(row=>row.name);
     assert.deepEqual(tables,['webauthn_challenges','webauthn_credentials']);
@@ -202,13 +202,31 @@ test('schema 12 adds collaboration membership, author metadata and user-scoped g
     `);
     const cipher=db.prepare('SELECT payload FROM records').get().payload;
     migrate(db);migrate(db);
-    assert.equal(db.prepare('PRAGMA user_version').get().user_version,13);
+    assert.equal(db.prepare('PRAGMA user_version').get().user_version,14);
     assert.equal(db.prepare('SELECT payload FROM records').get().payload,cipher);
     const member=db.prepare('SELECT user_id,role FROM vault_members WHERE vault_id=?').get('vault');assert.equal(member.user_id,'owner');assert.equal(member.role,'owner');
     assert.equal(db.prepare('SELECT author_user_id FROM records WHERE id=?').get('record').author_user_id,'owner');
     assert.equal(db.prepare('SELECT user_id FROM vault_grants WHERE token_hash=?').get('grant').user_id,'owner');
     assert.equal(db.prepare('SELECT user_id FROM vault_challenges WHERE id=?').get('challenge').user_id,'owner');
     for(const table of ['collaboration_identities','contacts','vault_invites','vault_member_envelopes','comments','personal_reminder_configs'])assert.equal(db.prepare('SELECT count(*) n FROM '+table).get().n,0);
+    assert.equal(db.prepare('PRAGMA integrity_check').get().integrity_check,'ok');
+  }finally{db.close();}
+});
+
+test('schema 14 adds streaming attachment metadata without changing encrypted collaboration data',()=>{
+  const db=new DatabaseSync(':memory:');
+  try{
+    migrate(db);
+    const recordBefore=JSON.stringify(db.prepare('SELECT * FROM records').all()),membersBefore=JSON.stringify(db.prepare('SELECT * FROM vault_members').all());
+    db.exec('DROP TABLE record_attachments; DROP TABLE attachments; DROP TABLE file_uploads; PRAGMA user_version=13;');
+    migrate(db);migrate(db);
+    assert.equal(db.prepare('PRAGMA user_version').get().user_version,14);
+    assert.equal(JSON.stringify(db.prepare('SELECT * FROM records').all()),recordBefore);
+    assert.equal(JSON.stringify(db.prepare('SELECT * FROM vault_members').all()),membersBefore);
+    assert.deepEqual(db.prepare("SELECT name FROM sqlite_master WHERE type='table' AND name IN('attachments','file_uploads','record_attachments') ORDER BY name").all().map(row=>row.name),['attachments','file_uploads','record_attachments']);
+    assert.equal(db.prepare('SELECT count(*) n FROM attachments').get().n,0);
+    assert.equal(db.prepare('SELECT count(*) n FROM file_uploads').get().n,0);
+    assert.equal(db.prepare('SELECT count(*) n FROM record_attachments').get().n,0);
     assert.equal(db.prepare('PRAGMA integrity_check').get().integrity_check,'ok');
   }finally{db.close();}
 });

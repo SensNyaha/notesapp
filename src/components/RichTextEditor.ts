@@ -1,5 +1,5 @@
 import { h as e } from 'preact';
-import { useEffect, useRef } from 'preact/hooks';
+import { useEffect, useRef, useState } from 'preact/hooks';
 import type { NoteAttachment } from '../planner';
 
 const allowedTags = new Set(['A','B','BLOCKQUOTE','BR','CODE','DIV','EM','FONT','H1','H2','H3','I','LI','OL','P','PRE','S','SPAN','STRONG','TABLE','TBODY','TD','TH','THEAD','TR','U','UL']);
@@ -45,22 +45,39 @@ export function sanitizeNoteHtml(value:string){
 
 function command(name:string,value?:string){document.execCommand(name,false,value);}
 function readFile(file:File){return new Promise<string>((resolve,reject)=>{const reader=new FileReader();reader.onload=()=>resolve(String(reader.result));reader.onerror=()=>reject(reader.error);reader.readAsDataURL(file);});}
-function attachmentUrl(item:NoteAttachment){return /^data:[^;,]{1,100};base64,[A-Za-z0-9+/=]+$/.test(item.data)?item.data:'';}
-function imageUrl(item:NoteAttachment){return /^image\/(png|jpeg|gif|webp|avif)$/i.test(item.type)&&/^data:image\/(png|jpeg|gif|webp|avif);base64,/i.test(item.data)?item.data:'';}
+function attachmentUrl(item:NoteAttachment){return item.data&&/^data:[^;,]{1,100};base64,[A-Za-z0-9+/=]+$/.test(item.data)?item.data:'';}
+function imageUrl(item:NoteAttachment){return item.data&&/^image\/(png|jpeg|gif|webp|avif)$/i.test(item.type)&&/^data:image\/(png|jpeg|gif|webp|avif);base64,/i.test(item.data)?item.data:'';}
 
-export function Attachments({items,onRemove}:{items:NoteAttachment[];onRemove?:(id:string)=>void}){
+function AsyncPreview({item,load}:{item:NoteAttachment;load?:(item:NoteAttachment)=>Promise<Blob|null>}){
+  const [url,setUrl]=useState('');useEffect(()=>{let active=true,current='';if(load&&item.type.startsWith('image/'))void load(item).then(blob=>{if(!active||!blob)return;current=URL.createObjectURL(blob);setUrl(current);}).catch(()=>{});
+    return()=>{active=false;if(current)URL.revokeObjectURL(current);};},[item.id]);const inline=imageUrl(item);
+  return (inline||url)?e('img',{src:inline||url,alt:item.name,loading:'lazy'}):null;
+}
+export function Attachments({items,onRemove,onDownload,onRename,onSetCover,onMove,coverId,loadPreview,moveTargets=[]}:{items:NoteAttachment[];
+  onRemove?:(item:NoteAttachment)=>void;onDownload?:(item:NoteAttachment)=>void;onRename?:(item:NoteAttachment)=>void;
+  onSetCover?:(item:NoteAttachment)=>void;onMove?:(item:NoteAttachment,objectId:string)=>void;coverId?:string;
+  loadPreview?:(item:NoteAttachment)=>Promise<Blob|null>;moveTargets?:{id:string;title:string}[]}){
   if(!items.length)return null;
   return e('section',{class:'note-attachments','aria-label':'Вложения'},e('h2',null,'Вложения'),
     items.map(item=>e('article',{class:'attachment-card',key:item.id},
-      imageUrl(item)&&e('img',{src:imageUrl(item),alt:item.name,loading:'lazy'}),
-      e('div',null,e('strong',null,item.name),e('small',null,Math.ceil(item.size/1024)+' КБ')),
-      e('div',{class:'attachment-actions'},e('a',{href:attachmentUrl(item),download:item.name},'Скачать'),
-        onRemove&&e('button',{type:'button',onClick:()=>onRemove(item.id),'aria-label':'Удалить вложение '+item.name},'Удалить')))));
+      e(AsyncPreview,{item,load:loadPreview}),
+      e('div',null,e('strong',null,item.name),e('small',null,formatBytes(item.size)+(coverId===item.id?' · обложка':''))),
+      e('div',{class:'attachment-actions'},
+        item.data&&!onDownload?e('a',{href:attachmentUrl(item),download:item.name},'Скачать'):onDownload&&e('button',{type:'button',onClick:()=>onDownload(item)},'Скачать'),
+        onRename&&e('button',{type:'button',onClick:()=>onRename(item)},'Переименовать'),
+        onSetCover&&item.type.startsWith('image/')&&e('button',{type:'button',onClick:()=>onSetCover(item)},coverId===item.id?'Обложка ✓':'На обложку'),
+        onMove&&moveTargets.length>0&&e('select',{value:'','aria-label':'Переместить вложение '+item.name,onChange:(ev:Event)=>{const value=(ev.target as HTMLSelectElement).value;if(value)onMove(item,value);}},
+          e('option',{value:''},'Переместить…'),moveTargets.map(target=>e('option',{value:target.id,key:target.id},target.title||'Без заголовка'))),
+        onRemove&&e('button',{type:'button',class:'icon-danger',onClick:()=>onRemove(item),'aria-label':'Удалить вложение '+item.name},'Удалить')))));
 }
+function formatBytes(value:number){if(value<1024)return value+' Б';if(value<1024*1024)return (value/1024).toFixed(value<10*1024?1:0)+' КБ';if(value<1024*1024*1024)return (value/1024/1024).toFixed(value<10*1024*1024?1:0)+' МБ';return (value/1024/1024/1024).toFixed(1)+' ГБ';}
 
-export function RichTextEditor({html,text,attachments,onChange,onAttachmentsChange,onError}:{
+export function RichTextEditor({html,text,attachments,onChange,onAttachmentsChange,onFilesSelected,onRemoveAttachment,onDownloadAttachment,onRenameAttachment,onSetCover,coverId,loadPreview,onError}:{
   html?:string;text:string;attachments:NoteAttachment[];
-  onChange:(html:string,text:string)=>void;onAttachmentsChange:(items:NoteAttachment[])=>void;onError:(message:string)=>void;
+  onChange:(html:string,text:string)=>void;onAttachmentsChange:(items:NoteAttachment[])=>void;
+  onFilesSelected?:(files:File[])=>Promise<void>|void;onRemoveAttachment?:(item:NoteAttachment)=>void;onDownloadAttachment?:(item:NoteAttachment)=>void;
+  onRenameAttachment?:(item:NoteAttachment)=>void;onSetCover?:(item:NoteAttachment)=>void;coverId?:string;loadPreview?:(item:NoteAttachment)=>Promise<Blob|null>;
+  onError:(message:string)=>void;
 }){
   const editor=useRef<HTMLDivElement>(null),files=useRef<HTMLInputElement>(null),selection=useRef<Range|null>(null);
   const initial=useRef(sanitizeNoteHtml(html??plainToHtml(text)));
@@ -72,15 +89,13 @@ export function RichTextEditor({html,text,attachments,onChange,onAttachmentsChan
   const keepSelection=(event:MouseEvent)=>event.preventDefault();
   const addTable=()=>apply('insertHTML','<table><tbody><tr><th>Заголовок</th><th>Заголовок</th></tr><tr><td>Ячейка</td><td>Ячейка</td></tr></tbody></table><p><br></p>');
   const addFiles=async(event:Event)=>{
-    const input=event.target as HTMLInputElement;const selected=[...(input.files??[])];input.value='';
-    if(!selected.length)return;
-    if(attachments.length+selected.length>15){onError('В одной заметке допускается до 15 вложений.');return;}
-    if(selected.some(file=>file.size>512*1024)){onError('Размер одного вложения пока ограничен 512 КБ.');return;}
-    if(attachments.reduce((sum,item)=>sum+item.size,0)+selected.reduce((sum,file)=>sum+file.size,0)>512*1024){onError('Общий размер вложений заметки пока ограничен 512 КБ.');return;}
-    try{
-      const added=await Promise.all(selected.map(async file=>({id:crypto.randomUUID(),name:file.name.slice(0,200)||'Файл',type:file.type.slice(0,100)||'application/octet-stream',size:file.size,data:await readFile(file)})));
+    const input=event.target as HTMLInputElement;const selected=[...(input.files??[])];input.value='';if(!selected.length)return;
+    if(attachments.length+selected.length>500){onError('В одной заметке допускается до 500 вложений.');return;}
+    if(onFilesSelected){try{await onFilesSelected(selected);}catch(caught){onError(caught instanceof Error?caught.message:'Не удалось загрузить выбранный файл.');}return;}
+    try{const legacy=selected.filter(file=>file.size<=512*1024);if(legacy.length!==selected.length)throw Error('Для больших файлов нужен потоковый загрузчик.');
+      const added=await Promise.all(legacy.map(async file=>({id:crypto.randomUUID(),name:file.name.slice(0,200)||'Файл',type:file.type.slice(0,100)||'application/octet-stream',size:file.size,data:await readFile(file)})));
       onAttachmentsChange([...attachments,...added]);
-    }catch{onError('Не удалось прочитать выбранный файл.');}
+    }catch(caught){onError(caught instanceof Error?caught.message:'Не удалось прочитать выбранный файл.');}
   };
   const paste=(event:ClipboardEvent)=>{
     event.preventDefault();const source=event.clipboardData?.getData('text/html');
@@ -108,5 +123,6 @@ export function RichTextEditor({html,text,attachments,onChange,onAttachmentsChan
       onKeyDown:(ev:KeyboardEvent)=>{if((ev.ctrlKey||ev.metaKey)&&ev.shiftKey&&ev.key==='7'){ev.preventDefault();apply('insertOrderedList');}else if((ev.ctrlKey||ev.metaKey)&&ev.shiftKey&&ev.key==='8'){ev.preventDefault();apply('insertUnorderedList');}}}),
     e('input',{ref:files,class:'file-picker',type:'file',multiple:true,onChange:addFiles}),
     e('p',{class:'hint'},'Поддерживаются стандартные сочетания Ctrl/⌘+B, I, U; списки — Ctrl/⌘+Shift+7 или 8.'),
-    e(Attachments,{items:attachments,onRemove:id=>onAttachmentsChange(attachments.filter(item=>item.id!==id))}));
+    e(Attachments,{items:attachments,coverId,loadPreview,onDownload:onDownloadAttachment,onRename:onRenameAttachment,onSetCover,
+      onRemove:onRemoveAttachment??(item=>onAttachmentsChange(attachments.filter(current=>current.id!==item.id)))}));
 }

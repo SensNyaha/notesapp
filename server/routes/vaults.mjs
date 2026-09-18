@@ -2,6 +2,7 @@ import { requireUser, AccountError, fail } from '../auth/accounts.mjs';
 import { registerVaultAccess } from './vault-access.mjs';
 import { registerReminders } from './reminders.mjs';
 import { memberOf, ownerOf, writerOf } from '../collaboration.mjs';
+import { registerFiles, attachmentIdsForObject, collectUnreferencedAttachments, removeVaultFiles } from './files.mjs';
 const uuid = { type: 'string', pattern: '^[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}$' };
 const obj = properties => ({ type: 'object', additionalProperties: false, properties, required: Object.keys(properties) });
 const b64 = (min, max = min) => ({ type: 'string', pattern: '^[A-Za-z0-9_-]+$', minLength: min, maxLength: max });
@@ -15,14 +16,16 @@ const record = obj({ id: uuid, objectId: uuid, parent: { anyOf: [uuid, { type: '
 record.properties.resolves = { type:'array',minItems:1,maxItems:100,uniqueItems:true,items:uuid };
 record.properties.keyEpoch = { type:'integer',minimum:0,maximum:1000000 };
 
-export function registerVaults(app, db, { guard, accessOf, clock }) {
+export function registerVaults(app, db, { guard, accessOf, clock, dataDir }) {
   const purgeExpired=()=>{
     const expired=db.prepare("SELECT vault_id,object_id,record_id FROM note_lifecycle WHERE state='trash' AND purge_after<=?").all(clock());
     for(const item of expired){
+      const attachmentIds=attachmentIdsForObject(db,item.vault_id,item.object_id);
       db.prepare('DELETE FROM reminders WHERE vault_id=? AND object_id=?').run(item.vault_id,item.object_id);
       db.prepare('DELETE FROM comments WHERE vault_id=? AND object_id=?').run(item.vault_id,item.object_id);
       db.prepare('DELETE FROM personal_reminder_configs WHERE vault_id=? AND object_id=?').run(item.vault_id,item.object_id);
       db.prepare('DELETE FROM records WHERE vault_id=? AND object_id=?').run(item.vault_id,item.object_id);
+      collectUnreferencedAttachments(db,dataDir,item.vault_id,attachmentIds);
       db.prepare("UPDATE note_lifecycle SET state='purged',changed_at=?,purge_after=NULL WHERE vault_id=? AND object_id=?").run(clock(),item.vault_id,item.object_id);
     }
     return expired.length;
@@ -45,6 +48,7 @@ export function registerVaults(app, db, { guard, accessOf, clock }) {
   const post = (path, schema, fn) => app.post('/api/vaults/' + path,
     { bodyLimit: 1450000, preHandler: guard, schema: { body: schema } }, action(fn));
   const permit=registerVaultAccess(app,db,{member,own,action,post,obj,uuid,b64,sealed,guard,accessOf,clock});
+  registerFiles(app,db,{guard,accessOf,clock,dataDir,member,own,writer,permit});
   registerReminders(app,db,{action,guard,member,permit,clock});
   app.get('/api/vaults', action((_req, user) => ({ vaults: db.prepare(`SELECT v.*,m.role,v.user_id owner_id
       FROM vaults v JOIN vault_members m ON m.vault_id=v.id WHERE m.user_id=? ORDER BY v.id`).all(user.id)
@@ -88,15 +92,23 @@ export function registerVaults(app, db, { guard, accessOf, clock }) {
     db.prepare('INSERT OR IGNORE INTO vault_labels(vault_id,display_name) VALUES(?,?)').run(req.body.vaultId,req.body.displayName);
     return {ok:true};
   });
-  post('record', obj({ vaultId: uuid, record }), (req, user) => {
-    const { vaultId, record: r } = req.body; const membership=writer(user,vaultId);permit(req,membership);
+  post('record',{type:'object',additionalProperties:false,required:['vaultId','record'],properties:{
+    vaultId:uuid,record,attachmentIds:{type:'array',maxItems:500,uniqueItems:true,items:uuid}
+  }},(req,user)=>{
+    const {vaultId,record:r}=req.body,attachmentIds=req.body.attachmentIds??[],refsProvided=Array.isArray(req.body.attachmentIds);const membership=writer(user,vaultId);permit(req,membership);
     const ring=db.prepare('SELECT current_epoch FROM vault_keyrings WHERE vault_id=?').get(vaultId),keyEpoch=r.keyEpoch??0;
     if(keyEpoch!==(ring?.current_epoch??0))fail('stale_key_epoch',409);
     if(db.prepare("SELECT 1 FROM note_lifecycle WHERE vault_id=? AND object_id=? AND state='purged'").get(vaultId,r.objectId))fail('object_deleted',410);
-    const text = JSON.stringify(r), old = db.prepare('SELECT * FROM records WHERE id=?').get(r.id);
-    if (old) {
-      if (old.vault_id !== vaultId || old.payload !== text) fail('id_conflict', 409);
-      return { ok: true };
+    const text=JSON.stringify(r),old=db.prepare('SELECT * FROM records WHERE id=?').get(r.id);
+    if(old){
+      if(old.vault_id!==vaultId||old.payload!==text)fail('id_conflict',409);
+      if(refsProvided){
+        const existing=db.prepare('SELECT attachment_id FROM record_attachments WHERE record_id=? ORDER BY attachment_id').all(r.id).map(row=>row.attachment_id),expected=[...attachmentIds].sort();
+        if(existing.length&&JSON.stringify(existing)!==JSON.stringify(expected))fail('id_conflict',409);
+        if(!existing.length)for(const attachmentId of expected){if(!db.prepare('SELECT 1 FROM attachments WHERE id=?').get(attachmentId))fail('file_not_found',404);
+          db.prepare('INSERT OR IGNORE INTO record_attachments(vault_id,record_id,object_id,attachment_id) VALUES(?,?,?,?)').run(vaultId,r.id,r.objectId,attachmentId);}
+      }
+      return{ok:true};
     }
     if (r.parent) {
       const parent = db.prepare('SELECT * FROM records WHERE id=? AND vault_id=? AND object_id=?').get(r.parent, vaultId, r.objectId);
@@ -108,7 +120,9 @@ export function registerVaults(app, db, { guard, accessOf, clock }) {
     }
     if (db.prepare('SELECT count(*) n FROM records WHERE vault_id=?').get(vaultId).n >= 10000) fail('record_limit', 409);
     if (db.prepare('SELECT coalesce(sum(length(payload)),0) n FROM records WHERE vault_id=?').get(vaultId).n + text.length > 64 * 1024 * 1024) fail('record_limit', 409);
+    for(const attachmentId of attachmentIds)if(!db.prepare('SELECT 1 FROM attachments WHERE id=?').get(attachmentId))fail('file_not_found',404);
     db.prepare('INSERT INTO records(id,vault_id,object_id,parent_id,payload,author_user_id,created_at) VALUES(?,?,?,?,?,?,?)').run(r.id,vaultId,r.objectId,r.parent,text,user.id,clock());
+    for(const attachmentId of attachmentIds)db.prepare('INSERT INTO record_attachments(vault_id,record_id,object_id,attachment_id) VALUES(?,?,?,?)').run(vaultId,r.id,r.objectId,attachmentId);
     return { ok: true };
   });
   post('object-state',obj({vaultId:uuid,objectId:uuid,recordId:uuid,expected:{anyOf:[uuid,{type:'null'}]},state:{enum:['active','trash']}}),(req,user)=>{
@@ -135,10 +149,12 @@ export function registerVaults(app, db, { guard, accessOf, clock }) {
     const current=db.prepare('SELECT * FROM note_lifecycle WHERE vault_id=? AND object_id=?').get(vaultId,objectId);
     if(current?.state==='purged')return{ok:true};
     if(!current||current.state!=='trash'||current.record_id!==expected)fail('object_state_conflict',409);
+    const attachmentIds=attachmentIdsForObject(db,vaultId,objectId);
     db.prepare('DELETE FROM reminders WHERE vault_id=? AND object_id=?').run(vaultId,objectId);
     db.prepare('DELETE FROM comments WHERE vault_id=? AND object_id=?').run(vaultId,objectId);
     db.prepare('DELETE FROM personal_reminder_configs WHERE vault_id=? AND object_id=?').run(vaultId,objectId);
     db.prepare('DELETE FROM records WHERE vault_id=? AND object_id=?').run(vaultId,objectId);
+    collectUnreferencedAttachments(db,dataDir,vaultId,attachmentIds);
     db.prepare("UPDATE note_lifecycle SET state='purged',changed_at=?,purge_after=NULL WHERE vault_id=? AND object_id=?").run(clock(),vaultId,objectId);
     return{ok:true};
   });
@@ -148,6 +164,7 @@ export function registerVaults(app, db, { guard, accessOf, clock }) {
     permit(req,row,true);
     db.prepare('DELETE FROM records WHERE vault_id=?').run(row.id);
     db.prepare('DELETE FROM note_lifecycle WHERE vault_id=?').run(row.id);
+    removeVaultFiles(db,dataDir,row.id);
     db.prepare('UPDATE vaults SET deleted=1,header=NULL,access_pack=NULL,replacement=NULL WHERE id=?').run(row.id);
     db.prepare('DELETE FROM vault_grants WHERE vault_id=?').run(row.id);
     db.prepare('DELETE FROM vault_challenges WHERE vault_id=?').run(row.id);
@@ -164,6 +181,7 @@ export function registerVaults(app, db, { guard, accessOf, clock }) {
     permit(req,from);
     for (const id of revisions) if (!db.prepare('SELECT 1 FROM records WHERE id=? AND vault_id=?').get(id, target)) fail('transfer_incomplete', 409);
     db.prepare('DELETE FROM records WHERE vault_id=?').run(source);
+    removeVaultFiles(db,dataDir,source);
     db.prepare('UPDATE vaults SET deleted=1,header=NULL,access_pack=NULL,replacement=? WHERE id=?').run(target, source);
     db.prepare('DELETE FROM vault_grants WHERE vault_id=?').run(source);
     db.prepare('DELETE FROM vault_challenges WHERE vault_id=?').run(source);

@@ -1,6 +1,6 @@
 import { randomUUID } from 'node:crypto';
 
-export const SCHEMA_VERSION = 13;
+export const SCHEMA_VERSION = 14;
 
 export function migrate(db) {
   db.exec('BEGIN IMMEDIATE');
@@ -352,6 +352,44 @@ export function migrate(db) {
       CREATE TRIGGER reminder_vault_deleted AFTER UPDATE OF deleted ON vaults WHEN NEW.deleted=1 BEGIN
         DELETE FROM reminders WHERE vault_id=NEW.id;
       END;
+    `);
+    if(version<14)db.exec(`
+      CREATE TABLE file_uploads(
+        id TEXT PRIMARY KEY NOT NULL,
+        vault_id TEXT NOT NULL REFERENCES vaults(id) ON DELETE CASCADE,
+        object_id TEXT NOT NULL,
+        attachment_id TEXT NOT NULL,
+        user_id TEXT NOT NULL REFERENCES users(id) ON DELETE CASCADE,
+        key_epoch INTEGER NOT NULL CHECK(key_epoch>=0),
+        chunk_count INTEGER NOT NULL CHECK(chunk_count>=1),
+        preview_chunks INTEGER NOT NULL DEFAULT 0 CHECK(preview_chunks>=0),
+        state TEXT NOT NULL DEFAULT 'uploading' CHECK(state IN('uploading','complete')),
+        created_at INTEGER NOT NULL,
+        updated_at INTEGER NOT NULL,
+        UNIQUE(vault_id,attachment_id)
+      ) STRICT;
+      CREATE INDEX file_uploads_stale ON file_uploads(state,updated_at);
+      CREATE INDEX file_uploads_object ON file_uploads(vault_id,object_id);
+      CREATE TABLE attachments(
+        id TEXT PRIMARY KEY NOT NULL,
+        vault_id TEXT NOT NULL REFERENCES vaults(id) ON DELETE CASCADE,
+        object_id TEXT NOT NULL,
+        key_epoch INTEGER NOT NULL CHECK(key_epoch>=0),
+        chunk_count INTEGER NOT NULL CHECK(chunk_count>=1),
+        preview_chunks INTEGER NOT NULL DEFAULT 0 CHECK(preview_chunks>=0),
+        ciphertext_bytes INTEGER NOT NULL CHECK(ciphertext_bytes>=0),
+        created_at INTEGER NOT NULL
+      ) STRICT;
+      CREATE INDEX attachments_object ON attachments(vault_id,object_id);
+      CREATE TABLE record_attachments(
+        vault_id TEXT NOT NULL REFERENCES vaults(id) ON DELETE CASCADE,
+        record_id TEXT NOT NULL REFERENCES records(id) ON DELETE CASCADE,
+        object_id TEXT NOT NULL,
+        attachment_id TEXT NOT NULL,
+        PRIMARY KEY(record_id,attachment_id)
+      ) STRICT;
+      CREATE INDEX record_attachments_attachment ON record_attachments(vault_id,attachment_id);
+      CREATE INDEX record_attachments_object ON record_attachments(vault_id,object_id);
     `);
     db.exec(`PRAGMA user_version = ${SCHEMA_VERSION}`);
     db.exec('COMMIT');

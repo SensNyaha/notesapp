@@ -44,7 +44,8 @@ export async function registerAuth(app, db, config, clock = Date.now, push = {},
     return request.headers.origin === config.origin && request.headers['sec-fetch-site'] !== 'cross-site';
   }
   async function guard(request, reply) {
-    if (!sameOrigin(request) || request.headers['content-type']?.split(';')[0].trim() !== 'application/json') {
+    const contentType=request.headers['content-type']?.split(';')[0].trim();
+    if (!sameOrigin(request) || !['application/json','application/octet-stream'].includes(contentType)) {
       return reply.code(403).send({ error: 'forbidden' });
     }
     const provided = request.headers['x-csrf-token'];
@@ -52,7 +53,7 @@ export async function registerAuth(app, db, config, clock = Date.now, push = {},
     if (!validToken(provided) || !validToken(saved) || !timingSafeEqual(Buffer.from(provided), Buffer.from(saved))) {
       return reply.code(403).send({ error: 'csrf' });
     }
-    if (limited('requests:' + request.ip, 120, 60_000)) return rateError(reply);
+    if (!(request.method==='PUT'&&request.url.startsWith('/api/files/'))&&limited('requests:' + request.ip, 120, 60_000)) return rateError(reply);
   }
 
   app.get('/api/auth/csrf', async (request, reply) => {
@@ -139,7 +140,7 @@ export async function registerAuth(app, db, config, clock = Date.now, push = {},
   const collaborationRewrap=objectBody({identityVersion:{type:'integer',minimum:1},passwordWrapper:collaborationPasswordWrapper});
   function accessOf(request) { return request.cookies[names.access]; }
   registerWebAuthn(app, db, { guard, accessOf, clock, config, writeCookies, cookieNames: names, implementations: webauthn });
-  const vaultAccess=registerVaults(app, db, { guard, accessOf, clock });
+  const vaultAccess=registerVaults(app, db, { guard, accessOf, clock, dataDir });
   registerCollaboration(app,db,{guard,accessOf,clock,vaultAccess});
   registerPush(app, db, { guard, accessOf, clock, config, ...push });
   function accountAction(action, { hash = true, passwordChange = false, admin = !passwordChange } = {}) {

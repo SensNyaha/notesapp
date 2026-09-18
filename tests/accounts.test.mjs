@@ -164,7 +164,7 @@ test('schema 2 backup migrates to current schema preserving admin, installation 
   const source = join(f.dir, 'tasks.sqlite'), backup = join(f.dir, 'schema2.sqlite');
   assert.equal((await createBackup(source, backup)).schemaVersion, 2);
   migrate(f.db);
-  assert.equal(f.db.prepare('PRAGMA user_version').get().user_version, 13);
+  assert.equal(f.db.prepare('PRAGMA user_version').get().user_version, 14);
   assert.deepEqual(f.db.prepare('SELECT * FROM installation').get(), before);
   assert.equal(currentUser(f.db, pair.access, f.now()).mustChangePassword, false);
   assert.equal(f.db.prepare('SELECT password_hash FROM users WHERE id=?').get(owner.id).password_hash, owner.password_hash);

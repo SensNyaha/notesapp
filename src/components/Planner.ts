@@ -7,7 +7,8 @@ import { createVault, openVault, closeVault, saveNote, readNote, vaultName, head
   acknowledgeReminder, readTags, createTag, renameTag, deleteTag, copyNote, readVaultPushMode, setVaultPushMode,
   archiveNote,restoreArchivedNote,trashNote,restoreTrashedNote,permanentlyDeleteNote,noteHistory,restoreNoteVersion,noteLifecycle,
   outboxReviewItems,decideOutboxReview,OutboxReviewRequired,enableSystemUnlock,unlockVaultSystem,lockVault,forgetSystemUnlock,setSystemAutoLock,lockAfterBackground,deleteVault,vaultEntryMode,enableVaultSharing,entityKind,
-  type Note, type TagDefinition, type VaultPushMode, type NoteLifecycleState, type OutboxReviewItem } from '../planner';
+  uploadAttachment,attachmentBlob,attachmentPlainStream,attachmentPreviewBlob,deleteAttachmentFile,moveAttachmentFile,
+  type Note, type NoteAttachment, type TagDefinition, type VaultPushMode, type NoteLifecycleState, type OutboxReviewItem } from '../planner';
 import { AUTO_LOCK_VALUES, type AutoLockMs } from '../crypto/system-unlock';
 import { localTime } from '../../shared/reminders.mjs';
 import type { ReminderPlan,ReminderRepeat,ReminderEnd } from '../../shared/reminders.mjs';
@@ -15,7 +16,7 @@ import { reminderRequest, type ReminderSettings, type ReminderStatus, type Remin
 import { Attachments, RichTextEditor, sanitizeNoteHtml } from './RichTextEditor';
 import { noteSearchScore } from '../search';
 import { AuthError } from '../auth';
-import { createNoteZip, downloadBytes, noteZipFileName } from '../portable';
+import { createNoteZipBlob, noteZipFileName, type PortableAttachmentStream } from '../portable';
 import { changeMemberRole, collaborationIsUnlocked, contactState, createComment, deleteComment, inviteToVault, leaveSharedVault,
   loadComments, loadOwnerKeyring, removeVaultMember, regrantMember, sharedVaultMembers, trustFingerprint, unlockMemberVault, updateComment,
   ContactKeyChanged, type ContactInfo, type DecryptedComment, type VaultMemberInfo } from '../collaboration.ts';
@@ -23,6 +24,10 @@ import { changeMemberRole, collaborationIsUnlocked, contactState, createComment,
 interface Draft extends Note { vault: string; object: string; revision: string | null; dirty: boolean; key: CryptoKey }
 interface OpenedNote extends Note { vault: string; object: string; revision: string; key: CryptoKey }
 interface HistoryState {vault:string;objectId:string;back:'list'|'archive'|'trash';selected:string;entries:{revision:Revision;note:Note}[]}
+function BlobImage({load,alt,className,cacheKey}:{load:()=>Promise<Blob|null>;alt:string;className:string;cacheKey:string}){
+  const [url,setUrl]=useState('');useEffect(()=>{let active=true,current='';setUrl('');void load().then(blob=>{if(!active||!blob)return;current=URL.createObjectURL(blob);setUrl(current);}).catch(()=>{});
+    return()=>{active=false;if(current)URL.revokeObjectURL(current);};},[cacheKey]);return url?e('img',{src:url,alt,class:className}):null;
+}
 export function Planner({ user,reminderTarget,onReminderHandled,onSyncState }: { user: User;reminderTarget?:ReminderTarget;onReminderHandled:()=>void;
   onSyncState:(state:'syncing'|'online'|'offline'|'auth'|'error'|'idle')=>void }) {
   const [state, setState] = useState<State>();
@@ -76,6 +81,7 @@ export function Planner({ user,reminderTarget,onReminderHandled,onSyncState }: {
   const [members,setMembers]=useState<VaultMemberInfo[]>([]),[sharingContacts,setSharingContacts]=useState<ContactInfo[]>([]);
   const [inviteUserId,setInviteUserId]=useState(''),[inviteRole,setInviteRole]=useState<'editor'|'viewer'>('editor');
   const [comments,setComments]=useState<DecryptedComment[]>([]),[commentsOpen,setCommentsOpen]=useState(false),[commentText,setCommentText]=useState('');
+  const [fileUpload,setFileUpload]=useState<{name:string;percent:number}|null>(null);const uploadAbort=useRef<AbortController>();
   const [tagName,setTagName]=useState(''),[tagColor,setTagColor]=useState('#356AE6'),[editingTag,setEditingTag]=useState('');
   const [status, setStatus] = useState(''); const [error, setError] = useState(''); const [busy, setBusy] = useState(false);
   const [syncStatus,setSyncStatus]=useState<'local'|'syncing'|'synced'|'offline'|'error'>('local');
@@ -126,12 +132,12 @@ export function Planner({ user,reminderTarget,onReminderHandled,onSyncState }: {
       const snapshot = { ...draftRef.current };
       const result = await saveNote(user, snapshot.vault, snapshot.object, snapshot.revision,
         { title: snapshot.title, text: snapshot.text,...(snapshot.html!==undefined?{html:snapshot.html}:{}),
-          ...(snapshot.attachments?.length?{attachments:snapshot.attachments}:{}),...(snapshot.checklist?.length?{checklist:snapshot.checklist}:{}),
+          ...(snapshot.attachments?.length?{attachments:snapshot.attachments}:{}),...(snapshot.cover?{cover:snapshot.cover}:{}),...(snapshot.checklist?.length?{checklist:snapshot.checklist}:{}),
           ...(snapshot.tagIds?.length?{tagIds:snapshot.tagIds}:{}),...(snapshot.pinned?{pinned:true}:{}),...(snapshot.reminder?{reminder:snapshot.reminder}:{}),
           ...(snapshot.projectId?{projectId:snapshot.projectId}:{}),...(snapshot.lifecycle?{lifecycle:snapshot.lifecycle}:{}) }, snapshot.key);
       const latest = draftRef.current;
       if (latest && latest.object === snapshot.object) {
-        const comparable=(value:Note)=>JSON.stringify({title:value.title,text:value.text,html:value.html,attachments:value.attachments??[],checklist:value.checklist??[],tagIds:value.tagIds??[],pinned:Boolean(value.pinned),reminder:value.reminder,projectId:value.projectId,lifecycle:value.lifecycle});
+        const comparable=(value:Note)=>JSON.stringify({title:value.title,text:value.text,html:value.html,attachments:value.attachments??[],cover:value.cover,checklist:value.checklist??[],tagIds:value.tagIds??[],pinned:Boolean(value.pinned),reminder:value.reminder,projectId:value.projectId,lifecycle:value.lifecycle});
         const unchanged = comparable(latest)===comparable(snapshot);
         showDraft({ ...latest, revision: result.id, dirty: !unchanged });
       }
@@ -289,9 +295,9 @@ export function Planner({ user,reminderTarget,onReminderHandled,onSyncState }: {
     if (timer.current) clearTimeout(timer.current);
     timer.current = setTimeout(() => { void flush().catch(() => setError('Не удалось сохранить. Не закрывайте страницу; повторите сохранение.')); }, 350);
   }
-  function changeContent(patch:Partial<Pick<Note,'text'|'html'|'attachments'|'checklist'|'tagIds'|'pinned'>>){
+  function changeContent(patch:Partial<Pick<Note,'text'|'html'|'attachments'|'cover'|'checklist'|'tagIds'|'pinned'>>){
     const d=draftRef.current;if(!d)return;const next={...d,...patch,dirty:true};
-    if(new TextEncoder().encode(JSON.stringify({title:next.title,text:next.text,html:next.html,attachments:next.attachments,checklist:next.checklist,tagIds:next.tagIds,pinned:next.pinned,reminder:next.reminder})).length>900*1024){
+    if(new TextEncoder().encode(JSON.stringify({title:next.title,text:next.text,html:next.html,attachments:next.attachments,cover:next.cover,checklist:next.checklist,tagIds:next.tagIds,pinned:next.pinned,reminder:next.reminder})).length>900*1024){
       setError('Заметка достигла локального лимита 900 КБ. Удалите часть текста или вложений.');return;
     }
     showDraft(next);setError('');setStatus('Сохраняем…');if(timer.current)clearTimeout(timer.current);
@@ -353,14 +359,15 @@ export function Planner({ user,reminderTarget,onReminderHandled,onSyncState }: {
     setCommentsOpen(true);setCommentText('');setError('');
     try{await refreshComments();}catch(caught){setError(caught instanceof Error?caught.message:'Не удалось загрузить комментарии');}
   }
-  function exportViewingZip(){
+  async function exportViewingZip(){
     if(!viewing)return;
     const {vault:_,object:__,revision:___,key:____,...note}=viewing;
     const source=note.importSource??{kind:'tasks-note-v1' as const,vaultId:viewing.vault,objectId:viewing.object};
-    const used=new Set(note.tagIds??[]),exportTags=(tags[viewing.vault]??[]).filter(tag=>used.has(tag.id)).map(tag=>({...tag}));
-    const bytes=createNoteZip({note,tags:exportTags,source});
-    downloadBytes(bytes,noteZipFileName(note.title||'note'),'application/zip');setMenuOpen(false);
-    setStatus('ZIP заметки создан. Внутри находятся note.md, manifest.json и вложения.');
+    const used=new Set(note.tagIds??[]),exportTags=(tags[viewing.vault]??[]).filter(tag=>used.has(tag.id)).map(tag=>({...tag})),streams=new Map<string,PortableAttachmentStream>();
+    for(const item of note.attachments??[])if(item.storage==='stream')streams.set(item.id,await attachmentPlainStream(user,viewing.vault,item));
+    const result=await createNoteZipBlob({note,tags:exportTags,source},streams,(done,total)=>setStatus('Экспорт ZIP: '+Math.round(done/1024/1024)+' / '+Math.round(total/1024/1024)+' МиБ'));
+    downloadBlob(result.blob,noteZipFileName(note.title||'note'),result.cleanup);setMenuOpen(false);
+    setStatus('ZIP заметки создан без ограничения 64 МиБ. Внутри находятся note.md, manifest.json и вложения.');
   }
   function statusOf(current:NonNullable<State['vaults'][number]>,revision:Revision,value:Note):NoteLifecycleState{return noteLifecycle(current,revision,value);}
   async function openHistory(current:NonNullable<State['vaults'][number]>,objectId:string,back:'list'|'archive'|'trash'){
@@ -387,6 +394,55 @@ export function Planner({ user,reminderTarget,onReminderHandled,onSyncState }: {
   async function updateViewing(patch:Partial<Note>){
     const current=viewingRef.current;if(!current)return;showDraft({...current,...patch,dirty:true});await flush();const saved=draftRef.current;
     if(saved?.revision)showViewing({...saved,revision:saved.revision});showDraft(null);void sync();
+  }
+  function downloadBlob(blob:Blob,name:string,release?:()=>Promise<void>){const url=URL.createObjectURL(blob),a=document.createElement('a');a.href=url;a.download=name||'file';document.body.append(a);a.click();a.remove();setTimeout(()=>{URL.revokeObjectURL(url);if(release)void release();},release?10*60*1000:30_000);}
+  async function downloadAttachment(item:NoteAttachment,vid:string){setStatus('Расшифровываем файл…');const blob=await attachmentBlob(user,vid,item);downloadBlob(blob,item.name);setStatus('Файл подготовлен к скачиванию.');}
+  async function uploadFiles(files:File[]){
+    const d=draftRef.current;if(!d)throw Error('Редактор закрыт.');if(!navigator.onLine)throw Error('Для загрузки файла требуется подключение к серверу.');
+    for(const file of files){setFileUpload({name:file.name||'Файл',percent:0});let uploaded:NoteAttachment|undefined;
+      const controller=new AbortController();uploadAbort.current=controller;
+      try{const result=await uploadAttachment(user,d.vault,d.object,file,progress=>setFileUpload({name:file.name||'Файл',percent:progress.percent}),controller.signal);uploaded=result.attachment;
+        const current=draftRef.current;if(!current||current.object!==d.object)throw Error('Редактор был закрыт во время загрузки.');
+        showDraft({...current,attachments:[...(current.attachments??[]),uploaded],dirty:true});await flush();
+        if(result.warning)setStatus('Файл загружен. На диске сервера осталось менее 15% свободного места.');else setStatus('Файл загружен и привязан к заметке.');
+      }catch(caught){if(uploaded)await deleteAttachmentFile(user,d.vault,uploaded.id).catch(()=>{});if(caught instanceof DOMException&&caught.name==='AbortError')throw Error('Загрузка отменена. Недогруженные части будут удалены сервером автоматически.');throw caught;}finally{if(uploadAbort.current===controller)uploadAbort.current=undefined;setFileUpload(null);}
+    }
+  }
+  async function removeAttachmentFromDraft(item:NoteAttachment){
+    const current=draftRef.current;if(!current)return;
+    if(!confirm('Удалить вложение из текущей версии заметки? Старые версии сохранят ссылку на файл.'))return;
+    const next=(current.attachments??[]).filter(x=>x.id!==item.id),cover=current.cover?.attachmentId===item.id?undefined:current.cover;
+    showDraft({...current,attachments:next,cover,dirty:true});await flush();setStatus('Вложение удалено из текущей версии. История заметки сохранена.');
+  }
+  function renameDraftAttachment(item:NoteAttachment){
+    const current=draftRef.current;if(!current)return;const name=prompt('Новое имя файла',item.name)?.trim();if(!name||name===item.name)return;
+    if(Array.from(name).length>200){setError('Имя файла должно быть не длиннее 200 символов.');return;}
+    showDraft({...current,attachments:(current.attachments??[]).map(x=>x.id===item.id?{...x,name}:x),dirty:true});void flush();
+  }
+  async function removeViewingAttachment(item:NoteAttachment){
+    const current=viewingRef.current;if(!current)return;if(!confirm('Удалить вложение из текущей версии заметки? Старые версии сохранят файл.'))return;
+    await updateViewing({attachments:(current.attachments??[]).filter(x=>x.id!==item.id),...(current.cover?.attachmentId===item.id?{cover:undefined}:{})});
+    setStatus('Вложение удалено из текущей версии. История сохранена.');
+  }
+  async function renameViewingAttachment(item:NoteAttachment){
+    const current=viewingRef.current;if(!current)return;const name=prompt('Новое имя файла',item.name)?.trim();if(!name||name===item.name)return;
+    if(Array.from(name).length>200)throw Error('Имя файла должно быть не длиннее 200 символов.');
+    await updateViewing({attachments:(current.attachments??[]).map(x=>x.id===item.id?{...x,name}:x)});
+  }
+  async function moveViewingAttachment(item:NoteAttachment,targetObject:string){
+    const source=viewingRef.current;if(!source||source.object===targetObject)return;const current=stateRef.current?.vaults.find(v=>v.header.id===source.vault&&v.key&&!v.deleted);if(!current)throw Error('Хранилище закрыто.');
+    const targets=heads(current).filter(r=>r.objectId===targetObject);if(targets.length!==1)throw Error('Целевая заметка имеет конфликт версий.');
+    const targetValue=notes[targets[0].id];if(!targetValue||entityKind(targetValue)!=='note')throw Error('Целевая заметка недоступна.');
+    if((targetValue.attachments??[]).some(x=>x.id===item.id))throw Error('Файл уже находится в этой заметке.');
+    await saveNote(user,source.vault,targetObject,targets[0].id,{...targetValue,attachments:[...(targetValue.attachments??[]),item]},current.key);
+    await updateViewing({attachments:(source.attachments??[]).filter(x=>x.id!==item.id),...(source.cover?.attachmentId===item.id?{cover:undefined}:{})});
+    if(item.storage==='stream')await moveAttachmentFile(user,source.vault,item.id,targetObject);
+    setStatus('Вложение перемещено без повторной загрузки.');await load();void sync();
+  }
+  function viewingMoveTargets(){
+    if(!viewing)return[];const current=state?.vaults.find(v=>v.header.id===viewing.vault&&v.key&&!v.deleted);if(!current)return[];
+    return heads(current).filter(r=>r.objectId!==viewing.object&&entityKind(notes[r.id]??{title:'',text:''})==='note'&&noteLifecycle(current,r,notes[r.id]??{title:'',text:''})==='active')
+      .map(r=>({id:r.objectId,title:notes[r.id]?.title||'Без заголовка'}));
   }
   function checklistEditor(){
     if(!draft)return null;const items=draft.checklist??[];
@@ -591,12 +647,16 @@ export function Planner({ user,reminderTarget,onReminderHandled,onSyncState }: {
       lifecycle==='trashed'&&current&&!readOnly&&(!current.shared||current.role==='owner')&&e('button',{class:'menu-danger',disabled:busy,onClick:()=>{if(confirm('Удалить заметку и всю историю навсегда? Восстановить её средствами приложения будет невозможно.'))void run(()=>purgeCurrent(current,viewing.object));}},'Удалить навсегда')),
     readOnly&&e('p',{class:'auth-notice'},entityKind(viewing)!=='note'?'Это задача проекта. Для изменения статуса, сроков и проекта откройте раздел «Проекты».':current?.membershipRevoked?'Доступ отозван. Это только ранее загруженная локальная копия; изменения не отправляются на сервер.':'Роль «Просмотр»: содержимое заметки нельзя изменять. Комментарии разрешены отдельно.'),
     lifecycle!=='active'&&e('p',{class:lifecycle==='trashed'?'lifecycle-banner trash':'lifecycle-banner'},lifecycle==='archived'?'Заметка находится в архиве. Напоминание приостановлено.':'Заметка находится в корзине. Она будет удалена автоматически через 30 дней.'),
+    viewing.cover&&(()=>{const item=(viewing.attachments??[]).find(x=>x.id===viewing.cover!.attachmentId);return item?e(BlobImage,{key:item.id,cacheKey:item.id,alt:item.name,className:'note-cover',load:()=>attachmentPreviewBlob(user,viewing.vault,item)}):null;})(),
     e('h1',null,viewing.title||'Без заголовка'),
     tagChips(viewing.vault,viewing.tagIds).length>0&&e('div',{class:'tag-list'},tagChips(viewing.vault,viewing.tagIds).map(tag=>e('span',{class:'tag-chip',style:{'--tag-color':tag.color},key:tag.id},tag.name))),
     viewing.html?e('div',{class:'note-view-text rich-note-content',dangerouslySetInnerHTML:{__html:sanitizeNoteHtml(viewing.html)}})
       :viewing.text?e('div',{class:'note-view-text'},viewing.text):e('p',{class:'muted'},'В заметке пока нет текста.'),
     Boolean(viewing.checklist?.length)&&e('section',{class:'checklist-view'},e('h2',null,'Чек-лист'),viewing.checklist!.map(item=>e('label',{class:'checklist-view-row',key:item.id},e('input',{type:'checkbox',checked:item.done,disabled:busy||readOnly,onChange:(ev:Event)=>void run(()=>updateViewing({checklist:viewing.checklist!.map(current=>current.id===item.id?{...current,done:(ev.target as HTMLInputElement).checked}:current)}))}),e('span',{class:item.done?'completed':''},item.text||'Пустой пункт')))),
-    e(Attachments,{items:viewing.attachments??[]}),
+    e(Attachments,{items:viewing.attachments??[],coverId:viewing.cover?.attachmentId,moveTargets:readOnly?[]:viewingMoveTargets(),
+      loadPreview:item=>attachmentPreviewBlob(user,viewing.vault,item),onDownload:item=>void run(()=>downloadAttachment(item,viewing.vault)),
+      onRename:readOnly?undefined:item=>void run(()=>renameViewingAttachment(item)),onSetCover:readOnly?undefined:item=>void run(()=>updateViewing({cover:{attachmentId:item.id}})),
+      onMove:readOnly?undefined:(item,target)=>void run(()=>moveViewingAttachment(item,target)),onRemove:readOnly?undefined:item=>void run(()=>removeViewingAttachment(item))}),
     e('section',{class:'reminder-card comments-card'},
       e('div',{class:'section-heading'},e('h2',null,'Комментарии'),e('button',{disabled:busy||Boolean(current?.membershipRevoked),onClick:()=>void toggleComments()},commentsOpen?'Скрыть':comments.length?'Показать ('+comments.length+')':'Показать')),
       commentsOpen&&e('div',null,
@@ -619,8 +679,11 @@ export function Planner({ user,reminderTarget,onReminderHandled,onSyncState }: {
       e('button', { class: 'primary', disabled: busy, onClick: () => void run(finishEditing) }, 'Готово')),
     e('label', null, 'Заголовок', e('input', { value: draft.title, maxLength: 500, onInput: (ev: Event) => change('title', (ev.target as HTMLInputElement).value) })),
     e('label',{class:'editor-label'},'Текст заметки'),
-    e(RichTextEditor,{key:draft.object,html:draft.html,text:draft.text,attachments:draft.attachments??[],
-      onChange:(html:string,text:string)=>changeContent({html,text}),onAttachmentsChange:(attachments:NonNullable<Note['attachments']>)=>changeContent({attachments}),onError:setError}),
+    fileUpload&&e('div',{class:'file-upload-progress','aria-live':'polite'},e('strong',null,'Загрузка: '+fileUpload.name),e('progress',{max:100,value:fileUpload.percent}),e('span',null,fileUpload.percent+'%'),e('button',{type:'button',onClick:()=>uploadAbort.current?.abort()},'Отменить')),
+    e(RichTextEditor,{key:draft.object,html:draft.html,text:draft.text,attachments:draft.attachments??[],coverId:draft.cover?.attachmentId,
+      onChange:(html:string,text:string)=>changeContent({html,text}),onAttachmentsChange:(attachments:NonNullable<Note['attachments']>)=>changeContent({attachments}),
+      onFilesSelected:uploadFiles,onRemoveAttachment:item=>void run(()=>removeAttachmentFromDraft(item)),onDownloadAttachment:item=>void run(()=>downloadAttachment(item,draft.vault)),
+      onRenameAttachment:renameDraftAttachment,onSetCover:item=>changeContent({cover:{attachmentId:item.id}}),loadPreview:item=>attachmentPreviewBlob(user,draft.vault,item),onError:setError}),
     checklistEditor(),
     e('section',{class:'note-tags'},e('div',{class:'section-heading'},e('h2',null,'Теги'),e('button',{onClick:()=>void run(async()=>{await flush();showDraft(null);showViewing(null);setScreen('tags');})},'Редактировать список')),
       e('div',{class:'tag-picker'},activeTags(draft.vault).map(tag=>e('label',{class:'tag-choice',key:tag.id},e('input',{type:'checkbox',checked:(draft.tagIds??[]).includes(tag.id),onChange:(ev:Event)=>{

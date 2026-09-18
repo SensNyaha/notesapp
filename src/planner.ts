@@ -12,7 +12,11 @@ import { createAccess, signAccess } from './crypto/access.ts';
 import { validPlan } from '../shared/reminders.mjs';
 import type { ReminderPlan } from '../shared/reminders.mjs';
 import { reminderRequest } from './reminders.ts';
-export interface NoteAttachment { id:string;name:string;type:string;size:number;data:string }
+import { createFileKey, unwrapFileKey, rewrapFileKey, encryptFileChunk, decryptFileChunk, FILE_CHUNK_BYTES } from './crypto/files.ts';
+export interface NoteAttachment { id:string;name:string;type:string;size:number;data?:string;storage?:'stream';wrappedKey?:string;chunks?:number;keyEpoch?:number;cryptoVaultId?:string;preview?:{type:string;size:number;chunks:number} }
+export interface AttachmentUploadProgress {sent:number;total:number;percent:number}
+export interface NoteCover {attachmentId:string}
+
 export interface ChecklistItem { id:string;text:string;done:boolean }
 export interface TagDefinition { id:string;name:string;color:string;deleted:boolean;op:string }
 export type VaultPushMode='neutral'|'title';
@@ -23,7 +27,7 @@ export type TaskStatus='todo'|'in_progress'|'done'|'cancelled';
 export type TaskPriority='none'|'low'|'medium'|'high';
 export interface ProjectMeta { favorite:boolean;startDate?:string;endDate?:string }
 export interface TaskMeta { status:TaskStatus;priority:TaskPriority;startDate?:string;endDate?:string;assigneeUserId?:string }
-export interface Note { title: string; text: string; html?:string;attachments?:NoteAttachment[];checklist?:ChecklistItem[];tagIds?:string[];pinned?:boolean;reminder?:ReminderPlan;
+export interface Note { title: string; text: string; html?:string;attachments?:NoteAttachment[];cover?:NoteCover;checklist?:ChecklistItem[];tagIds?:string[];pinned?:boolean;reminder?:ReminderPlan;
   kind?:PlannerEntityKind;projectId?:string;project?:ProjectMeta;task?:TaskMeta;
   lifecycle?:NoteLifecycle;author?:{name:string;time:number};importSource?:{kind:'tasks-note-v1';vaultId:string;objectId:string} }
 export interface PortableVaultRevision { revisionId:string;objectId:string;parent:string|null;resolves:string[];note:Note }
@@ -61,10 +65,21 @@ function writeKey(user:string,v:Vault){
   if(!key)throw Error('Актуальный ключ совместного хранилища недоступен.');return{key,epoch};
 }
 function validAttachment(item:unknown):item is NoteAttachment{
-  return Boolean(item&&typeof item==='object'&&'id'in item&&typeof item.id==='string'
-    &&'name'in item&&typeof item.name==='string'&&item.name.length<=200&&'type'in item&&typeof item.type==='string'&&item.type.length<=100
-    &&'size'in item&&typeof item.size==='number'&&Number.isSafeInteger(item.size)&&item.size>=0&&item.size<=512*1024&&'data'in item&&typeof item.data==='string'
-    &&item.data.length<=700000&&/^data:[^;,]{1,100};base64,[A-Za-z0-9+/=]+$/.test(item.data));
+  if(!item||typeof item!=='object'||!('id'in item)||typeof item.id!=='string'||!uuid.test(item.id)
+    ||!('name'in item)||typeof item.name!=='string'||!item.name.trim()||item.name.length>200
+    ||!('type'in item)||typeof item.type!=='string'||item.type.length>100
+    ||!('size'in item)||typeof item.size!=='number'||!Number.isSafeInteger(item.size)||item.size<0)return false;
+  if('storage'in item&&item.storage==='stream'){
+    const preview='preview'in item?item.preview:undefined;
+    return 'wrappedKey'in item&&typeof item.wrappedKey==='string'&&/^[A-Za-z0-9_-]{54}$/.test(item.wrappedKey)
+      &&'chunks'in item&&typeof item.chunks==='number'&&Number.isSafeInteger(item.chunks)&&item.chunks>=1&&item.chunks<=1_000_000
+      &&'keyEpoch'in item&&typeof item.keyEpoch==='number'&&Number.isSafeInteger(item.keyEpoch)&&item.keyEpoch>=0&&item.keyEpoch<=1_000_000
+      &&(!('cryptoVaultId'in item)||item.cryptoVaultId===undefined||typeof item.cryptoVaultId==='string'&&uuid.test(item.cryptoVaultId))
+      &&(preview===undefined||Boolean(preview&&typeof preview==='object'&&'type'in preview&&typeof preview.type==='string'&&preview.type.length<=100
+        &&'size'in preview&&typeof preview.size==='number'&&Number.isSafeInteger(preview.size)&&preview.size>=0
+        &&'chunks'in preview&&typeof preview.chunks==='number'&&Number.isSafeInteger(preview.chunks)&&preview.chunks>=1&&preview.chunks<=64));
+  }
+  return 'data'in item&&typeof item.data==='string'&&item.size<=512*1024&&item.data.length<=700000&&/^data:[^;,]{1,100};base64,[A-Za-z0-9+/=]+$/.test(item.data);
 }
 const validDate=(value:unknown)=>typeof value==='string'&&/^\d{4}-\d\d-\d\d$/.test(value)&&!Number.isNaN(Date.parse(value+'T00:00:00Z'));
 export const entityKind=(value:Pick<Note,'kind'>):PlannerEntityKind=>value.kind??'note';
@@ -75,6 +90,7 @@ function note(value: unknown): Note {
   const reminder='reminder'in value?value.reminder:undefined;
   const html='html'in value?value.html:undefined;
   const attachments='attachments'in value?value.attachments:undefined;
+  const cover='cover'in value?value.cover:undefined;
   const checklist='checklist'in value?value.checklist:undefined;
   const tagIds='tagIds'in value?value.tagIds:undefined;
   const pinned='pinned'in value?value.pinned:undefined;
@@ -88,8 +104,9 @@ function note(value: unknown): Note {
   if(projectId!==undefined&&(typeof projectId!=='string'||!uuid.test(projectId)))throw Error('Повреждена привязка к проекту');
   if(reminder!==undefined&&!validPlan(reminder))throw Error('Повреждено напоминание');
   if(html!==undefined&&typeof html!=='string')throw Error('Повреждено форматирование заметки');
-  if(attachments!==undefined&&(!Array.isArray(attachments)||attachments.length>15||!attachments.every(validAttachment)
-    ||attachments.reduce((sum,item)=>sum+item.size,0)>512*1024))throw Error('Повреждены вложения заметки');
+  if(attachments!==undefined&&(!Array.isArray(attachments)||attachments.length>500||!attachments.every(validAttachment)))throw Error('Повреждены вложения заметки');
+  if(cover!==undefined&&(!cover||typeof cover!=='object'||!('attachmentId'in cover)||typeof cover.attachmentId!=='string'||!uuid.test(cover.attachmentId)
+    ||!Array.isArray(attachments)||!attachments.some(item=>item.id===cover.attachmentId&&item.type.startsWith('image/'))))throw Error('Повреждена обложка заметки');
   if(checklist!==undefined&&(!Array.isArray(checklist)||checklist.length>500||!checklist.every(item=>item&&typeof item==='object'
     &&'id'in item&&typeof item.id==='string'&&item.id.length<=100&&'text'in item&&typeof item.text==='string'&&item.text.length<=1000
     &&'done'in item&&typeof item.done==='boolean')))throw Error('Повреждён чек-лист');
@@ -115,7 +132,7 @@ function note(value: unknown): Note {
   if(importSource!==undefined&&(!importSource||typeof importSource!=='object'||!('kind'in importSource)||importSource.kind!=='tasks-note-v1'
     ||!('vaultId'in importSource)||typeof importSource.vaultId!=='string'||!uuid.test(importSource.vaultId)
     ||!('objectId'in importSource)||typeof importSource.objectId!=='string'||!uuid.test(importSource.objectId)))throw Error('Повреждён источник импортированной заметки');
-  return { title: value.title, text: value.text, ...(html!==undefined?{html}:{}), ...(attachments?{attachments:attachments as NoteAttachment[]}:{}),
+  return { title: value.title, text: value.text, ...(html!==undefined?{html}:{}), ...(attachments?{attachments:attachments as NoteAttachment[]}:{}),...(cover?{cover:cover as NoteCover}:{}),
     ...(checklist?{checklist:checklist as ChecklistItem[]}:{}),...(tagIds?{tagIds:tagIds as string[]}:{}),...(pinned!==undefined?{pinned}:{}),
     ...(reminder?{reminder}:{}),...(kind!==undefined?{kind:normalizedKind}:{}),...(projectId!==undefined?{projectId:projectId as string}:{}),
     ...(project?{project:project as ProjectMeta}:{}),...(task?{task:task as TaskMeta}:{}),
@@ -517,11 +534,19 @@ export const resolveConflict=(user:User,vid:string,objectId:string,expected:stri
 });
 export const transferVault = (user: User, source: string, name: string, phrase: string) => edit(user, async s => {
   const v = vault(s, source); if (v.deleted || v.transfer) throw Error('Перенос уже начат или хранилище удалено');
-  const target = await makeVault(user.id, name, phrase);
-  for (const r of heads(v)){const copy=await readNote(user.id,v,r),created=await addRevision(user.id,target,id(),null,{...copy,...(copy.reminder?{reminder:{...copy.reminder,id:id(),state:'off' as const}}:{})});
+  const target = await makeVault(user.id, name, phrase),files=new Set<string>(),mapped=new Map<string,NoteAttachment>(),targetWrite=writeKey(user.id,target);
+  const mapAttachment=async(item:NoteAttachment)=>{
+    if(item.storage!=='stream')return{...item};
+    const cached=mapped.get(item.id);if(cached)return cached;
+    if(!item.wrappedKey||item.keyEpoch===undefined)throw Error('Повреждено потоковое вложение.');
+    const sourceRoot=fileEpochKey(user.id,v,item.keyEpoch),wrappedKey=await rewrapFileKey(sourceRoot,targetWrite.key,item.wrappedKey);
+    const next:NoteAttachment={...item,wrappedKey,keyEpoch:targetWrite.epoch,cryptoVaultId:item.cryptoVaultId??v.header.id};mapped.set(item.id,next);files.add(item.id);return next;
+  };
+  for (const r of heads(v)){const copy=await readNote(user.id,v,r),attachments=copy.attachments?await Promise.all(copy.attachments.map(mapAttachment)):undefined;
+    const created=await addRevision(user.id,target,id(),null,{...copy,...(attachments?{attachments}:{}),...(copy.reminder?{reminder:{...copy.reminder,id:id(),state:'off' as const}}:{})});
     if(copy.lifecycle?.state==='trashed')created.lifecyclePending={state:'trash',expected:null};}
   if(catalogHeads(v).length){const catalog=await readCatalog(user.id,v);await writeCatalog(user.id,target,catalog.tags,catalog.push);}
-  s.vaults.push(target); v.transfer = { target: target.header.id, revisions: target.records.map(r => r.id) };
+  s.vaults.push(target); v.transfer = { target: target.header.id, revisions: target.records.map(r => r.id),...(files.size?{files:[...files]}:{}) };
   return target.header.id;
 });
 
@@ -532,9 +557,11 @@ export async function exportVaultSnapshot(user:User,vid:string):Promise<Portable
   const excluded=new Set([...(v.purgePending??[]),...(v.purgedObjects??[]),
     ...Object.entries(v.objectStates??{}).filter(([,state])=>state.state==='purged').map(([objectId])=>objectId)]);
   const revisions:PortableVaultRevision[]=[];
-  for(const r of v.records)if(r.objectId!==v.header.id&&!excluded.has(r.objectId))revisions.push({
-    revisionId:r.id,objectId:r.objectId,parent:r.parent,resolves:[...(r.resolves??[])],note:await readNote(user.id,v,r)
-  });
+  for(const r of v.records)if(r.objectId!==v.header.id&&!excluded.has(r.objectId)){
+    const value=await readNote(user.id,v,r);
+    if(value.attachments?.some(item=>item.storage==='stream'))throw Error('Формат .tasks-backup v1 поддерживает только малые встроенные вложения. Потоковые файлы экспортируйте через ZIP заметки.');
+    revisions.push({revisionId:r.id,objectId:r.objectId,parent:r.parent,resolves:[...(r.resolves??[])],note:value});
+  }
   const catalog=await readCatalog(user.id,v);
   return{format:'tasks-vault-snapshot',version:1,sourceVaultId:v.header.id,name:await vaultName(user.id,v),
     exportedAt:Date.now(),tags:catalog.tags.map(tag=>({...tag})),pushMode:catalog.push.mode,revisions};
@@ -555,7 +582,8 @@ export function validateVaultSnapshot(value:unknown):PortableVaultSnapshot{
       ||typeof r.objectId!=='string'||!uuid.test(r.objectId)||(r.parent!==null&&(typeof r.parent!=='string'||!uuid.test(r.parent)))
       ||!Array.isArray(r.resolves)||r.resolves.length>100||!r.resolves.every(x=>typeof x==='string'&&uuid.test(x))||new Set(r.resolves).size!==r.resolves.length
       ||byId.has(r.revisionId))throw Error('Некорректная история резервной копии.');
-    const normalized={revisionId:r.revisionId,objectId:r.objectId,parent:r.parent as string|null,resolves:[...r.resolves] as string[],note:note(r.note)};
+    const normalizedNote=note(r.note);if(normalizedNote.attachments?.some(item=>item.storage==='stream'))throw Error('Резервная копия v1 не может содержать потоковые ссылки без самих файлов.');
+    const normalized={revisionId:r.revisionId,objectId:r.objectId,parent:r.parent as string|null,resolves:[...r.resolves] as string[],note:normalizedNote};
     revisions.push(normalized);byId.set(normalized.revisionId,normalized);
   }
   for(const r of revisions)for(const ref of [...(r.parent?[r.parent]:[]),...r.resolves]){
@@ -600,12 +628,16 @@ export const importVaultSnapshot=(user:User,input:unknown,name:string,phrase:str
   s.vaults.push(target);return target.header.id;
 });
 
-export interface PortableNoteImport {note:Note;tags:TagDefinition[];source?:{kind:'tasks-note-v1';vaultId:string;objectId:string}}
+export interface PortableNoteImport {note:Note;tags:TagDefinition[];source?:{kind:'tasks-note-v1';vaultId:string;objectId:string};files?:{sourceId:string;name:string;type:string;size:number;bytes?:Uint8Array;blob?:Blob}[];coverAttachmentId?:string;cleanup?:()=>Promise<void>}
 function validPortableNote(input:PortableNoteImport){
   const normalized=note(input.note);
   if(!Array.isArray(input.tags)||input.tags.length>500||!input.tags.every(validTag))throw Error('Некорректные теги импортируемой заметки.');
   if(input.source&&(!uuid.test(input.source.vaultId)||!uuid.test(input.source.objectId)))throw Error('Некорректный источник импортируемой заметки.');
-  return{note:normalized,tags:input.tags,source:input.source};
+  const files=input.files??[];if(!Array.isArray(files)||files.length>500||files.some(file=>!file||typeof file!=='object'||!uuid.test(file.sourceId)
+    ||typeof file.name!=='string'||!file.name.trim()||file.name.length>200||typeof file.type!=='string'||file.type.length>100
+    ||!Number.isSafeInteger(file.size)||file.size<0||(!((file.bytes instanceof Uint8Array)&&file.bytes.length===file.size)&&!((file.blob instanceof Blob)&&file.blob.size===file.size))))throw Error('Некорректные файлы импортируемой заметки.');
+  if(input.coverAttachmentId!==undefined&&(!uuid.test(input.coverAttachmentId)||!files.some(file=>file.sourceId===input.coverAttachmentId&&file.type.startsWith('image/'))))throw Error('Некорректная обложка импортируемой заметки.');
+  return{note:normalized,tags:input.tags,source:input.source,files,coverAttachmentId:input.coverAttachmentId,cleanup:input.cleanup};
 }
 async function duplicateImported(userId:string,v:Vault,source:NonNullable<PortableNoteImport['source']>){
   for(const r of heads(v)){const value=await readNote(userId,v,r);if(value.importSource?.vaultId===source.vaultId&&value.importSource.objectId===source.objectId)return true;}return false;
@@ -615,21 +647,39 @@ export async function noteImportIsDuplicate(user:User,vid:string,input:PortableN
   if(!s||!v||v.deleted||!v.key)throw Error('Для импорта откройте целевое хранилище.');
   return checked.source?duplicateImported(user.id,v,checked.source):false;
 }
-export const importPortableNote=(user:User,vid:string,input:PortableNoteImport,duplicatePolicy:'skip'|'copy')=>edit(user,async s=>{
-  const checked=validPortableNote(input),v=vault(s,vid);if(v.deleted||v.transfer)throw Error('Хранилище недоступно для импорта.');
-  const duplicate=checked.source?await duplicateImported(user.id,v,checked.source):false;if(duplicate&&duplicatePolicy==='skip')return{imported:false,duplicate:true};
-  const catalog=await readCatalog(user.id,v),tags=[...catalog.tags.map(tag=>({...tag}))],mapped:string[]=[];let changed=false;
-  for(const sourceId of checked.note.tagIds??[]){const sourceTag=checked.tags.find(tag=>tag.id===sourceId&&!tag.deleted);if(!sourceTag)continue;
-    let targetTag=tags.find(tag=>!tag.deleted&&tag.name.localeCompare(sourceTag.name,'ru',{sensitivity:'accent'})===0);
-    if(!targetTag){targetTag={id:id(),name:sourceTag.name,color:sourceTag.color.toUpperCase(),deleted:false,op:nextTagOp(tags)};tags.push(targetTag);changed=true;}mapped.push(targetTag.id);
+export async function importPortableNote(user:User,vid:string,input:PortableNoteImport,duplicatePolicy:'skip'|'copy'){
+  const checked=validPortableNote(input),uploaded:NoteAttachment[]=[],sourceToNew=new Map<string,string>(),objectId=id();
+  try{
+    const before=await readState(user.id),beforeVault=before?.vaults.find(item=>item.header.id===vid&&!item.deleted);
+    if(!beforeVault?.key||beforeVault.transfer)throw Error('Хранилище недоступно для импорта.');
+    const duplicate=checked.source?await duplicateImported(user.id,beforeVault,checked.source):false;if(duplicate&&duplicatePolicy==='skip')return{imported:false,duplicate:true};
+    for(const portable of checked.files){
+      const body=portable.blob??Uint8Array.from(portable.bytes!);const file=new File([body],portable.name,{type:portable.type});
+      const result=await uploadAttachment(user,vid,objectId,file);uploaded.push(result.attachment);sourceToNew.set(portable.sourceId,result.attachment.id);
+    }
+    return await edit(user,async s=>{
+      const v=vault(s,vid);if(v.deleted||v.transfer)throw Error('Хранилище недоступно для импорта.');
+      const catalog=await readCatalog(user.id,v),tags=[...catalog.tags.map(tag=>({...tag}))],mapped:string[]=[];let changed=false;
+      for(const sourceId of checked.note.tagIds??[]){const sourceTag=checked.tags.find(tag=>tag.id===sourceId&&!tag.deleted);if(!sourceTag)continue;
+        let targetTag=tags.find(tag=>!tag.deleted&&tag.name.localeCompare(sourceTag.name,'ru',{sensitivity:'accent'})===0);
+        if(!targetTag){targetTag={id:id(),name:sourceTag.name,color:sourceTag.color.toUpperCase(),deleted:false,op:nextTagOp(tags)};tags.push(targetTag);changed=true;}mapped.push(targetTag.id);
+      }
+      if(changed)await writeCatalog(user.id,v,tags,catalog.push);
+      const {author:_,tagIds:__,reminder,...contents}=checked.note;
+      const coverId=checked.coverAttachmentId?sourceToNew.get(checked.coverAttachmentId):undefined;
+      const value:Note={...contents,tagIds:mapped,...(uploaded.length?{attachments:uploaded}:{}),...(coverId?{cover:{attachmentId:coverId}}:{}),
+        ...(reminder?{reminder:{...reminder,id:id(),state:'off'}}:{}),...(checked.source?{importSource:checked.source}:{}),
+        author:{name:s.deviceName??'Устройство',time:Date.now()}};
+      const created=await addRevision(user.id,v,objectId,null,value);if(value.lifecycle?.state==='trashed')created.lifecyclePending={state:'trash',expected:null};
+      return{imported:true,duplicate};
+    });
+  }catch(error){
+    for(const item of uploaded)await deleteAttachmentFile(user,vid,item.id).catch(()=>{});
+    throw error;
+  }finally{
+    if(checked.cleanup)await checked.cleanup().catch(()=>{});
   }
-  if(changed)await writeCatalog(user.id,v,tags,catalog.push);
-  const {author:_,tagIds:__,reminder,...contents}=checked.note,objectId=id();
-  const value:Note={...contents,tagIds:mapped,...(reminder?{reminder:{...reminder,id:id(),state:'off'}}:{}),
-    ...(checked.source?{importSource:checked.source}:{}),author:{name:s.deviceName??'Устройство',time:Date.now()}};
-  const created=await addRevision(user.id,v,objectId,null,value);if(value.lifecycle?.state==='trashed')created.lifecyclePending={state:'trash',expected:null};
-  return{imported:true,duplicate};
-});
+}
 class APIError extends Error {
   code: string;
   constructor(code: string) {
@@ -641,6 +691,8 @@ class APIError extends Error {
       vault_locked:'Хранилище закрыто на всех устройствах. Введите фразу заново для синхронизации.',
       wrong_password:'Неверный пароль аккаунта.',access_not_ready:'Сначала откройте хранилище и синхронизируйте его.',
       object_deleted:'Заметка окончательно удалена на другом устройстве.',object_state_conflict:'Состояние заметки изменилось на другом устройстве. Синхронизируйте и повторите действие.',
+      disk_critical:'На сервере осталось 5% или меньше свободного места. Освободите место перед новой загрузкой.',upload_not_found:'Временная загрузка уже очищена. Выберите файл заново.',
+      upload_incomplete:'Файл передан не полностью. Выберите его заново.',file_not_found:'Файл больше не найден на сервере.',stale_key_epoch:'Ключ совместного хранилища изменился. Синхронизируйте и повторите загрузку.',
     } as Record<string, string>)[code] ?? 'Не удалось синхронизировать данные (' + code + '). Локальная копия сохранена.');
     this.code = code;
   }
@@ -657,6 +709,103 @@ async function vaultRequest(account: string, path: string, body?: unknown, crede
     ...(body === undefined ? {} : { body: JSON.stringify(body) }), signal: AbortSignal.timeout(15000) });
   const value = await r.json(); if (!r.ok) throw new APIError(value.error ?? 'network'); return value;
 }
+async function csrfToken(){
+  const r=await fetch('/api/auth/csrf',{cache:'no-store',credentials:'same-origin',signal:AbortSignal.timeout(10000)});
+  const value=await r.json();if(!r.ok||typeof value?.csrf!=='string')throw new APIError('csrf');return value.csrf as string;
+}
+async function fileHeaders(user:User,vid:string,write=false){
+  const current=await session();if(current?.id!==user.id)throw new APIError('unauthorized');
+  const state=await readState(user.id),v=state?.vaults.find(item=>item.header.id===vid&&!item.deleted);
+  if(!state||!v)throw Error('Хранилище недоступно');
+  if(write&&(v.role==='viewer'||v.membershipRevoked))throw Error('Хранилище доступно только для просмотра.');
+  const grants:Record<string,string>={};if(v.grant)grants[vid]=v.grant;
+  return{state,v,headers:{'X-Tasks-Account':user.id,'X-Tasks-Device':state.deviceId??'','X-Vault-Grants':JSON.stringify(grants)} as Record<string,string>};
+}
+async function fileJson(user:User,vid:string,path:string,body:unknown,write=true){
+  const {headers}=await fileHeaders(user,vid,write);headers['X-CSRF-Token']=await csrfToken();headers['Content-Type']='application/json';
+  const r=await fetch('/api/files/'+path,{method:'POST',headers,credentials:'same-origin',cache:'no-store',body:JSON.stringify(body),signal:AbortSignal.timeout(30000)});
+  const value=await r.json();if(!r.ok)throw new APIError(value?.error??'network');return value;
+}
+async function putFileChunk(user:User,vid:string,uploadId:string,kind:'data'|'preview',index:number,bytes:Uint8Array,signal?:AbortSignal){
+  const {headers}=await fileHeaders(user,vid,true);headers['X-CSRF-Token']=await csrfToken();headers['Content-Type']='application/octet-stream';
+  const body=new Blob([Uint8Array.from(bytes)],{type:'application/octet-stream'});
+  const r=await fetch('/api/files/'+uploadId+'/'+kind+'/'+index,{method:'PUT',headers,credentials:'same-origin',cache:'no-store',body,signal:signal??AbortSignal.timeout(60000)});
+  const value=await r.json();if(!r.ok)throw new APIError(value?.error??'network');return value;
+}
+async function getFileChunk(user:User,vid:string,attachmentId:string,kind:'data'|'preview',index:number){
+  const {headers}=await fileHeaders(user,vid,false);
+  const r=await fetch('/api/files/'+vid+'/'+attachmentId+'/'+kind+'/'+index,{headers,credentials:'same-origin',cache:'no-store',signal:AbortSignal.timeout(60000)});
+  if(!r.ok){let value:any={};try{value=await r.json();}catch{}throw new APIError(value?.error??'network');}return new Uint8Array(await r.arrayBuffer());
+}
+async function imagePreview(file:File):Promise<Blob|null>{
+  if(!file.type.startsWith('image/')||typeof createImageBitmap!=='function')return null;
+  let bitmap:ImageBitmap|undefined;try{
+    bitmap=await createImageBitmap(file);const scale=Math.min(1,1600/Math.max(bitmap.width,bitmap.height)),width=Math.max(1,Math.round(bitmap.width*scale)),height=Math.max(1,Math.round(bitmap.height*scale));
+    const canvas=document.createElement('canvas');canvas.width=width;canvas.height=height;const ctx=canvas.getContext('2d');if(!ctx)return null;ctx.drawImage(bitmap,0,0,width,height);
+    const type=file.type==='image/png'?'image/png':'image/webp';
+    return await new Promise(resolve=>canvas.toBlob(blob=>resolve(blob),type,type==='image/png'?undefined:.82));
+  }catch{return null;}finally{bitmap?.close();}
+}
+function fileEpochKey(userId:string,v:Vault,epoch:number){
+  const key=epoch===0?(v.key??getVaultEpochKey(userId,v.header.id,0)):getVaultEpochKey(userId,v.header.id,epoch);
+  if(!key)throw Error('Ключ вложения недоступен.');return key;
+}
+export async function uploadAttachment(user:User,vid:string,objectId:string,file:File,onProgress?:(progress:AttachmentUploadProgress)=>void,signal?:AbortSignal):Promise<{attachment:NoteAttachment;warning:boolean}>{
+  const {v}=await fileHeaders(user,vid,true);const {key,epoch}=writeKey(user.id,v),attachmentId=id(),fileKey=await createFileKey(key),preview=await imagePreview(file);
+  const chunks=Math.max(1,Math.ceil(file.size/FILE_CHUNK_BYTES)),previewChunks=preview?Math.max(1,Math.ceil(preview.size/FILE_CHUNK_BYTES)):0;
+  const start=await fileJson(user,vid,'start',{vaultId:vid,objectId,attachmentId,chunkCount:chunks,previewChunks,keyEpoch:epoch});
+  let sent=0,total=file.size+(preview?.size??0);const report=()=>onProgress?.({sent,total,percent:total?Math.min(100,Math.round(sent*100/total)):100});
+  try{
+    for(let index=0;index<chunks;index++){
+      if(signal?.aborted)throw new DOMException('Загрузка отменена','AbortError');
+      const from=index*FILE_CHUNK_BYTES,to=Math.min(file.size,from+FILE_CHUNK_BYTES),plain=new Uint8Array(await file.slice(from,to).arrayBuffer());
+      const encrypted=await encryptFileChunk(fileKey.key,cryptoAccount(user.id,v),vid,attachmentId,'data',index,plain);await putFileChunk(user,vid,start.uploadId,'data',index,encrypted,signal);sent+=plain.length;report();
+    }
+    if(preview)for(let index=0;index<previewChunks;index++){
+      if(signal?.aborted)throw new DOMException('Загрузка отменена','AbortError');
+      const from=index*FILE_CHUNK_BYTES,to=Math.min(preview.size,from+FILE_CHUNK_BYTES),plain=new Uint8Array(await preview.slice(from,to).arrayBuffer());
+      const encrypted=await encryptFileChunk(fileKey.key,cryptoAccount(user.id,v),vid,attachmentId,'preview',index,plain);await putFileChunk(user,vid,start.uploadId,'preview',index,encrypted,signal);sent+=plain.length;report();
+    }
+    try{await fileJson(user,vid,'complete',{uploadId:start.uploadId});}catch(first){
+      // Completion is idempotent: retry once so a lost HTTP response does not orphan a fully uploaded file.
+      try{await fileJson(user,vid,'complete',{uploadId:start.uploadId});}catch{throw first;}
+    }
+    return{warning:Boolean(start.warning),attachment:{id:attachmentId,name:(file.name||'Файл').slice(0,200),type:(file.type||'application/octet-stream').slice(0,100),size:file.size,
+      storage:'stream',wrappedKey:fileKey.wrappedKey,chunks,keyEpoch:epoch,...(preview?{preview:{type:preview.type||'image/webp',size:preview.size,chunks:previewChunks}}:{})}};
+  }catch(error){throw error;}
+}
+async function cleanupOpfsFiles(directory:any,prefix:string,maxAge=24*60*60*1000){
+  if(typeof directory.entries!=='function')return;
+  try{for await(const [name,handle] of directory.entries())if(name.startsWith(prefix)&&handle?.kind==='file'){
+    try{const file=await handle.getFile();if(Date.now()-file.lastModified>maxAge)await directory.removeEntry(name);}catch{}
+  }}catch{}
+}
+async function streamedBlob(user:User,vid:string,item:NoteAttachment,kind:'data'|'preview'){
+  if(item.storage!=='stream'||!item.wrappedKey||!item.chunks||item.keyEpoch===undefined)throw Error('Вложение хранится в старом формате.');
+  const {v}=await fileHeaders(user,vid,false),root=fileEpochKey(user.id,v,item.keyEpoch),key=await unwrapFileKey(root,item.wrappedKey),count=kind==='data'?item.chunks:item.preview?.chunks??0;
+  const storage=navigator.storage as StorageManager&{getDirectory?:()=>Promise<any>};
+  if(kind==='data'&&storage.getDirectory){
+    const directory=await storage.getDirectory();await cleanupOpfsFiles(directory,'tasks-download-');const temp='tasks-download-'+crypto.randomUUID(),handle=await directory.getFileHandle(temp,{create:true}),writer=await handle.createWritable();
+    const cryptoVaultId=item.cryptoVaultId??vid;
+    try{for(let index=0;index<count;index++){const plain=await decryptFileChunk(key,cryptoAccount(user.id,v),cryptoVaultId,item.id,kind,index,await getFileChunk(user,vid,item.id,kind,index));await writer.write(plain);}}
+    catch(error){await writer.abort().catch(()=>{});await directory.removeEntry(temp).catch(()=>{});throw error;}
+    await writer.close();const file=await handle.getFile();setTimeout(()=>void directory.removeEntry(temp).catch(()=>{}),10*60*1000);return file as Blob;
+  }
+  const cryptoVaultId=item.cryptoVaultId??vid;
+  const parts:BlobPart[]=[];for(let index=0;index<count;index++)parts.push(Uint8Array.from(await decryptFileChunk(key,cryptoAccount(user.id,v),cryptoVaultId,item.id,kind,index,await getFileChunk(user,vid,item.id,kind,index))));
+  return new Blob(parts,{type:kind==='data'?item.type:item.preview?.type??'application/octet-stream'});
+}
+export async function attachmentBlob(user:User,vid:string,item:NoteAttachment){if(item.storage==='stream')return streamedBlob(user,vid,item,'data');if(!item.data)throw Error('Вложение повреждено');return fetch(item.data).then(r=>r.blob());}
+export async function attachmentPlainStream(user:User,vid:string,item:NoteAttachment){
+  if(item.storage!=='stream'||!item.wrappedKey||!item.chunks||item.keyEpoch===undefined)throw Error('Вложение не является потоковым.');
+  const {v}=await fileHeaders(user,vid,false),root=fileEpochKey(user.id,v,item.keyEpoch),key=await unwrapFileKey(root,item.wrappedKey),cryptoVaultId=item.cryptoVaultId??vid;
+  async function* chunks(){for(let index=0;index<item.chunks!;index++)yield await decryptFileChunk(key,cryptoAccount(user.id,v),cryptoVaultId,item.id,'data',index,await getFileChunk(user,vid,item.id,'data',index));}
+  return{size:item.size,chunks:chunks()};
+}
+export async function attachmentPreviewBlob(user:User,vid:string,item:NoteAttachment){if(item.storage==='stream'&&item.preview)return streamedBlob(user,vid,item,'preview');if(item.type.startsWith('image/'))return attachmentBlob(user,vid,item);return null;}
+export async function deleteAttachmentFile(user:User,vid:string,attachmentId:string){await fileJson(user,vid,'delete',{vaultId:vid,attachmentId});}
+export async function moveAttachmentFile(user:User,vid:string,attachmentId:string,objectId:string){await fileJson(user,vid,'move',{vaultId:vid,attachmentId,objectId});}
+
 // Only short local transactions use the data lock. The network lock does not block typing/saving.
 async function commit(user:User,fn:(s:State)=>Promise<void>){
   await exclusive(async()=>{const s=await readState(user.id);if(!s)throw Error('Локальный аккаунт закрыт');await fn(s);await writeState(s);announce();});
@@ -892,7 +1041,8 @@ export async function synchronize(user:User){
       const outgoing=v.transfer?[]:v.records.filter(r=>r.pending);
       for(const r of outgoing){
         const latest=(await snapshot(vid)).v;if(latest.transfer||latest.deleted)break;
-        await api('/record',{vaultId:vid,record:wire(r)},[vid]);
+        const attachmentIds=r.objectId===vid?[]:(await readNote(user.id,latest,r)).attachments?.filter(item=>item.storage==='stream').map(item=>item.id)??[];
+        await api('/record',{vaultId:vid,record:wire(r),attachmentIds},[vid]);
         await commit(user,async state=>{const local=vault(state,vid,false).records.find(x=>x.id===r.id);if(local)local.pending=false;});
       }
       ({v}=await snapshot(vid));
@@ -936,6 +1086,15 @@ export async function synchronize(user:User){
       const received=await fetchRecords(transfer.target);
       for(const rid of transfer.revisions){const expected=target.records.find(r=>r.id===rid),actual=received.find(r=>r.id===rid);
         if(!expected||!actual||JSON.stringify(wire(expected))!==JSON.stringify(wire(actual)))throw Error('Проверка перенесённой заметки не прошла');}
+      if(transfer.files?.length){
+        const state=await readState(user.id);if(!state)throw Error('Локальный аккаунт закрыт');
+        const sourceVault=state.vaults.find(item=>item.header.id===vid),targetVault=state.vaults.find(item=>item.header.id===transfer.target);
+        const grants:Record<string,string>={};if(sourceVault?.grant)grants[vid]=sourceVault.grant;if(targetVault?.grant)grants[transfer.target]=targetVault.grant;
+        const headers={'X-Tasks-Account':user.id,'X-Tasks-Device':state.deviceId??'','X-Vault-Grants':JSON.stringify(grants),'X-CSRF-Token':await csrfToken(),'Content-Type':'application/json'};
+        const response=await fetch('/api/files/transfer',{method:'POST',headers,credentials:'same-origin',cache:'no-store',
+          body:JSON.stringify({source:vid,target:transfer.target,attachmentIds:transfer.files}),signal:AbortSignal.timeout(30000)});
+        const value=await response.json();if(!response.ok)throw new APIError(value?.error??'network');
+      }
       await api('/transfer',{source:vid,target:transfer.target,revisions:transfer.revisions,confirmed:true},[vid,transfer.target]);
       await commit(user,async state=>{const current=vault(state,vid,false);current.deleted=true;current.records=[];lock(current,undefined,user.id);delete current.systemUnlock;delete current.transfer;
         state.reminderSeen=(state.reminderSeen??[]).filter(x=>x.vaultId!==vid);});

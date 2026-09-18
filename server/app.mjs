@@ -28,6 +28,7 @@ export async function createApp({ dataDir = resolve('data'), staticDir = resolve
   const db = openDatabase(dataDir);
   const app = Fastify({ logger, bodyLimit: 4096, ajv: { customOptions: { coerceTypes: false, removeAdditional: false } },
     logController: new LogController({ disableRequestLogging: true }) });
+  app.addContentTypeParser('application/octet-stream',{parseAs:'buffer',bodyLimit:1024*1024+28},(_request,body,done)=>done(null,body));
   app.addHook('onClose', async () => db.close());
   app.setErrorHandler((error, request, reply) => {
     const status = error.validation ? 400

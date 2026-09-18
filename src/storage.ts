@@ -11,7 +11,7 @@ export interface ObjectState { state:'active'|'trash'|'purged';recordId:string;t
 export interface Revision { id: string; objectId: string; parent: string | null; sealed: Sealed; pending?: boolean; reminderPending?:boolean; resolves?:string[];keyEpoch?:number;
   authorUserId?:string;createdAt?:number;lifecyclePending?:LifecyclePending }
 export interface Vault { header: Header; displayName?:string; key?: CryptoKey; pending?: boolean; deleted?: boolean; records: Revision[];
-  transfer?: { target: string; revisions: string[] }; epoch?:number; access?:AccessPack; grant?:string;
+  transfer?: { target: string; revisions: string[];files?:string[] }; epoch?:number; access?:AccessPack; grant?:string;
   needsGrant?:boolean; closeOperation?:string; closeBaseEpoch?:number; syncError?:string; systemUnlock?:VaultSystemUnlock;
   role?:'owner'|'editor'|'viewer';ownerId?:string;shared?:boolean;membershipRevoked?:boolean;keyring?:{version:number;currentEpoch:number;ownerBox?:Sealed};
   memberEnvelope?:{keyringVersion:number;identityVersion:number;keyEnvelope:VaultMemberEnvelope};

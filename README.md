@@ -2,7 +2,7 @@
 
 Локально развёртываемая PWA для заметок, напоминаний и планирования со сквозным шифрованием содержимого.
 
-Текущая рабочая версия: **0.16.0**, SQLite schema **13**. Сервер и PWA слушают порт **3100**. Полная карта документации находится в [`docs/README.md`](docs/README.md), фактическое покрытие функций — в [`docs/IMPLEMENTATION_STATUS.md`](docs/IMPLEMENTATION_STATUS.md), дальнейший порядок разработки — в [`TODO.md`](TODO.md).
+Текущая рабочая версия: **0.18.0**, SQLite schema **14**. Сервер и PWA слушают порт **3100**. Полная карта документации находится в [`docs/README.md`](docs/README.md), фактическое покрытие функций — в [`docs/IMPLEMENTATION_STATUS.md`](docs/IMPLEMENTATION_STATUS.md), дальнейший порядок разработки — в [`TODO.md`](TODO.md).
 
 ## Что работает
 
@@ -23,8 +23,8 @@
 - разовые и повторяющиеся напоминания, экран «Сегодня», snooze и история срабатываний;
 - Web Push на все активные устройства аккаунта и повтор непросмотренного события;
 - архив, корзина на 30 дней, окончательное удаление и история версий;
-- экспорт любой заметки в ZIP с `note.md`, manifest и вложениями; импорт Tasks ZIP и обычного Markdown;
-- переносимый зашифрованный backup одного E2EE-хранилища с восстановлением только в новый vault и отдельным паролем backup; portable v1 ограничен 64 МиБ незашифрованного содержимого;
+- потоковый экспорт любой заметки в ZIP/ZIP64 с `note.md`, manifest и вложениями без фиксированного продуктового лимита размера; импорт больших Tasks ZIP также выполняется потоком без загрузки всего архива в RAM;
+- переносимый зашифрованный backup одного E2EE-хранилища с восстановлением только в новый vault и отдельным паролем backup; старый `.tasks-backup` v1 остаётся отдельным форматом с лимитом 64 МиБ метаданных и не определяет лимит файлов/ZIP;
 - контакты по точному логину, подтверждение запросов и локальный TOFU-контроль fingerprint E2EE-идентичности;
 - совместные E2EE-хранилища с ролями владелец / редактор / просмотр, выдачей member envelopes и ротацией keyring epoch при отзыве участника;
 - зашифрованные комментарии к заметкам; viewer может комментировать и экспортировать, но не менять содержимое; permanent purge shared-заметки доступен владельцу;
@@ -100,7 +100,7 @@ docker compose restart app
 docker compose stop app
 ```
 
-Ожидаемый health текущей версии содержит `status: ok`, `version: 0.16.0`, `database: ok`, постоянный `installationId`, `bootCount` и время сервера.
+Ожидаемый health текущей версии содержит `status: ok`, `version: 0.18.0`, `database: ok`, постоянный `installationId`, `bootCount` и время сервера.
 
 ## Запуск без Docker
 
@@ -121,7 +121,7 @@ npm run build
 npm run check
 ```
 
-`npm run build` уже включает typecheck, Vite production build и создание Service Worker. На версии **0.16.0** набор содержит **95 тестов**. Они проверяют сервер, миграции, password/Passkey authentication, сессии, WebAuthn, PRF/auto-lock, portable backup encryption/validation/restore, ZIP/Markdown import/export, contacts/shared-vault API, collaboration crypto/key rotation, E2EE comments, TOFU fingerprint, отзыв участника с encrypted stash, удаление vault, синхронизацию, поиск, напоминания, push и PWA shell.
+`npm run build` уже включает typecheck, Vite production build и создание Service Worker. На версии **0.18.0** набор содержит **104 теста**. Они проверяют сервер и миграции, password/Passkey authentication, сессии, WebAuthn, PRF/auto-lock, portable backup, streaming ZIP/ZIP64, потоковую E2EE-криптографию файлов, file API и безопасный GC ссылок истории/копий, contacts/shared-vault API, collaboration crypto/key rotation, E2EE comments, TOFU fingerprint, отзыв участника с encrypted stash, удаление vault, синхронизацию, поиск, напоминания, push и PWA shell.
 
 Автоматические проверки не заменяют проверку установленной PWA, Safari, реальной доставки push и адаптивных экранов. Тестовый push при закрытой PWA ранее подтверждён пользователем на iOS 26.6.1.
 
@@ -166,7 +166,7 @@ docker compose exec -T app node server/cli/restore.mjs /data/tasks-backup.sqlite
 
 Команда восстановления не перезаписывает существующий каталог. Переключение `DATA_DIR` и откат версии выполняются только после проверки совместимости schema. Git сам по себе не восстанавливает SQLite, WAL, IndexedDB или Docker volume.
 
-Проверенные контрольные снимки перед миграциями хранятся в игнорируемой папке `backups/`: перед schema 10 — `before-stage13-schema10-20260914.sqlite` (SHA-256 `6CAF1A76AB5E127C3CC581BCEA2F511CD4882D95B3139328EF96954193A8468C`), перед schema 11 — `before-stage14b-schema11-20260917.sqlite` (SHA-256 `97B156375076D710B047E69ADE68B9E460DC2FE3294E14692FB9689BEF541F1D`), перед schema 12 — `before-stage14c-schema12-20260917.sqlite` (SHA-256 `92153DF4FCB669BD0D4EA161B94C0C8F7E69BDE6C5CEE7DC1C5163C250F8B91F`), перед schema 13 / версией 0.16.0 — `before-stage16-schema13-20260918.sqlite` (SHA-256 `0D5A8D6D3834DA2DFFD34F4EC61B8772067E88F1EEDF3D8A5E5FAA1BE442C50C`).
+Проверенные контрольные снимки перед миграциями хранятся в игнорируемой папке `backups/`: перед schema 10 — `before-stage13-schema10-20260914.sqlite` (SHA-256 `6CAF1A76AB5E127C3CC581BCEA2F511CD4882D95B3139328EF96954193A8468C`), перед schema 11 — `before-stage14b-schema11-20260917.sqlite` (SHA-256 `97B156375076D710B047E69ADE68B9E460DC2FE3294E14692FB9689BEF541F1D`), перед schema 12 — `before-stage14c-schema12-20260917.sqlite` (SHA-256 `92153DF4FCB669BD0D4EA161B94C0C8F7E69BDE6C5CEE7DC1C5163C250F8B91F`), перед schema 13 / версией 0.16.0 — `before-stage16-schema13-20260918.sqlite` (SHA-256 `0D5A8D6D3834DA2DFFD34F4EC61B8772067E88F1EEDF3D8A5E5FAA1BE442C50C`), перед schema 14 / версией 0.18.0 — `before-stage18-final-schema13-20260918.sqlite` (SHA-256 `B7571DE3A66166635C04659688A786D10B22FC7C8EB44D7E201A2C2379915A97`).
 
 ## Команды администратора
 
@@ -198,7 +198,7 @@ docker compose exec app npm run admin:recover -- adminlogin --generate
 - Поиск выполняется на клиенте по расшифрованным данным открытых хранилищ.
 - Окончательно удалённый объект получает постоянный tombstone, чтобы старое офлайн-устройство не воскресило его.
 
-Текущий JSON-формат ревизии ограничен одним мегабайтом, поэтому встроенные MVP-вложения ограничены 512 КБ. Это временное техническое ограничение. Для конечного продукта запланирован отдельный поток зашифрованных частей без фиксированного продуктового лимита размера файла; загрузку будет ограничивать фактическое свободное место сервера.
+Малые legacy-вложения по-прежнему могут находиться внутри JSON-ревизии, но новые файлы хранятся отдельно потоком аутентифицированных E2EE-частей по 1 МиБ. Фиксированного продуктового лимита размера файла или общей суммы вложений нет: практический предел задаётся свободным местом DATA_DIR и возможностями браузера. ZIP/ZIP64 экспорт и импорт больших вложений также потоковые и не наследуют старый предел 64 МиБ.
 
 ## Структура проекта
 
