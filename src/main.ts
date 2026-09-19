@@ -2,6 +2,7 @@ import { h, render } from 'preact';
 import { useEffect, useRef, useState } from 'preact/hooks';
 import { isHealthResponse, type HealthResponse } from './types/api';
 import './style.css';
+import './redesign.css';
 import { Login } from './components/Login';
 import { PasswordScreen, UsersScreen } from './components/Accounts';
 import { DevicesScreen } from './components/Devices';
@@ -16,6 +17,7 @@ import { ProjectsScreen } from './components/Projects';
 import { AppShell,type ShellSection } from './components/AppShell';
 import { AboutSettings,AccountOverview,AppearanceSettings,SettingsHub,type SettingsPage } from './components/Settings';
 import { Onboarding } from './components/Onboarding';
+import { PageHeader,StatusDot,UiIcon } from './components/ui.ts';
 import { detachPush, browserUnsubscribe } from './push';
 import { profiles, profileActivity, readState, eraseState, exclusive, announce, changes } from './storage';
 import { flushDraft, hasUnsaved, synchronize, requireOutboxReview, OutboxReviewRequired, lockAfterBackground } from './planner';
@@ -280,16 +282,35 @@ function App() {
     setSyncing(next==='syncing');if(next!=='syncing'&&next!=='idle')setConnection(next);
   };
   const diagnostics=e('main',{class:'settings-screen diagnostics-screen'},
-    user.role==='admin'&&e(ServerStorage,{key:user.id}),
-    e('div',{class:'screen-heading'},e('div',null,e('p',{class:'eyebrow'},'ДИАГНОСТИКА'),e('h1',null,'Состояние приложения'))),
-    e('section',{class:'card','aria-labelledby':'server-heading'},
-      e('div',{class:'card-heading'},e('h2',{id:'server-heading'},'Сервер и база данных'),
-        e('span',{class:`badge ${health?'good':''}`},busy?'Проверяем':health?'Работают':'Нет связи')),
-      e('div',{'aria-live':'polite'},error&&e('p',{class:'error'},error),health?e(DefinitionList,{rows:serverRows}):e('p',{class:'muted'},'Сведения появятся после успешного ответа сервера.')),
-      e('div',{class:'actions'},e('button',{class:'primary',disabled:busy,onClick:checkServer},busy?'Проверяем…':'Проверить ещё раз'),
-        e('a',{href:'/api/health',target:'_blank',rel:'noreferrer'},'Открыть ответ API ↗'))),
-    e('section',{class:'card','aria-labelledby':'device-heading'},e('h2',{id:'device-heading'},'На этом устройстве'),e(DefinitionList,{rows:deviceRows}),swError&&e('p',{class:'error'},swError)),
-    e(CryptoCheck,{key:user.id}));
+    e(PageHeader,{eyebrow:'Настройки',title:'Диагностика',description:'Состояние сервера, этого устройства, хранилища и локальной криптографии.',
+      actions:e('button',{class:'secondary-button',disabled:busy,onClick:checkServer},e(UiIcon,{name:'sync',size:17}),busy?'Обновляем…':'Обновить')}),
+    e('div',{class:'diagnostics-grid'},
+      e('section',{class:'diagnostic-panel settings-panel server-health-panel','aria-labelledby':'server-heading'},
+        e('div',{class:'diagnostic-panel-heading'},
+          e('span',{class:'diagnostic-icon'},e(UiIcon,{name:'diagnostics',size:21})),
+          e('div',null,e('h2',{id:'server-heading'},'Сервер и база данных'),e('p',null,'Health endpoint и runtime приложения.')),
+          e('span',{class:'status-pill '+(health?'success':'neutral')},e(StatusDot,{tone:health?'success':error?'danger':'neutral'}),busy?'Проверяем':health?'Работают':'Нет связи')),
+        error&&e('div',{class:'inline-alert danger',role:'alert'},e(UiIcon,{name:'warning',size:18}),e('span',null,error)),
+        health?e('div',{class:'diagnostic-summary'},
+          e('div',{class:'diagnostic-primary-metric'},e('span',null,'Версия'),e('strong',null,health.version)),
+          e('div',{class:'diagnostic-primary-metric'},e('span',null,'База данных'),e('strong',null,health.database==='ok'?'Работает':health.database)),
+          e('details',{class:'technical-details'},e('summary',null,'Технические сведения'),e(DefinitionList,{rows:serverRows})))
+          :e('div',{class:'diagnostic-empty'},e(UiIcon,{name:'wifi-off',size:23}),e('span',null,'Сведения появятся после успешного ответа сервера.')),
+        e('div',{class:'diagnostic-actions'},e('a',{class:'tertiary-link',href:'/api/health',target:'_blank',rel:'noreferrer'},'Открыть ответ API ↗'))),
+      e('section',{class:'diagnostic-panel settings-panel device-health-panel','aria-labelledby':'device-heading'},
+        e('div',{class:'diagnostic-panel-heading'},
+          e('span',{class:'diagnostic-icon'},e(UiIcon,{name:'devices',size:21})),
+          e('div',null,e('h2',{id:'device-heading'},'Это устройство'),e('p',null,'Браузерные возможности, PWA и локальный runtime.')),
+          e('span',{class:'status-pill '+(secure&&cryptoAvailable?'success':'neutral')},e(StatusDot,{tone:secure&&cryptoAvailable?'success':'warning'}),secure&&cryptoAvailable?'Готово':'Ограничено')),
+        e('div',{class:'diagnostic-device-grid'},
+          e('div',null,e('span',null,'Безопасный контекст'),e('strong',null,secure?'Да':'Нет')),
+          e('div',null,e('span',null,'Web Crypto'),e('strong',null,cryptoAvailable?'Доступен':'Недоступен')),
+          e('div',null,e('span',null,'PWA'),e('strong',null,shell)),
+          e('div',null,e('span',null,'Часовой пояс'),e('strong',null,Intl.DateTimeFormat().resolvedOptions().timeZone))),
+        swError&&e('div',{class:'inline-alert warning'},e(UiIcon,{name:'warning',size:18}),e('span',null,swError)),
+        e('details',{class:'technical-details'},e('summary',null,'Показать списком'),e(DefinitionList,{rows:deviceRows}))),
+      user.role==='admin'&&e(ServerStorage,{key:user.id}),
+      e(CryptoCheck,{key:user.id})));
   let content;
   if(page==='home'||page==='today'||page==='archive'||page==='trash')content=e(Planner,{user,key:user.id+':'+page,section:page==='today'?'today':'notes',initialScreen:page==='archive'?'archive':page==='trash'?'trash':'list',reminderTarget,onReminderHandled:()=>setReminderTarget(undefined),onSyncState:syncCallback});
   else if(page==='projects')content=e(ProjectsScreen,{user,key:user.id,onBack:()=>void navigate('home')});

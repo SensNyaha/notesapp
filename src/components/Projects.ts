@@ -8,6 +8,7 @@ import {
 } from '../planner.ts';
 import { cascadeSchedule,dependencyConflicts,type ScheduleChange } from '../gantt.ts';
 import { GanttView,type GanttDateChange } from './Gantt.ts';
+import { PageHeader,UiIcon } from './ui.ts';
 import { sharedVaultMembers,type VaultMemberInfo } from '../collaboration.ts';
 import type { ReminderPlan } from '../../shared/reminders.mjs';
 
@@ -211,12 +212,13 @@ export function ProjectsScreen({user,onBack}:{user:User;onBack:()=>void}){
         impact.changes.length>1&&e('button',{class:'primary',disabled:busy,onClick:()=>void applyImpact('chain')},'Сдвинуть цепочку'),
         e('button',{disabled:busy,onClick:()=>void applyImpact('only')},'Только эту задачу'),
         e('button',{disabled:busy,onClick:()=>{impactActions.current=undefined;setImpact(null);}},'Отмена'))));
-  if(!openedVaults.length)return e('main',{class:'projects-screen'},e('button',{onClick:onBack},'← К заметкам'),e('h1',null,'Проекты'),
-    e('div',{class:'empty-state card'},e('h2',null,'Нет открытого хранилища'),e('p',null,'Откройте нужное E2EE-хранилище в разделе «Заметки», затем вернитесь в проекты.')),feedback);
+  if(!openedVaults.length)return e('main',{class:'projects-screen'},
+    e(PageHeader,{eyebrow:'Проекты',title:'Проекты',description:'Задачи, сроки и планирование внутри E2EE-хранилищ.'}),
+    e('div',{class:'empty-state card'},e(UiIcon,{name:'folder',size:32}),e('h2',null,'Сначала откройте хранилище'),e('p',null,'Проекты принадлежат конкретному E2EE-хранилищу. Откройте его в разделе «Заметки», затем вернитесь сюда.')),feedback);
 
   if(screen==='project-form')return e('main',{class:'projects-screen'},
-    e('button',{disabled:busy,onClick:()=>setScreen(editingProject?'project':'projects')},'← Назад'),
-    e('section',{class:'card project-form'},e('h1',null,editingProject?'Редактировать проект':'Новый проект'),
+    e(PageHeader,{eyebrow:'Проект',title:editingProject?'Редактировать проект':'Новый проект',description:'Название, сроки и правила календаря остаются внутри E2EE-записи.',back:()=>setScreen(editingProject?'project':'projects')}),
+    e('section',{class:'card project-form'},
       e('form',{onSubmit:submitProject},
         e('label',null,'Название',e('input',{required:true,maxLength:200,value:projectTitle,onInput:(ev:Event)=>setProjectTitle((ev.target as HTMLInputElement).value)})),
         e('label',null,'Описание',e('textarea',{rows:5,maxLength:10000,value:projectDescription,onInput:(ev:Event)=>setProjectDescription((ev.target as HTMLTextAreaElement).value)})),
@@ -234,8 +236,8 @@ export function ProjectsScreen({user,onBack}:{user:User;onBack:()=>void}){
         e('button',{class:'primary',disabled:busy},busy?'Сохраняем…':editingProject?'Сохранить':'Создать проект'))),feedback);
 
   if(screen==='task-form')return e('main',{class:'projects-screen'},
-    e('button',{disabled:busy,onClick:()=>setScreen('project')},'← Назад'),
-    e('section',{class:'card task-form'},e('h1',null,editingTask?'Редактировать задачу':'Новая задача'),
+    e(PageHeader,{eyebrow:'Задача',title:editingTask?'Редактировать задачу':'Новая задача',description:'Сроки, статус, зависимости и напоминание задачи.',back:()=>setScreen('project')}),
+    e('section',{class:'card task-form'},
       e('form',{onSubmit:submitTask},
         e('label',null,'Название',e('input',{required:true,maxLength:200,value:taskTitle,onInput:(ev:Event)=>setTaskTitle((ev.target as HTMLInputElement).value)})),
         e('label',null,'Описание',e('textarea',{rows:5,maxLength:20000,value:taskDescription,onInput:(ev:Event)=>setTaskDescription((ev.target as HTMLTextAreaElement).value)})),
@@ -399,13 +401,12 @@ export function ProjectsScreen({user,onBack}:{user:User;onBack:()=>void}){
       }},'Удалить проект со всем содержимым'))
       :null;
     return e('main',{class:'projects-screen'},
-      e('div',{class:'card-heading'},
-        e('button',{disabled:busy,onClick:()=>{setScreen('projects');setSelectedProject('');}},'← Проекты'),
-        e('button',{disabled:busy,onClick:()=>void load()},'Обновить')),
+      e(PageHeader,{eyebrow:selectedProject?'Проект':'Системная группа',title:currentProjectName,
+        description:selectedProject?'Рабочее пространство проекта: задачи, заметки, файлы и сроки.':'Заметки и задачи без привязки к проекту.',
+        back:()=>{setScreen('projects');setSelectedProject('');},
+        actions:e('button',{class:'tertiary-button',disabled:busy,onClick:()=>void load()},e(UiIcon,{name:'sync',size:17}),'Обновить')}),
       e('section',{class:'card project-card-detail'},
-        e('div',{class:'card-heading'},
-          e('div',null,e('p',{class:'eyebrow'},selectedProject?'ПРОЕКТ':'СИСТЕМНАЯ ГРУППА'),e('h1',null,currentProjectName)),
-          selectedProject&&currentProject?.value.project?.favorite&&e('span',{class:'project-favorite'},'★ Избранное')),
+        selectedProject&&currentProject?.value.project?.favorite&&e('span',{class:'badge accent project-favorite'},'★ Избранное'),
         selectedProject&&e('div',{class:'project-progress'},
           e('div',{class:'project-progress-track'},e('span',{style:{width:p.percent+'%'}})),
           e('small',null,p.percent+'% · '+p.done+' / '+p.total+' задач')),
@@ -433,16 +434,17 @@ export function ProjectsScreen({user,onBack}:{user:User;onBack:()=>void}){
     .sort((a,b)=>Number(Boolean(b.value.project?.favorite))-Number(Boolean(a.value.project?.favorite))||byTitle(a,b));
   const unassignedTasks=projectTasks(''),unassignedNotes=projectNotes('');
   return e('main',{class:'projects-screen'},
-    e('div',{class:'card-heading'},e('button',{onClick:onBack},'← К заметкам'),e('h1',null,'Проекты'),e('button',{disabled:busy,onClick:()=>void run(async()=>{})},'Синхронизировать')),
-    e('section',{class:'card'},
-      e('label',null,'Хранилище',e('select',{value:selectedVault,onChange:(ev:Event)=>void chooseVault((ev.target as HTMLSelectElement).value)},
+    e(PageHeader,{eyebrow:'Workspace',title:'Проекты',description:'Организуйте задачи и заметки внутри выбранного E2EE-хранилища.',
+      actions:!readOnly?e('button',{class:'primary',onClick:()=>openProjectForm()},e(UiIcon,{name:'plus',size:17}),'Новый проект'):undefined}),
+    e('section',{class:'projects-toolbar card'},
+      e('label',{class:'vault-project-selector'},e('span',null,'Хранилище'),e('select',{value:selectedVault,onChange:(ev:Event)=>void chooseVault((ev.target as HTMLSelectElement).value)},
         openedVaults.map(v=>e('option',{key:v.header.id,value:v.header.id},names[v.header.id]||'Хранилище')))),
       vault?.shared&&e('p',{class:'hint'},'Совместное хранилище · роль: '+(vault.role==='owner'?'владелец':vault.role==='editor'?'редактор':'просмотр')+
         '. Названия, статусы, сроки, исполнители и project links остаются внутри E2EE ciphertext.'),
       e('div',{class:'organization-tools'},e('label',{class:'search-field'},'Поиск проектов',e('input',{type:'search',value:query,placeholder:'Название или описание',onInput:(ev:Event)=>setQuery((ev.target as HTMLInputElement).value)})),
         e('label',null,'Показывать',e('select',{value:projectFilter,onChange:(ev:Event)=>setProjectFilter((ev.target as HTMLSelectElement).value as ProjectFilter)},
           e('option',{value:'active'},'Активные'),e('option',{value:'all'},'Все'),e('option',{value:'favorite'},'Избранные'),e('option',{value:'archive'},'Архив')))),
-      e('div',{class:'section-heading'},e('h2',null,'Проекты внутри хранилища'),!readOnly&&e('button',{class:'primary',onClick:()=>openProjectForm()},'+ Проект')),
+      e('div',{class:'section-heading'},e('div',null,e('h2',null,'Проекты'),e('p',{class:'muted'},filtered.length+' '+(filtered.length===1?'проект':'проектов')))),
       e('button',{class:'project-list-card unassigned',onClick:()=>{setSelectedProject('');setTab('tasks');setScreen('project');}},
         e('strong',null,'Без проекта'),e('small',null,unassignedNotes.length+' заметок · '+unassignedTasks.length+' задач')),
       !filtered.length&&e('div',{class:'empty-state'},e('h2',null,normalized?'Ничего не найдено':projectFilter==='archive'?'Архив проектов пуст':'Проектов пока нет'),

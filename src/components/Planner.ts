@@ -14,6 +14,7 @@ import { localTime } from '../../shared/reminders.mjs';
 import type { ReminderPlan,ReminderRepeat,ReminderEnd } from '../../shared/reminders.mjs';
 import { reminderRequest, type ReminderSettings, type ReminderStatus, type ReminderTarget } from '../reminders';
 import { Attachments, RichTextEditor, sanitizeNoteHtml } from './RichTextEditor';
+import { PageHeader,StatusDot,UiIcon } from './ui.ts';
 import { noteSearchScore } from '../search';
 import { AuthError } from '../auth';
 import { createNoteZipBlob, noteZipFileName, type PortableAttachmentStream } from '../portable';
@@ -469,73 +470,110 @@ export function Planner({ user,section='notes',initialScreen='list',reminderTarg
       syncStatus==='syncing'?'Синхронизация…':syncStatus==='synced'?'Синхронизировано':syncStatus==='offline'?'Нет подключения · сохранено на устройстве':syncStatus==='error'?'Ошибка синхронизации · локальная копия сохранена':'Сохранено на устройстве · ожидает синхронизации'),
     error && e('p', { class: 'error', role: 'alert' }, error),
     status && e('p', { class: 'hint' }, status));
-  if(screen==='device')return e('section',{class:'card'},e('button',{onClick:()=>setScreen('list')},'Назад'),e('h2',null,'Название этого устройства'),
-    e('form',{onSubmit:(ev:Event)=>{ev.preventDefault();void run(async()=>{await renameDevice(user,name);setScreen('list');});}},
-      e('label',null,'Название',e('input',{value:name,maxLength:80,required:true,onInput:(ev:Event)=>setName((ev.target as HTMLInputElement).value)})),
-      e('p',{class:'hint'},'Название и время изменения будут видны в новых версиях заметок после расшифровки.'),feedback,
-      e('button',{class:'primary',disabled:busy},'Сохранить')));
+  if(screen==='device')return e('section',{class:'planner device-name-screen'},
+    e(PageHeader,{eyebrow:'Устройство',title:'Название этого устройства',description:'Имя помогает отличать источник изменений в истории и активных сессиях.',back:()=>setScreen('list')}),
+    e('form',{class:'settings-panel form-panel device-name-form',onSubmit:(ev:Event)=>{ev.preventDefault();void run(async()=>{await renameDevice(user,name);setScreen('list');});}},
+      e('label',{class:'field-stack'},e('span',null,'Название'),e('input',{value:name,maxLength:80,required:true,placeholder:'Например, iPhone',onInput:(ev:Event)=>setName((ev.target as HTMLInputElement).value)})),
+      e('p',{class:'field-hint'},'До 80 символов. Название и время изменения будут видны в новых версиях заметок после расшифровки.'),
+      feedback,
+      e('div',{class:'form-actions'},e('button',{type:'button',class:'tertiary-button',disabled:busy,onClick:()=>setScreen('list')},'Отмена'),e('button',{class:'primary',disabled:busy},busy?'Сохраняем…':'Сохранить'))));
   if(screen==='system-unlock'){
     const configured=Boolean(v?.systemUnlock);
-    return e('section',{class:'card'},
-      e('button',{disabled:busy,onClick:()=>{setPhrase('');setScreen('list');}},'Назад'),
-      e('h2',null,'Системная разблокировка'),
-      e('p',{class:'auth-notice'},'Фраза остаётся резервным способом. Tasks не получает Face ID, отпечаток пальца или системный код. Для криптографической разблокировки требуется WebAuthn PRF.'),
-      e('form',{onSubmit:(ev:Event)=>{ev.preventDefault();const secret=phrase;setPhrase('');void run(async()=>{
-        if(configured)await setSystemAutoLock(user,selected,autoLockMs);
-        else await enableSystemUnlock(user,selected,secret,autoLockMs);
-        setScreen('list');setStatus(configured?'Настройки автоблокировки сохранены.':'Системная разблокировка включена. Готовый ключ хранилища больше не сохраняется в IndexedDB.');});}},
-        !configured&&e('label',null,'Фраза хранилища',e('input',{type:'password',autoComplete:'off',value:phrase,required:true,onInput:(ev:Event)=>setPhrase((ev.target as HTMLInputElement).value)})),
-        e('label',null,'Автоблокировка после ухода из приложения',e('select',{value:String(autoLockMs),onChange:(ev:Event)=>setAutoLockMs(Number((ev.target as HTMLSelectElement).value) as AutoLockMs)},
-          AUTO_LOCK_VALUES.map(value=>e('option',{value:String(value),key:value},autoLockLabel(value))))),
-        e('p',{class:'hint'},'Пока PWA находится на экране, хранилище не блокируется по таймеру. «Никогда» отключает background-таймер. После закрытия, перезагрузки или перезапуска PWA защищённый root key отсутствует в runtime, поэтому потребуется системная проверка либо фраза.'),
-        feedback,e('button',{class:'primary',disabled:busy},busy?'Сохраняем…':configured?'Сохранить настройку':'Включить системную разблокировку')));
+    return e('section',{class:'planner system-unlock-screen'},
+      e(PageHeader,{eyebrow:'Безопасность vault',title:'Системная разблокировка',description:configured?'Настройте автоблокировку для текущего vault.':'Защитите root key системной WebAuthn PRF-проверкой.',back:()=>{setPhrase('');setScreen('list')}}),
+      e('div',{class:'system-unlock-layout'},
+        e('section',{class:'settings-panel'},
+          e('div',{class:'security-key-hero'},
+            e('span',{class:'security-key-icon'},e(UiIcon,{name:'key',size:24})),
+            e('div',null,e('h2',null,configured?'Системная разблокировка включена':'Включить системную разблокировку'),e('p',null,'Tasks не получает Face ID, отпечаток или системный PIN — браузер возвращает только криптографический результат WebAuthn PRF.')),
+            e('span',{class:'status-pill '+(configured?'success':'neutral')},e(StatusDot,{tone:configured?'success':'neutral'}),configured?'Включена':'Не настроена')),
+          e('form',{class:'vault-form',onSubmit:(ev:Event)=>{ev.preventDefault();const secret=phrase;setPhrase('');void run(async()=>{
+            if(configured)await setSystemAutoLock(user,selected,autoLockMs);
+            else await enableSystemUnlock(user,selected,secret,autoLockMs);
+            setScreen('list');setStatus(configured?'Настройки автоблокировки сохранены.':'Системная разблокировка включена. Готовый ключ хранилища больше не сохраняется в IndexedDB.');});}},
+            !configured&&e('label',{class:'field-stack'},e('span',null,'Фраза хранилища'),e('input',{type:'password',autoComplete:'off',value:phrase,required:true,onInput:(ev:Event)=>setPhrase((ev.target as HTMLInputElement).value)})),
+            e('label',{class:'field-stack'},e('span',null,'Автоблокировка после ухода из приложения'),e('select',{value:String(autoLockMs),onChange:(ev:Event)=>setAutoLockMs(Number((ev.target as HTMLSelectElement).value) as AutoLockMs)},
+              AUTO_LOCK_VALUES.map(value=>e('option',{value:String(value),key:value},autoLockLabel(value))))),
+            feedback,
+            e('div',{class:'form-actions'},e('button',{class:'primary',disabled:busy},busy?'Сохраняем…':configured?'Сохранить настройку':'Включить системную разблокировку')))),
+        e('aside',{class:'vault-security-explainer'},
+          e('span',{class:'vault-explainer-icon'},e(UiIcon,{name:'lock',size:24})),
+          e('h2',null,'Что меняется'),
+          e('ul',null,
+            e('li',null,'Фраза остаётся независимым резервным способом доступа.'),
+            e('li',null,'Готовый root key не хранится в IndexedDB.'),
+            e('li',null,'После закрытия или перезапуска потребуется системная проверка либо фраза.'),
+            e('li',null,'Пока PWA открыта на экране, background-таймер не блокирует vault.')),
+          e('p',{class:'settings-footnote'},'«Никогда» отключает только таймер после ухода приложения в фон.'))));
   }
   if(screen==='sharing'&&v){
     const owner=v.role==='owner'||!v.role,available=sharingContacts.filter(contact=>!members.some(member=>member.user.id===contact.id));
-    return e('section',{class:'card planner'},
-      e('button',{disabled:busy,onClick:()=>setScreen('list')},'Назад'),
-      e('h1',null,'Совместный доступ'),
-      e('p',{class:'hint'},names[v.header.id]||'Хранилище'),
-      !collaborationIsUnlocked(user.id)&&e('p',{class:'auth-notice'},'E2EE-ключ совместной работы сейчас заблокирован. Откройте его в разделе «Контакты и совместная работа».'),
-      !v.shared&&owner&&e('div',null,
-        e('p',null,'Личное хранилище можно сделать совместным без смены его root key. Существующие напоминания будут вынесены в личные E2EE-настройки аккаунта.'),
-        e('form',{onSubmit:(ev:Event)=>{ev.preventDefault();const secret=phrase;setPhrase('');void run(async()=>{
-          await enableVaultSharing(user,v.header.id,secret);setStatus('Совместный доступ включён. Root key не менялся.');void sync();
-          const current=(await readState(user.id))?.vaults.find(item=>item.header.id===v.header.id);if(current)await refreshSharing(current);
-        });}},
-          e('label',null,'Фраза хранилища',e('input',{type:'password',required:true,autoComplete:'off',value:phrase,onInput:(ev:Event)=>setPhrase((ev.target as HTMLInputElement).value)})),
-          e('button',{class:'primary',disabled:busy||!collaborationIsUnlocked(user.id)},'Включить совместный доступ'))),
-      v.shared&&e('div',null,
-        e('p',{class:v.membershipRevoked?'error':'auth-notice'},v.membershipRevoked
-          ?'Серверный доступ отозван. Ни сервер, ни другой участник не могут удалить уже скопированный ciphertext и старые ключи с этого устройства.'
-          :'Ваша роль: '+(v.role==='owner'?'Владелец':v.role==='editor'?'Редактор':'Просмотр')+'. Сервер не получает ключи содержимого.'),
-        owner&&e('form',{onSubmit:(ev:Event)=>{ev.preventDefault();const target=sharingContacts.find(contact=>contact.id===inviteUserId);if(!target)return;void run(async()=>{
-          await withTofu(()=>inviteToVault(user,v.header.id,target,inviteRole));setInviteUserId('');setStatus('Приглашение отправлено.');await refreshSharing(v);
-        });}},
-          e('h2',null,'Пригласить участника'),
-          available.length?e('div',{class:'actions compact'},
-            e('select',{value:inviteUserId,required:true,onChange:(ev:Event)=>setInviteUserId((ev.target as HTMLSelectElement).value)},
-              e('option',{value:''},'Выберите контакт'),available.map(contact=>e('option',{key:contact.id,value:contact.id,disabled:!contact.identity},contact.login+(contact.identity?'':' · нет E2EE-ключа')))),
-            e('select',{value:inviteRole,onChange:(ev:Event)=>setInviteRole((ev.target as HTMLSelectElement).value as 'editor'|'viewer')},
-              e('option',{value:'editor'},'Редактор'),e('option',{value:'viewer'},'Просмотр')),
-            e('button',{class:'primary',disabled:busy||!inviteUserId||!collaborationIsUnlocked(user.id)},'Пригласить'))
-            :e('p',{class:'muted'},'Нет доступных контактов для приглашения. Добавьте пользователя через раздел контактов.')),
-        e('h2',null,'Участники'),
-        members.map(member=>e('article',{class:'note-row',key:member.user.id},
-          e('strong',null,member.user.login+(member.user.id===user.id?' · вы':'')),
-          e('small',null,member.role==='owner'?'Владелец':member.role==='editor'?'Редактор':'Просмотр'),
-          member.identity?e('small',{class:'mono'},'Fingerprint '+member.identity.fingerprint.slice(0,10)+'…'+member.identity.fingerprint.slice(-8)):e('small',{class:'error'},'E2EE-ключ отсутствует — требуется повторная выдача после создания ключа'),
-          owner&&member.role!=='owner'&&e('div',{class:'actions compact'},
-            e('select',{value:member.role,disabled:busy,onChange:(ev:Event)=>void run(async()=>{await changeMemberRole(user,v.header.id,member.user.id,(ev.target as HTMLSelectElement).value as 'editor'|'viewer');await refreshSharing(v);})},
-              e('option',{value:'editor'},'Редактор'),e('option',{value:'viewer'},'Просмотр')),
-            e('button',{disabled:busy||!member.identity||!collaborationIsUnlocked(user.id),onClick:()=>void run(async()=>{await withTofu(()=>regrantMember(user,v.header.id,member));setStatus('Новый key envelope выдан участнику.');await refreshSharing(v);})},'Выдать ключ заново'),
-            e('button',{class:'danger-button',disabled:busy||!collaborationIsUnlocked(user.id),onClick:()=>{if(confirm('Удалить '+member.user.login+' из хранилища? Будет создан новый key epoch для всех будущих изменений. Уже скопированные старые данные отозвать невозможно.'))void run(async()=>{await withTofu(()=>removeVaultMember(user,v.header.id,member.user.id));setStatus('Участник удалён. Новый key epoch создан для оставшихся участников.');await refreshSharing(v);});}},'Удалить')))),
-        !owner&&!v.membershipRevoked&&e('button',{class:'danger-button',disabled:busy,onClick:()=>{if(confirm('Выйти из совместного хранилища? Серверный доступ будет удалён. Уже загруженная локальная копия останется только для чтения.'))void run(async()=>{await leaveSharedVault(user,v.header.id);setScreen('list');setStatus('Вы вышли из совместного хранилища.');});}},'Выйти из хранилища'),
-        e('button',{disabled:busy,onClick:()=>void run(async()=>refreshSharing(v))},'Обновить участников')),
+    const roleLabel=v.role==='owner'?'Владелец':v.role==='editor'?'Редактор':'Просмотр';
+    if(v.membershipRevoked)return e('section',{class:'planner shared-vault-screen revoked-vault-screen'},
+      e(PageHeader,{eyebrow:'Совместный vault',title:names[v.header.id]||'Хранилище',description:'Серверный доступ к этому хранилищу отозван.',back:()=>setScreen('list')}),
+      e('div',{class:'revoked-vault-card'},
+        e('span',{class:'revoked-vault-icon'},e(UiIcon,{name:'warning',size:26})),
+        e('div',null,e('h2',null,'Доступ отозван'),e('p',null,'На устройстве осталась только ранее загруженная локальная копия. Она доступна для чтения, но новые изменения не отправляются на сервер.'))),
+      e('div',{class:'info-panel'},e(UiIcon,{name:'info',size:18}),e('p',null,'Ни сервер, ни другой участник не могут удалить уже скопированный ciphertext и старые ключи с этого устройства. Несинхронизированные безопасные данные можно перенести через «Отложенные заметки».')),
+      e('div',{class:'button-row'},e('button',{class:'secondary-button',onClick:()=>setScreen('list')},'Открыть локальную копию'),e('button',{class:'tertiary-button',onClick:()=>setScreen('stash')},'Открыть отложенные заметки')),
       feedback);
+
+    return e('section',{class:'planner shared-vault-screen'},
+      e(PageHeader,{eyebrow:v.shared?'Совместный vault':'Совместный доступ',title:names[v.header.id]||'Хранилище',
+        description:v.shared?'Участники, роли и E2EE-доступ к хранилищу.':'Сделайте личный vault совместным без смены его root key.',
+        back:()=>setScreen('list'),
+        actions:v.shared?e('button',{class:'tertiary-button',disabled:busy,onClick:()=>void run(async()=>refreshSharing(v))},e(UiIcon,{name:'sync',size:17}),'Обновить'):undefined}),
+      !collaborationIsUnlocked(user.id)&&e('div',{class:'inline-alert warning'},e(UiIcon,{name:'warning',size:18}),e('div',null,e('strong',null,'E2EE-ключ совместной работы заблокирован'),e('p',null,'Откройте его в «Контакты и совместная работа», прежде чем приглашать участников или перевыдавать ключи.'))),
+
+      !v.shared&&owner&&e('div',{class:'shared-enable-layout'},
+        e('section',{class:'settings-panel'},
+          e('div',{class:'security-key-hero'},e('span',{class:'security-key-icon'},e(UiIcon,{name:'contacts',size:23})),e('div',null,e('h2',null,'Включить совместный доступ'),e('p',null,'Root key vault не меняется. Напоминания остаются в личных E2EE-настройках аккаунта.'))),
+          e('form',{class:'vault-form',onSubmit:(ev:Event)=>{ev.preventDefault();const secret=phrase;setPhrase('');void run(async()=>{
+            await enableVaultSharing(user,v.header.id,secret);setStatus('Совместный доступ включён. Root key не менялся.');void sync();
+            const current=(await readState(user.id))?.vaults.find(item=>item.header.id===v.header.id);if(current)await refreshSharing(current);
+          });}},
+            e('label',{class:'field-stack'},e('span',null,'Фраза хранилища'),e('input',{type:'password',required:true,autoComplete:'off',value:phrase,onInput:(ev:Event)=>setPhrase((ev.target as HTMLInputElement).value)})),
+            e('div',{class:'form-actions'},e('button',{class:'primary',disabled:busy||!collaborationIsUnlocked(user.id)},busy?'Включаем…':'Включить совместный доступ')))),
+        e('aside',{class:'vault-security-explainer'},e('span',{class:'vault-explainer-icon'},e(UiIcon,{name:'lock',size:24})),e('h2',null,'Что увидит сервер'),e('ul',null,e('li',null,'Идентификаторы участников и их роли.'),e('li',null,'Зашифрованные envelopes для доступа к ключу.'),e('li',null,'Ciphertext содержимого, но не открытый текст заметок.')))),
+
+      v.shared&&e('div',{class:'shared-members-layout'},
+        e('section',{class:'settings-panel shared-summary-panel'},
+          e('div',{class:'shared-summary'},
+            e('span',{class:'shared-summary-icon'},e(UiIcon,{name:'folder',size:23})),
+            e('div',null,e('strong',null,names[v.header.id]||'Хранилище'),e('small',null,'Совместное E2EE-хранилище')),
+            e('span',{class:'badge accent'},roleLabel)),
+          e('div',{class:'status-grid shared-stats'},e('div',null,e('span',null,'Участники'),e('strong',null,String(members.length))),e('div',null,e('span',null,'Ваша роль'),e('strong',null,roleLabel)),e('div',null,e('span',null,'E2EE-ключ'),e('strong',null,collaborationIsUnlocked(user.id)?'Открыт':'Заблокирован')))),
+
+        owner&&e('section',{class:'settings-panel invite-member-panel'},
+          e('div',{class:'settings-panel-heading'},e('div',null,e('h2',null,'Пригласить участника'),e('p',null,'Доступ можно выдать только подтверждённому контакту с E2EE-ключом.'))),
+          available.length?e('form',{class:'invite-member-form',onSubmit:(ev:Event)=>{ev.preventDefault();const target=sharingContacts.find(contact=>contact.id===inviteUserId);if(!target)return;void run(async()=>{
+            await withTofu(()=>inviteToVault(user,v.header.id,target,inviteRole));setInviteUserId('');setStatus('Приглашение отправлено.');await refreshSharing(v);
+          });}},
+            e('label',{class:'field-stack'},e('span',null,'Контакт'),e('select',{value:inviteUserId,required:true,onChange:(ev:Event)=>setInviteUserId((ev.target as HTMLSelectElement).value)},
+              e('option',{value:''},'Выберите контакт'),available.map(contact=>e('option',{key:contact.id,value:contact.id,disabled:!contact.identity},contact.login+(contact.identity?'':' · нет E2EE-ключа'))))),
+            e('label',{class:'field-stack'},e('span',null,'Роль'),e('select',{value:inviteRole,onChange:(ev:Event)=>setInviteRole((ev.target as HTMLSelectElement).value as 'editor'|'viewer')},e('option',{value:'editor'},'Редактор'),e('option',{value:'viewer'},'Просмотр'))),
+            e('button',{class:'primary',disabled:busy||!inviteUserId||!collaborationIsUnlocked(user.id)},e(UiIcon,{name:'plus',size:17}),'Пригласить'))
+            :e('div',{class:'empty-mini'},'Нет доступных контактов. Добавьте пользователя через раздел контактов.')),
+
+        e('section',{class:'settings-panel shared-members-panel'},
+          e('div',{class:'settings-panel-heading'},e('div',null,e('h2',null,'Участники'),e('p',null,'Роли влияют на доступ к редактированию, но не раскрывают серверу содержимое vault.'))),
+          e('div',{class:'member-list'},members.map(member=>e('article',{class:'member-row',key:member.user.id},
+            e('span',{class:'avatar'},member.user.login.slice(0,1).toUpperCase()),
+            e('div',{class:'member-copy'},e('div',{class:'member-title'},e('strong',null,member.user.login+(member.user.id===user.id?' · вы':'')),e('span',{class:'badge '+(member.role==='owner'?'accent':'')},member.role==='owner'?'Владелец':member.role==='editor'?'Редактор':'Просмотр')),
+              member.identity?e('small',{class:'mono'},member.identity.fingerprint.slice(0,10)+'…'+member.identity.fingerprint.slice(-8)):e('small',{class:'danger-text'},'E2EE-ключ отсутствует')),
+            owner&&member.role!=='owner'&&e('div',{class:'member-actions'},
+              e('select',{value:member.role,disabled:busy,'aria-label':'Роль '+member.user.login,onChange:(ev:Event)=>void run(async()=>{await changeMemberRole(user,v.header.id,member.user.id,(ev.target as HTMLSelectElement).value as 'editor'|'viewer');await refreshSharing(v);})},e('option',{value:'editor'},'Редактор'),e('option',{value:'viewer'},'Просмотр')),
+              e('button',{class:'tertiary-button',disabled:busy||!member.identity||!collaborationIsUnlocked(user.id),onClick:()=>void run(async()=>{await withTofu(()=>regrantMember(user,v.header.id,member));setStatus('Новый key envelope выдан участнику.');await refreshSharing(v);})},'Перевыдать ключ'),
+              e('button',{class:'text-danger-button',disabled:busy||!collaborationIsUnlocked(user.id),onClick:()=>{if(confirm('Удалить '+member.user.login+' из хранилища? Будет создан новый key epoch для всех будущих изменений. Уже скопированные старые данные отозвать невозможно.'))void run(async()=>{await withTofu(()=>removeVaultMember(user,v.header.id,member.user.id));setStatus('Участник удалён. Новый key epoch создан для оставшихся участников.');await refreshSharing(v);});}},'Удалить')))))),
+
+        !owner&&e('section',{class:'settings-panel shared-leave-panel'},
+          e('div',{class:'settings-panel-heading'},e('div',null,e('h2',null,'Покинуть хранилище'),e('p',null,'Серверный доступ будет удалён. Уже загруженная локальная копия останется только для чтения.'))),
+          e('button',{class:'danger-button',disabled:busy,onClick:()=>{if(confirm('Выйти из совместного хранилища?'))void run(async()=>{await leaveSharedVault(user,v.header.id);setScreen('list');setStatus('Вы вышли из совместного хранилища.');});}},'Выйти из хранилища')),
+        feedback));
   }
-  if(screen==='outbox-review')return e('section',{class:'card planner'},e('button',{disabled:busy,onClick:()=>setScreen('list')},'Назад'),
-    e('h1',null,'Проверка локальных изменений'),e('p',{class:'auth-notice'},'Предыдущая серверная сессия была завершена. Ничего из локальной очереди не будет отправлено, пока вы не решите судьбу каждой заметки.'),
+  if(screen==='outbox-review')return e('section',{class:'planner outbox-review-screen'},
+    e(PageHeader,{eyebrow:'Безопасная синхронизация',title:'Проверка локальных изменений',description:'Предыдущая серверная сессия была завершена. Ничего из локальной очереди не отправится без вашего решения.',back:()=>setScreen('list')}),
+    e('div',{class:'inline-alert warning'},e(UiIcon,{name:'warning',size:18}),e('span',null,'Сравните локальную и серверную версии перед продолжением синхронизации.')),
     reviewItems.length?e('div',{class:'conflict-grid'},reviewItems.map(item=>{const blocked=item.serverState==='locked'||item.serverState==='conflict';
       const serverLabel=item.serverState==='present'?'Текущая версия на сервере':item.serverState==='missing'?'На сервере заметки нет':item.serverState==='deleted'?'Хранилище удалено на сервере':item.serverState==='conflict'?'На сервере несколько версий':'Хранилище нужно открыть для сравнения';
       return e('article',{class:'note-row',key:item.key},e('h2',null,item.local?.title||item.server?.title||'Без заголовка'),e('p',{class:'muted'},names[item.vaultId]||'Хранилище'),
@@ -545,8 +583,9 @@ export function Planner({ user,section='notes',initialScreen='list',reminderTarg
         item.serverState==='deleted'&&e('p',{class:'hint'},'Если принять локальную версию, обычная логика восстановления сохранит её локально, а не перезапишет удалённое хранилище.'),
         e('div',{class:'actions'},e('button',{class:'primary',disabled:busy||blocked,onClick:()=>void run(async()=>{const done=await decideOutboxReview(user,item.key,true);if(done){setScreen('list');setStatus('Все локальные изменения проверены. Синхронизация продолжена.');queueMicrotask(()=>void sync());}})},item.kind==='purge'?'Подтвердить удаление':'Применить изменение'),
           e('button',{disabled:busy||blocked,onClick:()=>void run(async()=>{const done=await decideOutboxReview(user,item.key,false);if(done){setScreen('list');setStatus('Все локальные изменения проверены. Синхронизация продолжена.');queueMicrotask(()=>void sync());}})},'Отклонить локальное изменение')));})):e('p',null,'Изменений для проверки нет.'),feedback);
-  if(screen==='close-all')return e('section',{class:'card'},e('button',{disabled:busy,onClick:()=>{setPassword('');setScreen('list');}},'Назад'),
-    e('h2',null,'Закрыть хранилище на всех устройствах'),e('p',null,'Будет закрыто только выбранное хранилище, включая это устройство. Сервер сразу остановит синхронизацию. Устройства без сети удалят сохранённый ключ при подключении. Заметки и очередь не удаляются.'),
+  if(screen==='close-all')return e('section',{class:'planner security-action-screen'},
+    e(PageHeader,{eyebrow:'Безопасность vault',title:'Закрыть на всех устройствах',description:'Отозвать сохранённый доступ к выбранному хранилищу на всех сессиях.',back:()=>{setPassword('');setScreen('list')}}),
+    e('div',{class:'inline-alert warning'},e(UiIcon,{name:'warning',size:18}),e('span',null,'Сервер сразу остановит синхронизацию этого vault. Офлайн-устройства удалят сохранённый ключ после подключения. Заметки и очередь не удаляются.')),
     e('form',{onSubmit:(ev:Event)=>{ev.preventDefault();const secret=password;setPassword('');void run(async()=>{
       if(!confirmed)throw Error('Подтвердите закрытие');await closeAllVault(user,selected,secret);setScreen('list');setStatus('Хранилище закрыто на всех устройствах.');});}},
       e('label',null,'Пароль аккаунта',e('input',{type:'password',autoComplete:'current-password',value:password,required:true,onInput:(ev:Event)=>setPassword((ev.target as HTMLInputElement).value)})),
@@ -556,8 +595,8 @@ export function Planner({ user,section='notes',initialScreen='list',reminderTarg
   if(screen==='conflict'&&comparison&&v?.key){
     const alternatives=v.records.filter(r=>comparison.versions.includes(r.id));
     const finish=(keep:boolean)=>void run(async()=>{await resolveConflict(user,selected,comparison.objectId,comparison.versions,comparison.chosen,keep);setScreen('list');void sync();});
-    return e('section',{class:'card'},e('button',{onClick:()=>setScreen('list')},'Назад'),e('h2',null,'Версии заметки'),
-      e('p',null,'Заметку изменили независимо. Выберите актуальную версию или сохраните все как отдельные заметки. Исходные версии останутся в истории.'),
+    return e('section',{class:'planner conflict-screen'},
+      e(PageHeader,{eyebrow:'Конфликт версий',title:'Выберите актуальную версию',description:'Заметку изменили независимо. Исходные версии останутся в истории.',back:()=>setScreen('list')}),
       e('div',{class:'conflict-grid'},alternatives.map(r=>e('article',{class:'note-row',key:r.id},
         e('label',{class:'check-row'},e('input',{type:'radio',name:'chosen-version',checked:comparison.chosen===r.id,onChange:()=>setComparison({...comparison,chosen:r.id})}),
           e('strong',null,notes[r.id]?.author?.name??'Источник неизвестен')),
@@ -569,9 +608,9 @@ export function Planner({ user,section='notes',initialScreen='list',reminderTarg
   if(screen==='reminder'&&draft){
     const quick=(hours:number)=>{const local=localTime(Date.now()+hours*3600000,zone);setReminderDate(local.slice(0,10));setReminderClock(local.slice(11));};
     const tomorrow=()=>{setReminderDate(localDateAfter(1));setReminderClock('09:00');};
-    return e('section',{class:'card reminder-form'},e('button',{disabled:busy,onClick:()=>setScreen('list')},'Назад'),e('h1',null,'Напоминание'),
-      e('p',{class:'hint'},'Одно расписание на заметку. Часовой пояс: '+zone+'. При открытии приложения онлайн будущие сроки сохраняют местные дату и время в новом поясе.'),
-      e('div',{class:'actions compact'},e('button',{type:'button',onClick:()=>quick(1)},'Через час'),e('button',{type:'button',onClick:tomorrow},'Завтра, 09:00')),
+    return e('section',{class:'reminder-form'},
+      e(PageHeader,{eyebrow:'Напоминание',title:draft.title||'Новое напоминание',description:'Одно расписание на заметку · часовой пояс '+zone,back:()=>setScreen('list')}),
+      e('div',{class:'quick-filters reminder-quick-actions'},e('button',{type:'button',onClick:()=>quick(1)},'Через час'),e('button',{type:'button',onClick:tomorrow},'Завтра, 09:00')),
       e('form',{onSubmit:(event:Event)=>{event.preventDefault();void run(async()=>{
         const local=reminderDate+'T'+(reminderAllDay?reminderSettings.all_day_time:reminderClock);
         if(!/^\d{4}-\d\d-\d\dT\d\d:\d\d$/.test(local))throw Error('Укажите дату и время');
@@ -620,8 +659,8 @@ export function Planner({ user,section='notes',initialScreen='list',reminderTarg
       entry.note.html?e('div',{class:'rich-note-content',dangerouslySetInnerHTML:{__html:sanitizeNoteHtml(entry.note.html)}}):e('p',{class:'note-preview'},entry.note.text||'Нет текста'),
       Boolean(entry.note.checklist?.length)&&e('p',{class:'hint'},'Чек-лист: '+entry.note.checklist!.filter(item=>item.done).length+' / '+entry.note.checklist!.length),
       Boolean(entry.note.attachments?.length)&&e('p',{class:'hint'},'Вложения: '+entry.note.attachments!.length));
-    return e('section',{class:'card planner history-screen'},e('button',{onClick:()=>{setHistory(null);setScreen(history.back);}},'Назад'),e('h1',null,'История версий'),
-      e('p',{class:'hint'},'Все версии расшифровываются только на этом устройстве. Восстановление создаёт новую версию и сохраняет текущую в истории.'),
+    return e('section',{class:'planner history-screen'},
+      e(PageHeader,{eyebrow:'История',title:'История версий',description:'Все версии расшифровываются только на этом устройстве. Восстановление создаёт новую версию, не удаляя текущую.',back:()=>{setHistory(null);setScreen(history.back)}}),
       e('div',{class:'version-layout'},e('div',{class:'version-list'},history.entries.map(entry=>e('button',{key:entry.revision.id,class:history.selected===entry.revision.id?'version-row selected':'version-row',onClick:()=>setHistory({...history,selected:entry.revision.id})},
         e('strong',null,entry.revision.id===currentId?'Текущая версия':entry.note.author?new Date(entry.note.author.time).toLocaleString('ru-RU'):'Время неизвестно'),
         e('small',null,(entry.note.author?.name??'Источник неизвестен')+(entry.note.lifecycle?.state==='archived'?' · Архив':entry.note.lifecycle?.state==='trashed'?' · Корзина':''))))),
@@ -630,9 +669,9 @@ export function Planner({ user,section='notes',initialScreen='list',reminderTarg
       feedback);
   }
   if(viewing&&!draft){const current=state?.vaults.find(item=>item.header.id===viewing.vault),versions=current?heads(current).filter(item=>item.objectId===viewing.object):[],competing=versions.length>1,
-    revision=versions.find(item=>item.id===viewing.revision),lifecycle=current&&revision?statusOf(current,revision,viewing):'active',readOnly=Boolean(current?.membershipRevoked||current?.role==='viewer'||entityKind(viewing)!=='note');return e('section',{class:'card note-view'},
-    e('div',{class:'actions note-view-actions'},e('button',{onClick:()=>{showViewing(null);setMenuOpen(false);}},'Назад'),
-      e('div',{class:'actions compact'},e('button',{disabled:competing,onClick:()=>setMenuOpen(!menuOpen),'aria-expanded':menuOpen&&!competing},'Действия'),lifecycle==='active'&&!competing&&!readOnly&&e('button',{class:'primary',onClick:()=>showDraft({...viewing,dirty:false})},'Редактировать'))),
+    revision=versions.find(item=>item.id===viewing.revision),lifecycle=current&&revision?statusOf(current,revision,viewing):'active',readOnly=Boolean(current?.membershipRevoked||current?.role==='viewer'||entityKind(viewing)!=='note');return e('section',{class:'note-view'},
+    e('div',{class:'note-view-topbar'},e('button',{class:'ui-back',onClick:()=>{showViewing(null);setMenuOpen(false);}},e(UiIcon,{name:'back',size:18}),'Заметки'),
+      e('div',{class:'note-view-actions'},e('button',{class:'tertiary-button',disabled:competing,onClick:()=>setMenuOpen(!menuOpen),'aria-expanded':menuOpen&&!competing},e(UiIcon,{name:'more',size:18}),'Действия'),lifecycle==='active'&&!competing&&!readOnly&&e('button',{class:'primary',onClick:()=>showDraft({...viewing,dirty:false})},'Редактировать'))),
     competing&&e('div',{class:'error',role:'status'},'Заметка изменена на нескольких устройствах. Выберите версию, прежде чем редактировать.',
       e('button',{onClick:()=>{setComparison({objectId:viewing.object,versions:versions.map(item=>item.id),chosen:versions[0].id});showViewing(null);setMenuOpen(false);setScreen('conflict');}},'Сравнить версии')),
     menuOpen&&!competing&&e('div',{class:'note-action-menu',role:'menu'},
@@ -658,29 +697,37 @@ export function Planner({ user,section='notes',initialScreen='list',reminderTarg
       loadPreview:item=>attachmentPreviewBlob(user,viewing.vault,item),onDownload:item=>void run(()=>downloadAttachment(item,viewing.vault)),
       onRename:readOnly?undefined:item=>void run(()=>renameViewingAttachment(item)),onSetCover:readOnly?undefined:item=>void run(()=>updateViewing({cover:{attachmentId:item.id}})),
       onMove:readOnly?undefined:(item,target)=>void run(()=>moveViewingAttachment(item,target)),onRemove:readOnly?undefined:item=>void run(()=>removeViewingAttachment(item))}),
-    e('section',{class:'reminder-card comments-card'},
-      e('div',{class:'section-heading'},e('h2',null,'Комментарии'),e('button',{disabled:busy||Boolean(current?.membershipRevoked),onClick:()=>void toggleComments()},commentsOpen?'Скрыть':comments.length?'Показать ('+comments.length+')':'Показать')),
-      commentsOpen&&e('div',null,
-        !comments.length&&e('p',{class:'muted'},'Комментариев пока нет.'),
-        comments.map(comment=>e('article',{class:'note-row',key:comment.id},
-          e('strong',null,comment.author.login+(comment.author.id===user.id?' · вы':'')),
-          e('small',null,new Date(comment.createdAt).toLocaleString('ru-RU')+(comment.updatedAt!==comment.createdAt?' · изменён':'')),
-          e('p',{class:'note-preview'},comment.text),
-          comment.author.id===user.id&&e('button',{disabled:busy,onClick:()=>{const next=prompt('Изменить комментарий',comment.text);if(next!==null&&next.trim()&&next!==comment.text)void run(async()=>{await updateComment(user,viewing.vault,viewing.object,comment.id,next);await refreshComments();});}},'Изменить'),
-          (comment.author.id===user.id||current?.role==='owner')&&e('button',{class:'menu-danger',disabled:busy,onClick:()=>{if(confirm('Удалить комментарий?'))void run(async()=>{await deleteComment(user,viewing.vault,comment.id);await refreshComments();});}},'Удалить'))),
-        !current?.membershipRevoked&&e('form',{onSubmit:(ev:Event)=>{ev.preventDefault();const text=commentText;setCommentText('');void run(async()=>{await createComment(user,viewing.vault,viewing.object,text);await refreshComments();setStatus('Комментарий отправлен.');});}},
-          e('label',null,'Новый комментарий',e('textarea',{rows:3,maxLength:4000,required:true,value:commentText,onInput:(ev:Event)=>setCommentText((ev.target as HTMLTextAreaElement).value)})),
-          e('button',{class:'primary',disabled:busy||!commentText.trim()},'Отправить')))),
+    e('section',{class:'comments-card'},
+      e('div',{class:'section-heading'},e('div',null,e('h2',null,'Комментарии'),e('p',{class:'muted'},'E2EE-обсуждение внутри shared-контента')),
+        e('button',{class:'tertiary-button',disabled:busy||Boolean(current?.membershipRevoked),onClick:()=>void toggleComments()},commentsOpen?'Скрыть':comments.length?'Показать · '+comments.length:'Показать')),
+      commentsOpen&&e('div',{class:'comment-thread'},
+        !comments.length&&e('div',{class:'empty-mini'},'Комментариев пока нет.'),
+        comments.map(comment=>e('article',{class:'comment-item',key:comment.id},
+          e('span',{class:'avatar comment-avatar'},comment.author.login.slice(0,1).toUpperCase()),
+          e('div',{class:'comment-body'},
+            e('div',{class:'comment-header'},e('strong',null,comment.author.login+(comment.author.id===user.id?' · вы':'')),e('small',null,new Date(comment.createdAt).toLocaleString('ru-RU')+(comment.updatedAt!==comment.createdAt?' · изменён':''))),
+            e('p',null,comment.text),
+            e('div',{class:'comment-actions'},
+              comment.author.id===user.id&&e('button',{class:'tertiary-button',disabled:busy,onClick:()=>{const next=prompt('Изменить комментарий',comment.text);if(next!==null&&next.trim()&&next!==comment.text)void run(async()=>{await updateComment(user,viewing.vault,viewing.object,comment.id,next);await refreshComments();});}},'Изменить'),
+              (comment.author.id===user.id||current?.role==='owner')&&e('button',{class:'text-danger-button',disabled:busy,onClick:()=>{if(confirm('Удалить комментарий?'))void run(async()=>{await deleteComment(user,viewing.vault,comment.id);await refreshComments();});}},'Удалить'))))),
+        !current?.membershipRevoked&&e('form',{class:'comment-composer',onSubmit:(ev:Event)=>{ev.preventDefault();const text=commentText;setCommentText('');void run(async()=>{await createComment(user,viewing.vault,viewing.object,text);await refreshComments();setStatus('Комментарий отправлен.');});}},
+          e('label',{class:'field-stack'},e('span',null,'Новый комментарий'),e('textarea',{rows:3,maxLength:4000,required:true,value:commentText,placeholder:'Напишите комментарий…',onInput:(ev:Event)=>setCommentText((ev.target as HTMLTextAreaElement).value)})),
+          e('div',{class:'form-actions'},e('button',{class:'primary',disabled:busy||!commentText.trim()},'Отправить'))))),
     viewing.reminder&&e('section',{class:'reminder-card'},e('h2',null,'Напоминание'),
       e('p',null,new Date(viewing.reminder.local+'Z').toLocaleString('ru-RU',{timeZone:'UTC'}),' · ',
         viewing.reminder.state==='active'?'Активно':viewing.reminder.state==='done'?'Выполнено':'Выключено'),
       e('p',{class:'hint'},viewing.reminder.mode==='custom'?'Для push разрешён отдельный собственный текст.':viewing.reminder.mode==='title'?'Текст push автоматически повторяет заголовок заметки.':'Push не содержит названия хранилища и текста заметки.')),feedback);}
-  if (draft) return e('section', { class: 'card note-editor' },
-    e('div', { class: 'actions' }, e('button', { disabled: busy, onClick: () => void run(finishEditing) }, 'Назад'),
-      e('button', { class: 'primary', disabled: busy, onClick: () => void run(finishEditing) }, 'Готово')),
-    e('label', null, 'Заголовок', e('input', { value: draft.title, maxLength: 500, onInput: (ev: Event) => change('title', (ev.target as HTMLInputElement).value) })),
-    e('label',{class:'editor-label'},'Текст заметки'),
-    fileUpload&&e('div',{class:'file-upload-progress','aria-live':'polite'},e('strong',null,'Загрузка: '+fileUpload.name),e('progress',{max:100,value:fileUpload.percent}),e('span',null,fileUpload.percent+'%'),e('button',{type:'button',onClick:()=>uploadAbort.current?.abort()},'Отменить')),
+  if (draft) return e('section', { class: 'note-editor' },
+    e('div',{class:'note-editor-header'},
+      e('button',{class:'ui-back',disabled:busy,onClick:()=>void run(finishEditing)},e(UiIcon,{name:'back',size:18}),'Назад'),
+      e('span',{class:'note-editor-state'},draft.dirty?'Сохраняется локально…':'Сохранено'),
+      e('button',{class:'primary',disabled:busy,onClick:()=>void run(finishEditing)},'Готово')),
+    e('label',{class:'note-title-field'},e('span',{class:'sr-only'},'Заголовок'),e('input',{value:draft.title,maxLength:500,placeholder:'Название заметки',onInput:(ev:Event)=>change('title',(ev.target as HTMLInputElement).value)})),
+    e('label',{class:'editor-label sr-only'},'Текст заметки'),
+    fileUpload&&e('div',{class:'file-upload-progress','aria-live':'polite','aria-busy':'true'},
+      e('span',{class:'upload-icon'},e(UiIcon,{name:'upload',size:20})),
+      e('div',{class:'upload-copy'},e('strong',null,fileUpload.name),e('span',null,'Зашифрованная загрузка · '+fileUpload.percent+'%'),e('progress',{max:100,value:fileUpload.percent})),
+      e('button',{type:'button',class:'tertiary-button',onClick:()=>uploadAbort.current?.abort()},'Отменить')),
     e(RichTextEditor,{key:draft.object,html:draft.html,text:draft.text,attachments:draft.attachments??[],coverId:draft.cover?.attachmentId,
       onChange:(html:string,text:string)=>changeContent({html,text}),onAttachmentsChange:(attachments:NonNullable<Note['attachments']>)=>changeContent({attachments}),
       onFilesSelected:uploadFiles,onRemoveAttachment:item=>void run(()=>removeAttachmentFromDraft(item)),onDownloadAttachment:item=>void run(()=>downloadAttachment(item,draft.vault)),
@@ -698,25 +745,36 @@ export function Planner({ user,section='notes',initialScreen='list',reminderTarg
           draft.reminder.state==='active'&&e('button',{disabled:busy,onClick:()=>void run(async()=>{changeReminder({...draft.reminder!,id:crypto.randomUUID(),state:'done'});await flush();void sync();})},'Выполнено')))
       :e('button',{onClick:openReminderForm},'Напомнить')),
     feedback, error && e('button', { onClick: () => void run(flush) }, 'Повторить сохранение'));
-  if (screen === 'create' || screen === 'open' || screen === 'transfer') return e('section', { class: 'card' },
-    e('button', { disabled: busy, onClick: () => { if(screen==='open'){postponeUnlock();return;}setScreen('list');setPhrase('');setRepeat(''); } }, screen==='open'?'Отложить':'Назад'),
-    e('h2', null, screen === 'open' ? 'Открыть хранилище' : screen === 'transfer' ? 'Перенести с новой фразой' : 'Новое хранилище'),
-    screen==='open'&&v?.systemUnlock&&e('div',{class:'auth-notice'},
-      e('p',null,'Для этого хранилища настроена системная разблокировка на данном устройстве. При выборе хранилища Tasks сразу запрашивает системную проверку.'),
-      e('button',{class:'primary',type:'button',disabled:busy,onClick:()=>void activateVault(selected)},busy?'Ожидаем системную проверку…':'Повторить системную разблокировку'),
-      e('p',{class:'hint'},'Можно вместо этого ввести фразу хранилища ниже или отложить открытие.')),
-    screen!=='open'&&e('p',{class:'hint'},'Название видно на всех ваших устройствах до разблокировки и хранится на сервере отдельно от зашифрованных заметок.'),
-    e('p', { class: 'hint' }, screen==='open'&&v?.systemUnlock?'Фраза остаётся независимым резервным способом и не отправляется на сервер.':'Фраза не отправляется на сервер. Доступ сохранится на этом устройстве до «Закрыть хранилище». Без фразы и сохранённого доступа восстановить заметки невозможно.'),
-    e('form', { onSubmit: submit }, screen !== 'open' && e('label', null, 'Название', e('input', { required: true, maxLength: 200, value: name, onInput: (ev: Event) => setName((ev.target as HTMLInputElement).value) })),
-      e('label', null, 'Фраза хранилища', e('input', { type: 'password', autoComplete: screen === 'open' ? 'current-password' : 'new-password', autoFocus:screen==='open', required: true, value: phrase,
-        onInput: (ev: Event) => setPhrase((ev.target as HTMLInputElement).value) })),
-      screen !== 'open' && e('label', null, 'Повторите фразу (минимум 6 любых символов)', e('input', { type: 'password', autoComplete: 'new-password', required: true, value: repeat,
-        onInput: (ev: Event) => setRepeat((ev.target as HTMLInputElement).value) })),
-      screen === 'transfer' && e('label', { class: 'check-row' }, e('input', { type: 'checkbox', checked: confirmed, required: true, onChange: (ev: Event) => setConfirmed((ev.target as HTMLInputElement).checked) }),
-        'Согласен удалить старое хранилище на сервере после переноса. Наработки других устройств могут не попасть в новое хранилище.'),
-      feedback, e('button', { class: 'primary', disabled: busy, type: 'submit' }, busy ? 'Подождите…' : screen === 'open' ? 'Открыть' : screen === 'transfer' ? 'Перенести и удалить старое' : 'Создать')));
-  if (screen === 'stash') return e('section', { class: 'card' }, e('button', { onClick: () => setScreen('list') }, 'Назад'),
-    e('h2', null, 'Отложенные заметки'), e('p', null, 'Эти заметки не попали в конечное хранилище: источник был удалён. Они сохранены только на этом устройстве.'),
+  if (screen === 'create' || screen === 'open' || screen === 'transfer') {
+    const title=screen==='open'?'Открыть хранилище':screen==='transfer'?'Перенос с новой фразой':'Новое хранилище';
+    const description=screen==='open'?'Разблокируйте E2EE-содержимое на этом устройстве.':screen==='transfer'?'Создайте новый vault и перенесите доступные локальные данные без риска молчаливой потери.':'Создайте отдельное E2EE-пространство для заметок, задач и файлов.';
+    const leave=()=>{if(screen==='open'){postponeUnlock();return;}setScreen('list');setPhrase('');setRepeat('');};
+    return e('section',{class:'vault-flow-screen'},
+      e(PageHeader,{eyebrow:'E2EE-хранилище',title,description,back:leave}),
+      e('div',{class:'vault-flow-layout'},
+        e('section',{class:'settings-panel vault-flow-card'},
+          screen==='open'&&v?.systemUnlock&&e('div',{class:'system-unlock-card'},
+            e('span',{class:'security-key-icon'},e(UiIcon,{name:'key',size:23})),
+            e('div',null,e('strong',null,'Системная разблокировка настроена'),e('p',null,'Можно подтвердить доступ системным WebAuthn-аутентификатором или использовать фразу ниже.')),
+            e('button',{class:'secondary-button',type:'button',disabled:busy,onClick:()=>void activateVault(selected)},busy?'Ожидаем проверку…':'Разблокировать системно')),
+          screen!=='open'&&e('div',{class:'inline-alert info'},e(UiIcon,{name:'info',size:18}),e('span',null,'Название vault видно до разблокировки и синхронизируется отдельно. Содержимое, теги, задачи и файлы остаются E2EE.')),
+          e('form',{class:'vault-form',onSubmit:submit},
+            screen!=='open'&&e('label',{class:'field-stack'},e('span',null,'Название'),e('input',{required:true,maxLength:200,value:name,placeholder:'Например, Личное',onInput:(ev:Event)=>setName((ev.target as HTMLInputElement).value)})),
+            e('label',{class:'field-stack'},e('span',null,'Фраза хранилища'),e('input',{type:'password',autoComplete:screen==='open'?'current-password':'new-password',autoFocus:screen==='open',required:true,value:phrase,onInput:(ev:Event)=>setPhrase((ev.target as HTMLInputElement).value)})),
+            screen!=='open'&&e('label',{class:'field-stack'},e('span',null,'Повторите фразу'),e('input',{type:'password',autoComplete:'new-password',required:true,value:repeat,onInput:(ev:Event)=>setRepeat((ev.target as HTMLInputElement).value)})),
+            screen!=='open'&&e('p',{class:'field-hint'},'Минимум 6 любых символов. Фраза не отправляется на сервер.'),
+            screen==='transfer'&&e('label',{class:'checkbox-row danger-confirm'},e('input',{type:'checkbox',checked:confirmed,required:true,onChange:(ev:Event)=>setConfirmed((ev.target as HTMLInputElement).checked)}),e('span',null,'После подтверждённого переноса старое серверное хранилище можно удалить. Изменения с других офлайн-устройств могут отсутствовать в новой копии.')),
+            feedback,
+            e('div',{class:'form-actions'},screen==='open'&&e('button',{type:'button',class:'tertiary-button',disabled:busy,onClick:postponeUnlock},'Отложить'),e('button',{class:'primary',disabled:busy,type:'submit'},busy?'Подождите…':screen==='open'?'Открыть по фразе':screen==='transfer'?'Перенести безопасно':'Создать хранилище')))),
+        e('aside',{class:'vault-security-explainer'},
+          e('span',{class:'vault-explainer-icon'},e(UiIcon,{name:'lock',size:24})),
+          e('h2',null,'Фраза остаётся только у вас'),
+          e('p',null,'Tasks не отправляет её на сервер. Доступ может сохраняться на доверенном устройстве или защищаться системной WebAuthn PRF-разблокировкой.'),
+          e('ul',null,e('li',null,'Сервер видит технические идентификаторы и ciphertext, но не содержимое.'),e('li',null,'Без фразы или настроенного доверенного доступа восстановить root key невозможно.'),e('li',null,'Закрытие vault не удаляет заметки — только убирает локальный доступ к ключу.')))));
+  }
+  if (screen === 'stash') return e('section',{class:'planner stash-screen'},
+    e(PageHeader,{eyebrow:'Локальное восстановление',title:'Отложенные заметки',description:'Зашифрованные локальные изменения, которые не удалось безопасно вернуть в исходное хранилище.',back:()=>setScreen('list')}),
+    e('div',{class:'inline-alert info'},e(UiIcon,{name:'info',size:18}),e('span',null,'Эти данные сохранены только на этом устройстве. Перенесите их в доступный vault или оставьте до следующего раза.')),
     e('label', null, 'Перенести в открытое хранилище', e('select', { value: target, onChange: (ev: Event) => setTarget((ev.target as HTMLSelectElement).value) },
       e('option', { value: '' }, 'Выберите хранилище'), opened.map(v => e('option', { value: v.header.id }, names[v.header.id])))),
     !opened.length && e('p', { class: 'hint' }, 'Вернитесь назад и создайте или откройте хранилище. Заметки останутся здесь.'),
@@ -771,22 +829,24 @@ export function Planner({ user,section='notes',initialScreen='list',reminderTarg
         e('button',{disabled:busy,onClick:pauseSchedule},'Приостановить расписание')),
       selectedLocal?e('button',{class:'danger-button',disabled:busy,onClick:()=>{if(confirm('Удалить расписание и всю историю его срабатываний?'))removeSchedule();}},'Удалить напоминание')
         :state?.vaults.some(item=>item.header.id===selectedItem.vault_id&&!item.deleted&&!item.key)&&e('button',{onClick:()=>form('open',selectedItem.vault_id)},'Открыть хранилище'),feedback);
-    return e('section',{class:'card planner today-screen'},section!=='today'&&e('button',{onClick:()=>setScreen('list')},'Назад'),
-      e('div',{class:'card-heading'},e('div',null,e('p',{class:'eyebrow'},new Date().toLocaleDateString('ru-RU',{weekday:'long',day:'numeric',month:'long'}).toUpperCase()),e('h1',null,'Сегодня')),
-        e('button',{class:'today-add',onClick:()=>setTodayMenuOpen(!todayMenuOpen),'aria-expanded':todayMenuOpen},'+ Добавить')),
+    return e('section',{class:'planner today-screen'},
+      e(PageHeader,{eyebrow:new Date().toLocaleDateString('ru-RU',{weekday:'long',day:'numeric',month:'long'}),title:'Сегодня',
+        description:'Напоминания и ближайшие срабатывания.',
+        back:section!=='today'?()=>setScreen('list'):undefined,
+        actions:e('button',{class:'primary today-add',onClick:()=>setTodayMenuOpen(!todayMenuOpen),'aria-expanded':todayMenuOpen},e(UiIcon,{name:'plus',size:17}),'Добавить')}),
       e('div',{class:'today-counters'},groups.slice(0,4).map(([key,label,test])=>e('div',{key},e('strong',null,visible.filter(test).length),e('span',null,label)))),
       todayMenuOpen&&e('div',{class:'note-action-menu today-add-menu'},e('button',{onClick:addNew},'Новая заметка с напоминанием'),e('button',{onClick:()=>setTodayPickOpen(!todayPickOpen)},'Выбрать существующую заметку')),
       todayPickOpen&&e('div',{class:'today-note-picker'},localNotes.map(item=>e('button',{class:'note-row',key:item.revision.id,onClick:()=>{setTodayMenuOpen(false);setTodayPickOpen(false);editReminderFor(item.current,item.revision);}},e('strong',null,item.note!.title||'Без заголовка'),e('small',null,names[item.current.header.id])))),
       v?.key&&activeTags(v.header.id).length>0&&e('div',{class:'tag-filter today-tag-filter'},activeTags(v.header.id).map(tag=>e('button',{key:tag.id,class:selectedTags.includes(tag.id)?'tag-chip selected':'tag-chip',style:{'--tag-color':tag.color},'aria-pressed':selectedTags.includes(tag.id),onClick:()=>setSelectedTags(current=>current.includes(tag.id)?current.filter(id=>id!==tag.id):[...current,tag.id])},tag.name))),
       e('label',{class:'check-row history-toggle'},e('input',{type:'checkbox',checked:showReminderHistory,onChange:(ev:Event)=>setShowReminderHistory((ev.target as HTMLInputElement).checked)}),'Показать выполненные и пропущенные срабатывания'),
       !visible.length&&e('div',{class:'empty-state'},e('h2',null,'Напоминаний пока нет'),e('p',null,'Добавьте новую заметку с напоминанием или выберите существующую.')),
-      groups.map(([key,label,test])=>{const items=visible.filter(test);return items.length&&e('section',{class:'today-group',key},e('h2',null,label),items.map(item=>{const local=findLocal(item),schedule=JSON.parse(item.schedule);return e('button',{class:'note-row occurrence-row'+(schedule.important?' important':''),key:item.occurrence_id,onClick:()=>setSelectedOccurrence(item.occurrence_id)},
-          e('strong',null,local?.note?.title||'Напоминание из закрытого хранилища'),e('span',null,schedule.allDay?'Весь день · '+item.scheduled_local.slice(11):formatLocal(item.snooze_local??item.scheduled_local)),
-          e('small',null,(names[item.vault_id]||'Закрытое хранилище')+' · '+repeatLabel(item)+(item.snooze_local?' · Отложено':'')));}))}),feedback);
+      groups.map(([key,label,test])=>{const items=visible.filter(test);return items.length&&e('section',{class:'today-group',key},e('h2',null,label),items.map(item=>{const local=findLocal(item),schedule=JSON.parse(item.schedule);return e('button',{class:'occurrence-row'+(schedule.important?' important':''),key:item.occurrence_id,onClick:()=>setSelectedOccurrence(item.occurrence_id)},
+          e('span',{class:'occurrence-time'},schedule.allDay?'Весь день':formatLocal(item.snooze_local??item.scheduled_local)),
+          e('span',{class:'occurrence-copy'},e('strong',null,local?.note?.title||'Напоминание из закрытого хранилища'),e('small',null,(names[item.vault_id]||'Закрытое хранилище')+' · '+repeatLabel(item)+(item.snooze_local?' · Отложено':''))),
+          e('span',{class:'occurrence-chevron'},e(UiIcon,{name:'chevron-right',size:17})));}))}),feedback);
   }
-  if(screen==='tags'&&v?.key){const catalog=activeTags(v.header.id);return e('section',{class:'card planner tag-manager'},
-    e('button',{onClick:()=>{setScreen('list');setEditingTag('');setTagName('');}},'Назад'),e('h1',null,'Теги хранилища'),
-    e('p',{class:'hint'},'Названия и цвета тегов зашифрованы вместе с хранилищем. Удалённый тег исчезнет из заметок, но сами заметки сохранятся.'),
+  if(screen==='tags'&&v?.key){const catalog=activeTags(v.header.id);return e('section',{class:'planner tag-manager'},
+    e(PageHeader,{eyebrow:'Организация',title:'Теги хранилища',description:'Названия и цвета тегов зашифрованы вместе с vault. Удаление тега не удаляет заметки.',back:()=>{setScreen('list');setEditingTag('');setTagName('')}}),
     e('form',{class:'tag-form',onSubmit:(event:Event)=>{event.preventDefault();void run(async()=>{if(editingTag)await renameTag(user,selected,editingTag,tagName,tagColor);else await createTag(user,selected,tagName,tagColor);setTagName('');setEditingTag('');void sync();});}},
       e('label',null,editingTag?'Название тега':'Новый тег',e('input',{required:true,maxLength:60,value:tagName,onInput:(ev:Event)=>setTagName((ev.target as HTMLInputElement).value)})),
       e('label',null,'Цвет',e('input',{type:'color',value:tagColor,onInput:(ev:Event)=>setTagColor((ev.target as HTMLInputElement).value)})),
@@ -804,27 +864,33 @@ export function Planner({ user,section='notes',initialScreen='list',reminderTarg
       .sort((a,b)=>normalized?(searchSort==='relevance'?b.score-a.score:searchSort==='oldest'?(a.note.author?.time??0)-(b.note.author?.time??0):(b.note.author?.time??0)-(a.note.author?.time??0))
         :sort==='title'?a.note.title.localeCompare(b.note.title,'ru'):sort==='oldest'?(a.note.author?.time??0)-(b.note.author?.time??0):(b.note.author?.time??0)-(a.note.author?.time??0));
     const all=heads(v).map(revision=>({revision,note:notes[revision.id]})).filter((item):item is {revision:Revision;note:Note}=>Boolean(item.note)&&entityKind(item.note!)==='note'&&statusOf(v,item.revision,item.note)===wanted&&!v.purgePending?.includes(item.revision.objectId));
-    return e('section',{class:'card planner lifecycle-screen'},
-      e('div',{class:'card-heading'},e('button',{onClick:()=>{setQuery('');setSelectedTags([]);setScreen('list');}},'Назад'),e('h1',null,screen==='archive'?'Архив':'Корзина'),
-        screen==='trash'&&Boolean(all.length)&&e('button',{class:'danger-button',disabled:busy,onClick:()=>{if(confirm('Окончательно удалить все заметки из корзины и всю их историю?'))void run(async()=>{for(const item of all)await permanentlyDeleteNote(user,v.header.id,item.revision.objectId);setStatus('Очистка корзины поставлена в очередь синхронизации.');void sync();});}},'Очистить корзину')),
-      e('div',{class:screen==='archive'?'lifecycle-info':'lifecycle-info trash'},screen==='archive'?'Архивные заметки не удалены. Их можно восстановить в любое время; напоминания приостановлены.':'Заметки автоматически удаляются через 30 дней. До этого их можно восстановить.'),
-      e('div',{class:'organization-tools'},e('label',{class:'search-field'},'Поиск',e('input',{type:'search',value:query,placeholder:'Найти заметку',onInput:(event:Event)=>setQuery((event.target as HTMLInputElement).value)})),
-        normalized?e('label',null,'Сортировка результатов',e('select',{value:searchSort,onChange:(event:Event)=>setSearchSort((event.target as HTMLSelectElement).value as typeof searchSort)},e('option',{value:'relevance'},'По релевантности'),e('option',{value:'newest'},'Сначала новые'),e('option',{value:'oldest'},'Сначала старые')))
-          :e('label',null,'Сортировка',e('select',{value:sort,onChange:(event:Event)=>setSort((event.target as HTMLSelectElement).value as typeof sort)},e('option',{value:'newest'},'Сначала новые'),e('option',{value:'oldest'},'Сначала старые'),e('option',{value:'title'},'По заголовку')))),
+    return e('section',{class:'planner lifecycle-screen'},
+      e(PageHeader,{eyebrow:'Заметки',title:screen==='archive'?'Архив':'Корзина',
+        description:screen==='archive'?'Архивированные заметки остаются в vault и могут быть восстановлены.':'Удалённые заметки хранятся 30 дней до окончательного удаления.',
+        back:()=>{setQuery('');setSelectedTags([]);setScreen('list')},
+        actions:screen==='trash'&&Boolean(all.length)?e('button',{class:'danger-button',disabled:busy,onClick:()=>{if(confirm('Окончательно удалить все заметки из корзины и всю их историю?'))void run(async()=>{for(const item of all)await permanentlyDeleteNote(user,v.header.id,item.revision.objectId);setStatus('Очистка корзины поставлена в очередь синхронизации.');void sync();});}},e(UiIcon,{name:'trash',size:17}),'Очистить корзину'):undefined}),
+      e('div',{class:screen==='archive'?'inline-alert info lifecycle-info':'inline-alert warning lifecycle-info trash'},
+        e(UiIcon,{name:screen==='archive'?'archive':'warning',size:18}),
+        e('span',null,screen==='archive'?'Архивные заметки не удалены. Напоминания для них приостановлены.':'До даты окончательного удаления заметку можно восстановить вместе с её историей.')),
+      e('div',{class:'notes-commandbar lifecycle-commandbar'},
+        e('label',{class:'search-field'},e('span',null,'Поиск'),e('span',{class:'search-input-wrap'},e(UiIcon,{name:'search',size:18}),e('input',{type:'search',value:query,placeholder:'Найти заметку',onInput:(event:Event)=>setQuery((event.target as HTMLInputElement).value)}))),
+        normalized?e('label',{class:'sort-control'},e('span',null,'Сортировка'),e('select',{value:searchSort,onChange:(event:Event)=>setSearchSort((event.target as HTMLSelectElement).value as typeof searchSort)},e('option',{value:'relevance'},'По релевантности'),e('option',{value:'newest'},'Сначала новые'),e('option',{value:'oldest'},'Сначала старые')))
+          :e('label',{class:'sort-control'},e('span',null,'Сортировка'),e('select',{value:sort,onChange:(event:Event)=>setSort((event.target as HTMLSelectElement).value as typeof sort)},e('option',{value:'newest'},'Сначала новые'),e('option',{value:'oldest'},'Сначала старые'),e('option',{value:'title'},'По заголовку')))),
       activeTags(v.header.id).length>0&&e('div',{class:'tag-filter'},e('button',{class:selectedTags.length?'filter-chip':'filter-chip selected',onClick:()=>setSelectedTags([])},'Все'),activeTags(v.header.id).map(tag=>e('button',{key:tag.id,class:selectedTags.includes(tag.id)?'tag-chip selected':'tag-chip',style:{'--tag-color':tag.color},'aria-pressed':selectedTags.includes(tag.id),onClick:()=>setSelectedTags(current=>current.includes(tag.id)?current.filter(id=>id!==tag.id):[...current,tag.id])},tag.name))),
       conflictObjects.map(objectId=>e('button',{class:'conflict-notice',disabled:busy,key:'conflict-'+objectId,onClick:()=>{const versions=heads(v).filter(revision=>revision.objectId===objectId).map(revision=>revision.id);setComparison({objectId,versions,chosen:versions[0]});setScreen('conflict');}},'Разрешить конфликт версий: '+(notes[heads(v).find(revision=>revision.objectId===objectId)!.id]?.title||'Без заголовка'))),
       !items.length&&e('div',{class:'empty-state'},e('h2',null,normalized?'Ничего не найдено':screen==='archive'?'Архив пуст':'Корзина пуста'),e('p',null,normalized?'Измените поисковый запрос.':screen==='archive'?'Архивированные заметки появятся здесь.':'Удалённые заметки будут храниться здесь 30 дней.')),
       items.map(item=>{
         const expiry=v.objectStates?.[item.revision.objectId]?.purgeAfter;
-        return e('article',{class:'lifecycle-row',key:item.revision.id},
-          e('button',{class:'note-row',onClick:()=>openRevision(v,item.revision)},e('strong',null,item.note.title||'Без заголовка'),
+        return e('article',{class:'lifecycle-item',key:item.revision.id},
+          e('button',{class:'lifecycle-item-main',onClick:()=>openRevision(v,item.revision)},
+            e('div',{class:'lifecycle-title-row'},e('strong',null,item.note.title||'Без заголовка'),screen==='trash'&&expiry&&e('span',{class:'badge'},'до '+new Date(expiry).toLocaleDateString('ru-RU'))),
             e('span',{class:'note-preview'},item.note.text.slice(0,140)),
             tagChips(v.header.id,item.note.tagIds).length>0&&e('span',{class:'tag-list'},tagChips(v.header.id,item.note.tagIds).map(tag=>e('span',{class:'tag-chip',style:{'--tag-color':tag.color},key:tag.id},tag.name))),
-            e('small',null,screen==='trash'?(expiry?'Удаление '+new Date(expiry).toLocaleDateString('ru-RU'):'Ожидает синхронизации срока удаления'):new Date(item.note.lifecycle?.changedAt??item.note.author?.time??0).toLocaleString('ru-RU'))),
-          e('div',{class:'actions compact'},
-            screen==='archive'?e('button',{disabled:busy,onClick:()=>void run(()=>restoreArchive(v,item.revision,item.note))},'Восстановить'):e('button',{disabled:busy,onClick:()=>void run(()=>restoreTrash(v,item.revision.objectId))},'Восстановить'),
-            e('button',{disabled:busy,onClick:()=>void run(()=>openHistory(v,item.revision.objectId,screen))},'История'),
-            screen==='trash'&&e('button',{class:'danger-button',disabled:busy,onClick:()=>{if(confirm('Удалить заметку и всю историю навсегда?'))void run(()=>purgeCurrent(v,item.revision.objectId));}},'Удалить навсегда'))
+            e('small',null,screen==='trash'?(expiry?'Будет удалено '+new Date(expiry).toLocaleDateString('ru-RU'):'Ожидает синхронизации срока удаления'):'В архиве с '+new Date(item.note.lifecycle?.changedAt??item.note.author?.time??0).toLocaleString('ru-RU'))),
+          e('div',{class:'lifecycle-item-actions'},
+            screen==='archive'?e('button',{class:'secondary-button',disabled:busy,onClick:()=>void run(()=>restoreArchive(v,item.revision,item.note))},'Восстановить'):e('button',{class:'secondary-button',disabled:busy,onClick:()=>void run(()=>restoreTrash(v,item.revision.objectId))},'Восстановить'),
+            e('button',{class:'tertiary-button',disabled:busy,onClick:()=>void run(()=>openHistory(v,item.revision.objectId,screen))},'История'),
+            screen==='trash'&&e('button',{class:'text-danger-button',disabled:busy,onClick:()=>{if(confirm('Удалить заметку и всю историю навсегда?'))void run(()=>purgeCurrent(v,item.revision.objectId));}},'Удалить навсегда'))
         );
       }),feedback);
   }
@@ -837,24 +903,25 @@ export function Planner({ user,section='notes',initialScreen='list',reminderTarg
     return (!selectedTags.length||current.header.id===selected)&&selectedTags.every(tagId=>(note!.tagIds??[]).includes(tagId));
   }).sort((a,b)=>normalizedQuery?(searchSort==='relevance'?b.score-a.score||(b.note!.author?.time??0)-(a.note!.author?.time??0):searchSort==='oldest'?(a.note!.author?.time??0)-(b.note!.author?.time??0):(b.note!.author?.time??0)-(a.note!.author?.time??0))
     :Number(Boolean(b.note!.pinned))-Number(Boolean(a.note!.pinned))||(sort==='title'?a.note!.title.localeCompare(b.note!.title,'ru'):sort==='oldest'?(a.note!.author?.time??0)-(b.note!.author?.time??0):(b.note!.author?.time??0)-(a.note!.author?.time??0)));
-  return e('section', { class: 'card planner planner-list-screen' },
-    e('div', { class: 'card-heading' }, e('h1', null, 'Заметки'), e('button', { disabled: busy, onClick: () => void run(sync) }, 'Синхронизировать')),
-    e('label', null, 'Хранилище', e('select', { value: selected, onChange: (ev: Event) => void activateVault((ev.target as HTMLSelectElement).value) },
-      e('option', { value: '' }, 'Выберите хранилище'), active.map(v => e('option', { value: v.header.id, key: v.header.id }, names[v.header.id] || 'Хранилище')))),
-    state?.sessionReviewRequired&&e('div',{class:'auth-notice',role:'status'},e('strong',null,'Синхронизация локальных изменений приостановлена.'),
-      e('p',null,reviewItems.length?`Нужно проверить изменений: ${reviewItems.length}.`:'Проверяем актуальное состояние сервера…'),
-      reviewItems.length>0&&e('button',{class:'primary',onClick:()=>setScreen('outbox-review')},'Проверить изменения')),
-    e('div',{class:'organization-tools'},e('label',{class:'search-field'},'Поиск во всех открытых хранилищах',e('input',{type:'search',value:query,placeholder:'Слова, часть слова или фраза',onInput:(ev:Event)=>setQuery((ev.target as HTMLInputElement).value)})),
-      normalizedQuery?e('label',null,'Сортировка результатов',e('select',{value:searchSort,onChange:(ev:Event)=>setSearchSort((ev.target as HTMLSelectElement).value as typeof searchSort)},e('option',{value:'relevance'},'По релевантности'),e('option',{value:'newest'},'Сначала новые'),e('option',{value:'oldest'},'Сначала старые')))
-        :e('label',null,'Сортировка',e('select',{value:sort,onChange:(ev:Event)=>setSort((ev.target as HTMLSelectElement).value as typeof sort)},e('option',{value:'newest'},'Сначала новые'),e('option',{value:'oldest'},'Сначала старые'),e('option',{value:'title'},'По заголовку')))),
+  return e('section', { class: 'planner planner-list-screen notes-workspace' },
+    e(PageHeader,{eyebrow:'Workspace',title:'Заметки',description:v?.key?(names[v.header.id]||'Открытое E2EE-хранилище'):'Выберите или откройте E2EE-хранилище.',
+      actions:e('button',{class:'tertiary-button',disabled:busy,onClick:()=>void run(sync)},e(UiIcon,{name:'sync',size:17}),busy?'Синхронизация…':'Синхронизировать')}),
+    e('div',{class:'notes-commandbar'},
+      e('label',{class:'vault-switcher'},e('span',null,'Хранилище'),e('select',{value:selected,onChange:(ev:Event)=>void activateVault((ev.target as HTMLSelectElement).value)},
+        e('option',{value:''},'Выберите хранилище'),active.map(v=>e('option',{value:v.header.id,key:v.header.id},names[v.header.id]||'Хранилище')))),
+      e('label',{class:'search-field'},e('span',null,'Поиск'),e('span',{class:'search-input-wrap'},e(UiIcon,{name:'search',size:18}),e('input',{type:'search',value:query,placeholder:'По всем открытым хранилищам',onInput:(ev:Event)=>setQuery((ev.target as HTMLInputElement).value)}))),
+      normalizedQuery?e('label',{class:'sort-control'},e('span',null,'Сортировка'),e('select',{value:searchSort,onChange:(ev:Event)=>setSearchSort((ev.target as HTMLSelectElement).value as typeof searchSort)},e('option',{value:'relevance'},'По релевантности'),e('option',{value:'newest'},'Сначала новые'),e('option',{value:'oldest'},'Сначала старые')))
+        :e('label',{class:'sort-control'},e('span',null,'Сортировка'),e('select',{value:sort,onChange:(ev:Event)=>setSort((ev.target as HTMLSelectElement).value as typeof sort)},e('option',{value:'newest'},'Сначала новые'),e('option',{value:'oldest'},'Сначала старые'),e('option',{value:'title'},'По заголовку')))),
+    state?.sessionReviewRequired&&e('div',{class:'inline-alert warning session-review-banner',role:'status'},e(UiIcon,{name:'warning',size:18}),e('div',null,e('strong',null,'Синхронизация приостановлена'),e('p',null,reviewItems.length?`Проверьте локальные изменения: ${reviewItems.length}.`:'Проверяем актуальное состояние сервера…')),reviewItems.length>0&&e('button',{class:'primary',onClick:()=>setScreen('outbox-review')},'Проверить')),
     v?.key&&e('div',{class:'filters'},e('div',{class:'quick-filters'},([['all','Все'],['pinned','Закреплённые'],['untagged','Без тегов'],['reminder','С напоминанием']] as const).map(([value,label])=>e('button',{class:quickFilter===value?'filter-chip selected':'filter-chip','aria-pressed':quickFilter===value,onClick:()=>setQuickFilter(value)},label))),
       e('div',{class:'tag-filter'},activeTags(v.header.id).map(tag=>e('button',{key:tag.id,class:selectedTags.includes(tag.id)?'tag-chip selected':'tag-chip',style:{'--tag-color':tag.color},'aria-pressed':selectedTags.includes(tag.id),onClick:()=>setSelectedTags(current=>current.includes(tag.id)?current.filter(id=>id!==tag.id):[...current,tag.id])},tag.name)),
-        e('button',{onClick:()=>setScreen('tags')},'Управлять тегами'))),
-    e('div', { class: 'actions planner-tools' }, e('button', { disabled: busy, onClick: () => form('create') }, '+ Хранилище'),
-      e('button',{disabled:!v?.key,onClick:()=>{setQuery('');setSelectedTags([]);setScreen('archive');}},'Архив'+(v?.key?' ('+heads(v).filter(r=>notes[r.id]&&statusOf(v,r,notes[r.id])==='archived').length+')':'')),
-      e('button',{disabled:!v?.key,onClick:()=>{setQuery('');setSelectedTags([]);setScreen('trash');}},'Корзина'+(v?.key?' ('+heads(v).filter(r=>notes[r.id]&&statusOf(v,r,notes[r.id])==='trashed'&&!v.purgePending?.includes(r.objectId)).length+')':'')),
-      e('button', { onClick: () => setScreen('stash') }, 'Отложенные заметки (' + (state?.stash.length ?? 0) + ')'),
-      e('button',{onClick:()=>{setName(state?.deviceName??'Устройство');setScreen('device');}},'Это устройство: '+(state?.deviceName??'Устройство'))),
+        e('button',{class:'tertiary-button',onClick:()=>setScreen('tags')},'Теги'))),
+    e('details',{class:'notes-secondary-tools'},e('summary',null,e(UiIcon,{name:'more',size:18}),'Хранилище и дополнительные действия'),
+      e('div',{class:'planner-tools'},e('button',{disabled:busy,onClick:()=>form('create')},e(UiIcon,{name:'plus',size:17}),'Новое хранилище'),
+        e('button',{disabled:!v?.key,onClick:()=>{setQuery('');setSelectedTags([]);setScreen('archive');}},e(UiIcon,{name:'archive',size:17}),'Архив'+(v?.key?' · '+heads(v).filter(r=>notes[r.id]&&statusOf(v,r,notes[r.id])==='archived').length:'')),
+        e('button',{disabled:!v?.key,onClick:()=>{setQuery('');setSelectedTags([]);setScreen('trash');}},e(UiIcon,{name:'trash',size:17}),'Корзина'+(v?.key?' · '+heads(v).filter(r=>notes[r.id]&&statusOf(v,r,notes[r.id])==='trashed'&&!v.purgePending?.includes(r.objectId)).length:'')),
+        e('button',{onClick:()=>setScreen('stash')},'Отложенные · '+(state?.stash.length??0)),
+        e('button',{onClick:()=>{setName(state?.deviceName??'Устройство');setScreen('device');}},e(UiIcon,{name:'devices',size:17}),state?.deviceName??'Устройство'))),
     v&&!v.deleted&&e('div',{class:'vault-security'},
       e('h2',null,'Разблокировка'),
       v.systemUnlock

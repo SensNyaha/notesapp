@@ -1,6 +1,7 @@
 import { h as e } from 'preact';
 import { useEffect, useRef, useState } from 'preact/hooks';
 import type { NoteAttachment } from '../planner';
+import { UiIcon } from './ui.ts';
 
 const allowedTags = new Set(['A','B','BLOCKQUOTE','BR','CODE','DIV','EM','FONT','H1','H2','H3','I','LI','OL','P','PRE','S','SPAN','STRONG','TABLE','TBODY','TD','TH','THEAD','TR','U','UL']);
 const allowedStyles = new Set(['color','background-color','font-family','font-size','text-align']);
@@ -58,17 +59,24 @@ export function Attachments({items,onRemove,onDownload,onRename,onSetCover,onMov
   onSetCover?:(item:NoteAttachment)=>void;onMove?:(item:NoteAttachment,objectId:string)=>void;coverId?:string;
   loadPreview?:(item:NoteAttachment)=>Promise<Blob|null>;moveTargets?:{id:string;title:string}[]}){
   if(!items.length)return null;
-  return e('section',{class:'note-attachments','aria-label':'Вложения'},e('h2',null,'Вложения'),
-    items.map(item=>e('article',{class:'attachment-card',key:item.id},
-      e(AsyncPreview,{item,load:loadPreview}),
-      e('div',null,e('strong',null,item.name),e('small',null,formatBytes(item.size)+(coverId===item.id?' · обложка':''))),
-      e('div',{class:'attachment-actions'},
-        item.data&&!onDownload?e('a',{href:attachmentUrl(item),download:item.name},'Скачать'):onDownload&&e('button',{type:'button',onClick:()=>onDownload(item)},'Скачать'),
-        onRename&&e('button',{type:'button',onClick:()=>onRename(item)},'Переименовать'),
-        onSetCover&&item.type.startsWith('image/')&&e('button',{type:'button',onClick:()=>onSetCover(item)},coverId===item.id?'Обложка ✓':'На обложку'),
-        onMove&&moveTargets.length>0&&e('select',{value:'','aria-label':'Переместить вложение '+item.name,onChange:(ev:Event)=>{const value=(ev.target as HTMLSelectElement).value;if(value)onMove(item,value);}},
-          e('option',{value:''},'Переместить…'),moveTargets.map(target=>e('option',{value:target.id,key:target.id},target.title||'Без заголовка'))),
-        onRemove&&e('button',{type:'button',class:'icon-danger',onClick:()=>onRemove(item),'aria-label':'Удалить вложение '+item.name},'Удалить')))));
+  return e('section',{class:'note-attachments','aria-label':'Вложения'},
+    e('div',{class:'section-heading'},e('div',null,e('h2',null,'Файлы'),e('p',{class:'muted'},items.length+' '+(items.length===1?'файл':'файлов')))),
+    e('div',{class:'attachment-list'},items.map(item=>{
+      const image=item.type.startsWith('image/'),cover=coverId===item.id;
+      return e('article',{class:'attachment-card'+(cover?' is-cover':''),key:item.id},
+        e('div',{class:'attachment-preview'},image?e(AsyncPreview,{item,load:loadPreview}):e(UiIcon,{name:'file',size:24})),
+        e('div',{class:'attachment-copy'},
+          e('div',{class:'attachment-title-row'},e('strong',null,item.name),cover&&e('span',{class:'badge accent'},'Обложка')),
+          e('small',null,formatBytes(item.size)+' · '+(item.type||'Файл'))),
+        e('div',{class:'attachment-actions'},
+          item.data&&!onDownload?e('a',{class:'attachment-action',href:attachmentUrl(item),download:item.name,'aria-label':'Скачать '+item.name},e(UiIcon,{name:'download',size:17}),'Скачать')
+            :onDownload&&e('button',{type:'button',class:'tertiary-button',onClick:()=>onDownload(item)},e(UiIcon,{name:'download',size:17}),'Скачать'),
+          onRename&&e('button',{type:'button',class:'tertiary-button',onClick:()=>onRename(item)},e(UiIcon,{name:'edit',size:17}),'Переименовать'),
+          onSetCover&&image&&e('button',{type:'button',class:cover?'secondary-button':'tertiary-button',onClick:()=>onSetCover(item)},e(UiIcon,{name:'image',size:17}),cover?'Обложка':'На обложку'),
+          onMove&&moveTargets.length>0&&e('select',{class:'attachment-move',value:'','aria-label':'Переместить вложение '+item.name,onChange:(ev:Event)=>{const value=(ev.target as HTMLSelectElement).value;if(value)onMove(item,value);}},
+            e('option',{value:''},'Переместить…'),moveTargets.map(target=>e('option',{value:target.id,key:target.id},target.title||'Без заголовка'))),
+          onRemove&&e('button',{type:'button',class:'text-danger-button',onClick:()=>onRemove(item),'aria-label':'Удалить вложение '+item.name},e(UiIcon,{name:'trash',size:17}),'Удалить')));
+    })));
 }
 function formatBytes(value:number){if(value<1024)return value+' Б';if(value<1024*1024)return (value/1024).toFixed(value<10*1024?1:0)+' КБ';if(value<1024*1024*1024)return (value/1024/1024).toFixed(value<10*1024*1024?1:0)+' МБ';return (value/1024/1024/1024).toFixed(1)+' ГБ';}
 

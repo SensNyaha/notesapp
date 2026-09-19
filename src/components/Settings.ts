@@ -2,66 +2,105 @@ import { h as e } from 'preact';
 import { useMemo,useState } from 'preact/hooks';
 import type { User } from '../types/auth.ts';
 import { readThemePreference,setThemePreference,type ThemePreference } from '../preferences.ts';
+import { Chevron,PageHeader,UiIcon,type UiIconName } from './ui.ts';
 
 export type SettingsPage='account'|'appearance'|'notifications'|'devices'|'passkeys'|'collaboration'|'data'|'diagnostics'|'password'|'users'|'archive'|'trash'|'about';
-const items:{id:SettingsPage;title:string;description:string;admin?:boolean;keywords:string}[]=[
-  {id:'account',title:'Аккаунт и безопасность',description:'Профиль, пароль и способы входа',keywords:'аккаунт профиль пароль безопасность вход'},
-  {id:'appearance',title:'Оформление',description:'Системная, светлая или тёмная тема',keywords:'оформление тема светлая темная системная'},
-  {id:'notifications',title:'Уведомления и часовой пояс',description:'Push, повторы, приватность текста и время «Весь день»',keywords:'уведомления push напоминания часовой пояс приватность'},
-  {id:'devices',title:'Устройства и сессии',description:'Активные входы и отзыв отдельных сессий',keywords:'устройства сессии выход'},
-  {id:'passkeys',title:'Ключи доступа',description:'Passkey, Face ID, Touch ID и Windows Hello',keywords:'passkey ключ face id windows hello'},
-  {id:'archive',title:'Архив',description:'Архивированные заметки текущего хранилища',keywords:'архив заметки'},
-  {id:'trash',title:'Корзина',description:'Восстановление и окончательное удаление',keywords:'корзина удалить восстановить'},
-  {id:'collaboration',title:'Контакты и совместная работа',description:'Контакты, shared vault и доступ участников',keywords:'контакты друзья shared совместная работа'},
-  {id:'data',title:'Данные и резервные копии',description:'Импорт, экспорт и зашифрованный backup',keywords:'данные импорт экспорт backup резервные копии'},
-  {id:'diagnostics',title:'Диагностика',description:'Сервер, PWA, Web Crypto и локальное хранилище',keywords:'диагностика сервер pwa crypto'},
-  {id:'users',title:'Пользователи',description:'Администрирование аккаунтов и временных паролей',keywords:'пользователи админ временный пароль',admin:true},
-  {id:'about',title:'О приложении',description:'Версия, платформа и текущий часовой пояс',keywords:'версия приложение timezone часовой пояс'},
+
+interface SettingsItem{
+  id:SettingsPage;title:string;description:string;admin?:boolean;keywords:string;icon:UiIconName;group:'Основное'|'Данные и доступ'|'Система';
+}
+const items:SettingsItem[]=[
+  {id:'account',title:'Аккаунт и безопасность',description:'Пароль, способы входа и активные сессии',keywords:'аккаунт профиль пароль безопасность вход',icon:'user',group:'Основное'},
+  {id:'appearance',title:'Оформление',description:'Системная, светлая или тёмная тема',keywords:'оформление тема светлая темная системная',icon:'palette',group:'Основное'},
+  {id:'notifications',title:'Уведомления и часовой пояс',description:'Push, повторы, приватность текста и «Весь день»',keywords:'уведомления push напоминания часовой пояс приватность',icon:'bell',group:'Основное'},
+  {id:'devices',title:'Устройства и сессии',description:'Активные входы, имена устройств и отзыв сессий',keywords:'устройства сессии выход',icon:'devices',group:'Основное'},
+  {id:'passkeys',title:'Ключи доступа',description:'Passkey и системные WebAuthn-аутентификаторы',keywords:'passkey ключ face id windows hello',icon:'key',group:'Основное'},
+  {id:'archive',title:'Архив',description:'Архивированные заметки текущего хранилища',keywords:'архив заметки',icon:'archive',group:'Данные и доступ'},
+  {id:'trash',title:'Корзина',description:'Восстановление и окончательное удаление',keywords:'корзина удалить восстановить',icon:'trash',group:'Данные и доступ'},
+  {id:'collaboration',title:'Контакты и совместная работа',description:'Контакты, shared vault и E2EE-ключ совместной работы',keywords:'контакты друзья shared совместная работа',icon:'contacts',group:'Данные и доступ'},
+  {id:'data',title:'Данные и резервные копии',description:'Импорт, экспорт и зашифрованный backup',keywords:'данные импорт экспорт backup резервные копии',icon:'database',group:'Данные и доступ'},
+  {id:'diagnostics',title:'Диагностика',description:'Сервер, PWA, Web Crypto и локальное хранилище',keywords:'диагностика сервер pwa crypto',icon:'diagnostics',group:'Система'},
+  {id:'users',title:'Пользователи',description:'Аккаунты и временные пароли',keywords:'пользователи админ временный пароль',icon:'users',group:'Система',admin:true},
+  {id:'about',title:'О приложении',description:'Версия, режим запуска и часовой пояс',keywords:'версия приложение timezone часовой пояс',icon:'info',group:'Система'},
 ];
+
+function SettingsRow({item,onOpen}:{item:SettingsItem;onOpen:(page:SettingsPage)=>void}){
+  return e('button',{class:'settings-row',onClick:()=>onOpen(item.id)},
+    e('span',{class:'settings-row-icon'},e(UiIcon,{name:item.icon,size:20})),
+    e('span',{class:'settings-row-copy'},e('strong',null,item.title),e('small',null,item.description)),
+    e('span',{class:'settings-row-chevron'},e(Chevron,null)));
+}
+
 export function SettingsHub({user,onOpen,onLogout,loggingOut}:{user:User;onOpen:(page:SettingsPage)=>void;onLogout:()=>void;loggingOut:boolean}){
-  const [query,setQuery]=useState('');const normalized=query.trim().toLocaleLowerCase('ru');
+  const [query,setQuery]=useState('');
+  const normalized=query.trim().toLocaleLowerCase('ru');
   const filtered=useMemo(()=>items.filter(item=>(!item.admin||user.role==='admin')&&(!normalized||(item.title+' '+item.description+' '+item.keywords).toLocaleLowerCase('ru').includes(normalized))),[normalized,user.role]);
+  const groups=(['Основное','Данные и доступ','Система'] as const).map(group=>({group,items:filtered.filter(item=>item.group===group)})).filter(group=>group.items.length);
+
   return e('main',{class:'settings-screen'},
-    e('div',{class:'screen-heading'},e('div',null,e('p',{class:'eyebrow'},'НАСТРОЙКИ'),e('h1',null,'Настройки')),e('span',{class:'avatar large','aria-hidden':'true'},user.login.slice(0,1).toUpperCase())),
-    e('section',{class:'profile-summary card'},e('div',{class:'profile-main'},e('span',{class:'avatar','aria-hidden':'true'},user.login.slice(0,1).toUpperCase()),e('div',null,e('strong',null,user.login),e('small',null,user.role==='admin'?'Администратор':'Пользователь'))),
-      e('button',{onClick:()=>onOpen('account')},'Открыть аккаунт')),
-    e('label',{class:'settings-search'},'Поиск по настройкам',e('input',{type:'search',value:query,placeholder:'Например, уведомления или backup',onInput:(ev:Event)=>setQuery((ev.target as HTMLInputElement).value)})),
-    e('section',{class:'settings-list','aria-label':'Разделы настроек'},filtered.map(item=>e('button',{key:item.id,class:'settings-row',onClick:()=>onOpen(item.id)},
-      e('div',null,e('strong',null,item.title),e('small',null,item.description)),e('span',{class:'settings-arrow','aria-hidden':'true'},'›'))),
-      !filtered.length&&e('div',{class:'empty-state'},e('h2',null,'Ничего не найдено'),e('p',null,'Измените поисковый запрос.'))),
-    e('button',{class:'settings-logout danger-button',disabled:loggingOut,onClick:onLogout},loggingOut?'Выходим…':'Выйти из аккаунта'));
+    e(PageHeader,{eyebrow:'Настройки',title:'Настройки'}),
+    e('section',{class:'profile-summary card'},
+      e('div',{class:'profile-main'},
+        e('span',{class:'avatar large','aria-hidden':'true'},user.login.slice(0,1).toUpperCase()),
+        e('div',null,e('strong',null,user.login),e('small',null,user.role==='admin'?'Администратор':'Пользователь'))),
+      e('button',{class:'tertiary-button',onClick:()=>onOpen('account')},'Аккаунт')),
+    e('label',{class:'settings-search'},
+      e('span',{class:'sr-only'},'Поиск по настройкам'),
+      e('span',{class:'search-input-wrap'},e(UiIcon,{name:'search',size:18}),e('input',{type:'search',value:query,placeholder:'Найти настройку',onInput:(ev:Event)=>setQuery((ev.target as HTMLInputElement).value)}))),
+    groups.map(({group,items:groupItems})=>e('section',{class:'settings-group',key:group},
+      e('h2',null,group),
+      e('div',{class:'settings-list'},groupItems.map(item=>e(SettingsRow,{key:item.id,item,onOpen}))))),
+    !filtered.length&&e('div',{class:'empty-state settings-empty'},e(UiIcon,{name:'search',size:28}),e('h2',null,'Ничего не найдено'),e('p',null,'Попробуйте другой запрос.')),
+    e('button',{class:'settings-logout text-danger-button',disabled:loggingOut,onClick:onLogout},e(UiIcon,{name:'logout',size:18}),loggingOut?'Выходим…':'Выйти из аккаунта'));
 }
+
 export function AccountOverview({user,onOpen,onLogout,loggingOut}:{user:User;onOpen:(page:SettingsPage)=>void;onLogout:()=>void;loggingOut:boolean}){
+  const rows=[
+    {id:'password' as SettingsPage,title:'Изменить пароль',description:'Обновить пароль серверного аккаунта',icon:'lock' as UiIconName},
+    {id:'passkeys' as SettingsPage,title:'Ключи доступа',description:'Passkey и WebAuthn',icon:'key' as UiIconName},
+    {id:'devices' as SettingsPage,title:'Активные сессии',description:'Устройства, где выполнен вход',icon:'devices' as UiIconName},
+  ];
   return e('main',{class:'settings-screen account-screen'},
-    e('div',{class:'screen-heading'},e('div',null,e('p',{class:'eyebrow'},'АККАУНТ'),e('h1',null,'Аккаунт и безопасность'))),
-    e('section',{class:'card account-identity'},e('span',{class:'avatar profile-avatar','aria-hidden':'true'},user.login.slice(0,1).toUpperCase()),e('div',null,e('h2',null,user.login),e('p',{class:'muted'},user.role==='admin'?'Администратор системы':'Пользователь'))),
-    e('section',{class:'card'},e('h2',null,'Безопасность'),
-      e('div',{class:'settings-inline-list'},
-        e('button',{onClick:()=>onOpen('password')},e('span',null,e('strong',null,'Изменить пароль'),e('small',null,'Пароль серверного аккаунта')),e('span',{'aria-hidden':'true'},'›')),
-        e('button',{onClick:()=>onOpen('passkeys')},e('span',null,e('strong',null,'Ключи доступа'),e('small',null,'Дополнительный вход через Passkey')),e('span',{'aria-hidden':'true'},'›')),
-        e('button',{onClick:()=>onOpen('devices')},e('span',null,e('strong',null,'Активные сессии'),e('small',null,'Устройства, где выполнен вход')),e('span',{'aria-hidden':'true'},'›')))),
-    e('p',{class:'hint'},'Серверная модель аккаунта сейчас использует логин и роль. Имя, email и 2FA не добавляются как фиктивные поля только ради концепт-макета.'),
-    e('button',{class:'danger-button',disabled:loggingOut,onClick:onLogout},loggingOut?'Выходим…':'Выйти из аккаунта'));
+    e(PageHeader,{eyebrow:'Аккаунт',title:'Аккаунт и безопасность'}),
+    e('section',{class:'account-identity card'},
+      e('span',{class:'avatar profile-avatar','aria-hidden':'true'},user.login.slice(0,1).toUpperCase()),
+      e('div',{class:'account-identity-copy'},e('h2',null,user.login),e('p',null,user.role==='admin'?'Администратор системы':'Пользователь'))),
+    e('section',{class:'settings-group'},e('h2',null,'Безопасность'),
+      e('div',{class:'settings-list'},rows.map(row=>e('button',{class:'settings-row',key:row.id,onClick:()=>onOpen(row.id)},
+        e('span',{class:'settings-row-icon'},e(UiIcon,{name:row.icon,size:20})),
+        e('span',{class:'settings-row-copy'},e('strong',null,row.title),e('small',null,row.description)),
+        e('span',{class:'settings-row-chevron'},e(Chevron,null)))))),
+    e('div',{class:'info-panel'},e(UiIcon,{name:'info',size:18}),e('p',null,'Серверная модель аккаунта использует логин и роль. Имя, email и 2FA не являются частью текущего продукта.')),
+    e('button',{class:'text-danger-button',disabled:loggingOut,onClick:onLogout},e(UiIcon,{name:'logout',size:18}),loggingOut?'Выходим…':'Выйти из аккаунта'));
 }
+
 export function AppearanceSettings(){
   const [theme,setTheme]=useState<ThemePreference>(()=>readThemePreference());
   const change=(value:ThemePreference)=>{setTheme(value);setThemePreference(value);};
+  const meta:Record<ThemePreference,{title:string;description:string;preview:string}>={
+    system:{title:'Как в системе',description:'Следовать настройке устройства',preview:'system'},
+    light:{title:'Светлая',description:'Светлое оформление всегда',preview:'light'},
+    dark:{title:'Тёмная',description:'Тёмное оформление всегда',preview:'dark'},
+  };
   return e('main',{class:'settings-screen'},
-    e('div',{class:'screen-heading'},e('div',null,e('p',{class:'eyebrow'},'ОФОРМЛЕНИЕ'),e('h1',null,'Тема приложения'))),
-    e('section',{class:'card appearance-options'},(['system','light','dark'] as ThemePreference[]).map(value=>
-      e('label',{class:'theme-choice'},e('input',{type:'radio',name:'theme',value,checked:theme===value,onChange:()=>change(value)}),
-        e('span',null,e('strong',null,value==='system'?'Как в системе':value==='light'?'Светлая':'Тёмная'),
-          e('small',null,value==='system'?'Следует настройке iOS, Android или компьютера':value==='light'?'Всегда светлое оформление':'Всегда тёмное оформление'))))),
-    e('p',{class:'hint'},'Настройка хранится только на этом устройстве и не раскрывает содержимое хранилищ серверу.'));
+    e(PageHeader,{eyebrow:'Оформление',title:'Тема приложения',description:'Настройка хранится только на этом устройстве.'}),
+    e('section',{class:'theme-grid'},(['system','light','dark'] as ThemePreference[]).map(value=>
+      e('label',{class:'theme-card '+(theme===value?'selected':'')},
+        e('input',{type:'radio',name:'theme',value,checked:theme===value,onChange:()=>change(value)}),
+        e('span',{class:'theme-preview '+meta[value].preview},e('i',null),e('i',null),e('i',null)),
+        e('span',{class:'theme-card-copy'},e('strong',null,meta[value].title),e('small',null,meta[value].description)),
+        theme===value&&e('span',{class:'theme-check'},e(UiIcon,{name:'check',size:16}))))));
 }
+
 export function AboutSettings(){
   const zone=Intl.DateTimeFormat().resolvedOptions().timeZone||'UTC';
   const standalone=matchMedia('(display-mode: standalone)').matches||Boolean((navigator as Navigator&{standalone?:boolean}).standalone);
-  return e('main',{class:'settings-screen'},
-    e('div',{class:'screen-heading'},e('div',null,e('p',{class:'eyebrow'},'О ПРИЛОЖЕНИИ'),e('h1',null,'Tasks 0.20.0'))),
-    e('section',{class:'card about-grid'},
+  return e('main',{class:'settings-screen about-screen'},
+    e(PageHeader,{eyebrow:'О приложении',title:'Tasks'}),
+    e('section',{class:'about-hero'},e('img',{src:'/icon.svg',width:64,height:64,alt:''}),e('div',null,e('strong',null,'Tasks'),e('span',null,'Версия 0.20.0'))),
+    e('section',{class:'about-grid card'},
       e('div',null,e('span',null,'Версия'),e('strong',null,'0.20.0')),
       e('div',null,e('span',null,'Режим'),e('strong',null,standalone?'Установленная PWA':'Браузер')),
-      e('div',null,e('span',null,'Часовой пояс устройства'),e('strong',null,zone))),
-    e('p',{class:'hint'},'Часовой пояс аккаунта обновляется из текущего часового пояса устройства при работе онлайн; отдельное серверное хранение пользовательского текста для этого не требуется.'));
+      e('div',null,e('span',null,'Часовой пояс'),e('strong',null,zone))),
+    e('div',{class:'info-panel'},e(UiIcon,{name:'info',size:18}),e('p',null,'Часовой пояс аккаунта обновляется из текущего часового пояса устройства при работе онлайн.')));
 }
