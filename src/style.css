@@ -164,3 +164,303 @@ html[data-theme="dark"] .error{background:#3a2026;color:#ffb8c1}html[data-theme=
 
 .user-filterbar{display:grid;grid-template-columns:minmax(0,1fr) minmax(180px,240px);gap:12px;margin:16px 0}.user-filterbar label{font-weight:600}.user-filterbar input,.user-filterbar select{display:block;width:100%;margin-top:6px}
 @media(max-width:719px){.user-filterbar{grid-template-columns:1fr}.users-screen{padding:0}.users-screen>.screen-title{font-size:30px}}
+
+
+/* 0.20.1 visual polish — fields, surfaces and navigation */
+:root{
+  --field-bg:#ffffff;
+  --field-bg-hover:#fbfcff;
+  --field-border:#cfd6e2;
+  --field-border-focus:#7773ea;
+  --field-text:#1d2534;
+  --field-placeholder:#7b8798;
+  --button-bg:#eef1f6;
+  --button-bg-hover:#e4e8f0;
+  --button-text:#303b4e;
+  --nav-muted:#7b8597;
+  --nav-active-bg:#eeeeff;
+}
+html[data-theme="dark"]{
+  --ui-bg:#0d1119;
+  --ui-surface:#161d29;
+  --ui-surface-soft:#111722;
+  --ui-text:#f2f5fb;
+  --ui-muted:#9ca8bb;
+  --ui-border:#2a3548;
+  --ui-brand:#8d82f3;
+  --ui-brand-strong:#aaa2ff;
+  --field-bg:#101722;
+  --field-bg-hover:#141d2b;
+  --field-border:#334158;
+  --field-border-focus:#8d82f3;
+  --field-text:#f7f9fd;
+  --field-placeholder:#8390a5;
+  --button-bg:#202938;
+  --button-bg-hover:#293447;
+  --button-text:#eef2f9;
+  --nav-muted:#7f8a9e;
+  --nav-active-bg:#24253d;
+}
+
+/* Form controls: one readable style everywhere, including legacy forms. */
+html[data-theme] input:not([type="checkbox"]):not([type="radio"]):not([type="color"]):not([type="range"]),
+html[data-theme] select,
+html[data-theme] textarea{
+  width:100%;
+  min-height:48px;
+  padding:11px 14px;
+  border:1px solid var(--field-border)!important;
+  border-radius:12px;
+  background:var(--field-bg)!important;
+  color:var(--field-text)!important;
+  -webkit-text-fill-color:var(--field-text)!important;
+  caret-color:var(--ui-brand);
+  box-shadow:none;
+  font:inherit;
+  font-size:16px;
+}
+html[data-theme] textarea{min-height:112px}
+html[data-theme] input::placeholder,
+html[data-theme] textarea::placeholder{
+  color:var(--field-placeholder)!important;
+  -webkit-text-fill-color:var(--field-placeholder)!important;
+  opacity:1!important;
+}
+html[data-theme] input:not([type="checkbox"]):not([type="radio"]):not([type="color"]):not([type="range"]):focus,
+html[data-theme] select:focus,
+html[data-theme] textarea:focus{
+  border-color:var(--field-border-focus)!important;
+  outline:0!important;
+  box-shadow:0 0 0 3px color-mix(in srgb,var(--ui-brand) 22%,transparent)!important;
+}
+html[data-theme] input:disabled,
+html[data-theme] select:disabled,
+html[data-theme] textarea:disabled{
+  opacity:.58!important;
+  cursor:not-allowed;
+}
+html[data-theme] input[readonly],
+html[data-theme] textarea[readonly]{background:color-mix(in srgb,var(--field-bg) 80%,var(--ui-muted) 20%)!important}
+html[data-theme] select option{background:var(--ui-surface);color:var(--ui-text)}
+html[data-theme] input[type="file"]::file-selector-button{
+  margin:-4px 12px -4px -7px;padding:8px 12px;border:0;border-radius:8px;
+  background:var(--button-bg);color:var(--button-text);font:inherit;font-weight:650
+}
+html[data-theme] input:-webkit-autofill,
+html[data-theme] input:-webkit-autofill:hover,
+html[data-theme] input:-webkit-autofill:focus{
+  -webkit-text-fill-color:var(--field-text)!important;
+  -webkit-box-shadow:0 0 0 1000px var(--field-bg) inset!important;
+  box-shadow:0 0 0 1000px var(--field-bg) inset!important;
+}
+.search-field{display:block;min-width:0;margin:14px 0 8px}
+.search-field input{display:block;width:100%;margin-top:6px}
+.user-filterbar input,.user-filterbar select{min-width:0}
+label{color:var(--ui-text)}
+dt,.hint,.muted{color:var(--ui-muted)!important}
+
+/* Buttons: quieter secondary actions and a single clear primary accent. */
+button{
+  background:var(--button-bg);
+  color:var(--button-text);
+  border:1px solid transparent;
+  box-shadow:none;
+}
+button:hover:not(:disabled){background:var(--button-bg-hover)}
+button.primary,.primary{
+  background:linear-gradient(135deg,var(--ui-brand),#6f78ed)!important;
+  color:#fff!important;
+  border-color:transparent!important;
+  box-shadow:0 5px 16px color-mix(in srgb,var(--ui-brand) 24%,transparent)
+}
+button.primary:hover:not(:disabled),.primary:hover:not(:disabled){filter:brightness(1.06)}
+button:disabled{opacity:.45!important;color:color-mix(in srgb,var(--button-text) 68%,transparent)!important;cursor:not-allowed}
+.icon-button,.mobile-brand,.shell-brand,.shell-nav button,.bottom-nav button,.text-button{
+  background:transparent!important;border-color:transparent!important;box-shadow:none!important
+}
+.danger-button,.menu-danger,.icon-danger{
+  background:color-mix(in srgb,var(--ui-danger) 12%,var(--ui-surface))!important;
+  color:var(--ui-danger)!important;
+  border-color:color-mix(in srgb,var(--ui-danger) 25%,var(--ui-border))!important
+}
+
+/* Legacy light surfaces must follow the selected theme. */
+html[data-theme="dark"] .user-list{
+  background:transparent!important;
+  border-color:var(--ui-border)!important;
+  box-shadow:none
+}
+html[data-theme="dark"] .user-list li,
+html[data-theme="dark"] .note-row,
+html[data-theme="dark"] .project-list-card,
+html[data-theme="dark"] .task-main,
+html[data-theme="dark"] .project-summary-grid>div,
+html[data-theme="dark"] .today-counters div,
+html[data-theme="dark"] .filters,
+html[data-theme="dark"] .reminder-card,
+html[data-theme="dark"] .linked-note,
+html[data-theme="dark"] .snooze-sheet,
+html[data-theme="dark"] .version-row,
+html[data-theme="dark"] .version-preview,
+html[data-theme="dark"] .review-compare>div,
+html[data-theme="dark"] .import-preview,
+html[data-theme="dark"] .note-action-menu,
+html[data-theme="dark"] .note-action-menu button,
+html[data-theme="dark"] .file-upload-progress,
+html[data-theme="dark"] .editor-toolbar,
+html[data-theme="dark"] .editor-toolbar button,
+html[data-theme="dark"] .editor-toolbar select,
+html[data-theme="dark"] .rich-editor-area,
+html[data-theme="dark"] .lifecycle-info,
+html[data-theme="dark"] .lifecycle-banner,
+html[data-theme="dark"] .gantt,
+html[data-theme="dark"] .gantt-label-column,
+html[data-theme="dark"] .gantt-label-row{
+  background:var(--ui-surface)!important;
+  color:var(--ui-text)!important;
+  border-color:var(--ui-border)!important
+}
+html[data-theme="dark"] .project-list-card.unassigned,
+html[data-theme="dark"] .project-summary-grid>div,
+html[data-theme="dark"] .today-counters div,
+html[data-theme="dark"] .filters,
+html[data-theme="dark"] .reminder-card,
+html[data-theme="dark"] .linked-note,
+html[data-theme="dark"] .snooze-sheet,
+html[data-theme="dark"] .version-preview,
+html[data-theme="dark"] .review-compare>div,
+html[data-theme="dark"] .editor-toolbar{
+  background:var(--ui-surface-soft)!important
+}
+html[data-theme="dark"] .user-list li{border-bottom-color:var(--ui-border)!important}
+html[data-theme="dark"] .user-list strong,
+html[data-theme="dark"] .user-list p:not(.muted),
+html[data-theme="dark"] .today-counters strong,
+html[data-theme="dark"] .note-row strong,
+html[data-theme="dark"] .project-list-card strong{color:var(--ui-text)!important}
+html[data-theme="dark"] .today-counters span,
+html[data-theme="dark"] .note-row small,
+html[data-theme="dark"] .task-main small,
+html[data-theme="dark"] .project-summary-grid span{color:var(--ui-muted)!important}
+html[data-theme="dark"] .today-counters div{
+  border:1px solid var(--ui-border);
+  box-shadow:inset 0 1px 0 #ffffff08
+}
+html[data-theme="dark"] .today-counters strong{font-weight:760}
+
+/* Lists used by Devices / Passkeys / Users. */
+.users-screen{max-width:860px!important}
+.users-screen>.screen-title{margin-bottom:20px}
+.users-screen>.actions{gap:10px;margin:14px 0 20px}
+.users-screen>.actions button{min-width:0}
+.user-list{margin-top:18px;border-radius:16px}
+.user-list li{background:var(--ui-surface);color:var(--ui-text)}
+.user-list li>strong{font-size:16px}
+.user-list li p{line-height:1.45}
+.user-list li .actions{gap:8px;margin-top:12px}
+.user-list li .actions button,.user-list li>button{
+  margin-top:8px;background:var(--button-bg);color:var(--button-text);border:1px solid var(--ui-border)
+}
+
+/* Bottom navigation: soft active state, no giant focus rectangle. */
+@media(max-width:719px){
+  .shell-main{
+    padding-bottom:calc(78px + env(safe-area-inset-bottom));
+  }
+  .bottom-nav{
+    min-height:calc(68px + env(safe-area-inset-bottom));
+    padding:6px max(10px,env(safe-area-inset-right)) calc(6px + env(safe-area-inset-bottom)) max(10px,env(safe-area-inset-left));
+    gap:6px;
+    background:color-mix(in srgb,var(--ui-surface) 94%,transparent)!important;
+    border-top:1px solid var(--ui-border)!important;
+    box-shadow:0 -10px 30px #00000014;
+    backdrop-filter:blur(20px) saturate(1.2)
+  }
+  .bottom-nav button{
+    position:relative;
+    display:flex;
+    min-height:54px;
+    flex-direction:column;
+    align-items:center;
+    justify-content:center;
+    gap:4px;
+    padding:5px 8px;
+    border:0!important;
+    border-radius:13px!important;
+    color:var(--nav-muted)!important;
+    font-size:11px;
+    line-height:1.1;
+    outline:none!important;
+    transition:background .15s ease,color .15s ease,transform .15s ease
+  }
+  .bottom-nav button:hover{background:transparent!important}
+  .bottom-nav button.active{
+    background:var(--nav-active-bg)!important;
+    color:var(--ui-brand-strong)!important;
+    box-shadow:none!important
+  }
+  .bottom-nav button.active svg{color:var(--ui-brand-strong)!important}
+  .bottom-nav button:active{transform:scale(.97)}
+  .bottom-nav button:focus,
+  .bottom-nav button:focus-visible{
+    outline:none!important;
+    box-shadow:inset 0 0 0 1px color-mix(in srgb,var(--ui-brand) 55%,transparent)!important
+  }
+  .bottom-nav button.active:focus,
+  .bottom-nav button.active:focus-visible{
+    box-shadow:inset 0 0 0 1px color-mix(in srgb,var(--ui-brand) 35%,transparent)!important
+  }
+
+  .mobile-shell-header{
+    background:color-mix(in srgb,var(--ui-surface) 94%,transparent)!important;
+    border-bottom-color:var(--ui-border)!important
+  }
+
+  /* Give fixed navigation enough breathing room on long forms. */
+  .shell-content{padding-bottom:34px}
+  .shell-content form:last-child,.shell-content .card:last-child{margin-bottom:20px}
+}
+
+/* Internal project/task tabs use one compact segmented style. */
+.project-tabs,.task-view-switch,.gantt-toolbar .segmented{
+  display:flex;
+  gap:4px;
+  padding:4px;
+  border:1px solid var(--ui-border);
+  border-radius:14px;
+  background:var(--ui-surface-soft);
+  box-shadow:inset 0 1px 0 #ffffff08
+}
+.project-tabs{margin:18px 0;overflow-x:auto;flex-wrap:nowrap}
+.project-tabs .filter-chip,.task-view-switch .filter-chip,.gantt-toolbar .segmented button{
+  min-height:38px;
+  padding:8px 13px;
+  border:0!important;
+  border-radius:10px!important;
+  background:transparent!important;
+  color:var(--ui-muted)!important;
+  white-space:nowrap;
+  box-shadow:none!important
+}
+.project-tabs .filter-chip.selected,.task-view-switch .filter-chip.selected,.gantt-toolbar .segmented button.selected{
+  background:var(--ui-surface)!important;
+  color:var(--ui-brand-strong)!important;
+  box-shadow:0 2px 8px #00000012!important
+}
+html[data-theme="dark"] .project-tabs .filter-chip.selected,
+html[data-theme="dark"] .task-view-switch .filter-chip.selected,
+html[data-theme="dark"] .gantt-toolbar .segmented button.selected{
+  background:#252d3d!important
+}
+
+/* Small rhythm fixes visible in the mobile screenshots. */
+.planner-list-screen>.card-heading,.settings-screen>.screen-heading{margin-bottom:18px}
+.planner-list-screen>.card-heading h1,.screen-heading h1,.users-screen>.screen-title{letter-spacing:-.025em}
+.planner label,.projects-screen label,.users-screen label,.card form>label{font-weight:600}
+.organization-tools{gap:14px}
+.planner-tools{margin-top:18px}
+.empty-state{padding:34px 14px}
+.empty-state h2{margin-bottom:8px}
+.settings-row{min-height:72px}
+.settings-row strong{font-size:15px}
+.settings-row small{line-height:1.35}

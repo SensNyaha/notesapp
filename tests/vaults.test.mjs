@@ -68,7 +68,7 @@ test('vault persistence, offline queue, conflicts, deletion and encrypted stash 
     if(lose===path){lose='';throw Error('lost response');}
     return new Response(response.body,{status:response.statusCode,headers:{'content-type':'application/json'}});
   };
-  t.after(async()=>{globalThis.fetch=originalFetch;changes?.close();await app.close();await rm(dir,{recursive:true,force:true});});
+  t.after(async()=>{globalThis.fetch=originalFetch;changes?.close();await app.close();await rm(dir,{recursive:true,force:true,maxRetries:8,retryDelay:75});});
   const post = async(path,body) => {
     const csrf=(await send('/api/auth/csrf')).json().csrf;
     return send(path,{method:'POST',headers:{'content-type':'application/json','x-csrf-token':csrf},body:JSON.stringify(body)});

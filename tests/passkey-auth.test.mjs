@@ -46,7 +46,7 @@ function mockWebAuthn(){
 async function fixture(t){
   const dir=await mkdtemp(join(tmpdir(),'tasks-webauthn-'));let now=Date.now();const webauthn=mockWebAuthn();
   const app=await createApp({dataDir:dir,auth:{origin,rpId:'localhost',secure:false},clock:()=>now,logger:false,webauthn});
-  t.after(async()=>{await app.close();await rm(dir,{recursive:true,force:true});});
+  t.after(async()=>{await app.close();await rm(dir,{recursive:true,force:true,maxRetries:8,retryDelay:75});});
   function browser(){
     const jar=new Map(),cookies=()=>[...jar].map(([k,v])=>`${k}=${v}`).join('; ');
     const absorb=response=>{for(const c of response.cookies){if(c.value)jar.set(c.name,c.value);else jar.delete(c.name);}return response;};

@@ -21,7 +21,7 @@ async function fixture(t){
   let now=Date.now();
   const app=await createApp({dataDir:dir,logger:false,clock:()=>now,auth:{origin,secure:false,bootstrap:admin},push:{interval:0}});
   const db=new DatabaseSync(join(dir,'tasks.sqlite'),{enableForeignKeyConstraints:true});
-  t.after(async()=>{db.close();await app.close();await rm(dir,{recursive:true,force:true});});
+  t.after(async()=>{db.close();await app.close();await rm(dir,{recursive:true,force:true,maxRetries:8,retryDelay:75});});
   function browser(){
     const jar=new Map();let accountId='';
     const cookies=()=>[...jar].map(([k,v])=>`${k}=${v}`).join('; ');

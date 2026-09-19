@@ -26,7 +26,7 @@ async function fixture(t) {
     clock: () => now, logger: { level: 'error', stream } };
   let app = await createApp(options);
   const db = new DatabaseSync(join(dir, 'tasks.sqlite'), { enableForeignKeyConstraints: true });
-  t.after(async () => { db.close(); await app.close(); await rm(dir, { recursive: true, force: true }); });
+  t.after(async () => { db.close(); await app.close(); await rm(dir, { recursive: true, force: true, maxRetries: 8, retryDelay: 75 }); });
   function browser() {
     const jar = new Map();
     const cookies = () => [...jar].map(([k, v]) => `${k}=${v}`).join('; ');

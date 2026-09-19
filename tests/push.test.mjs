@@ -19,7 +19,7 @@ async function fixture(t){
   const options={dataDir:dir,logger:false,clock:()=>now,auth:{origin,secure:true,bootstrap:{login:'PushAdmin',password:'Secret9Admin'}},
     push:{interval:0,send:async(...args)=>{deliveries.push(args);return behavior(...args);}}};
   app=await createApp(options);const db=new DatabaseSync(join(dir,'tasks.sqlite'));db.exec('PRAGMA foreign_keys=ON');
-  t.after(async()=>{await app.close();db.close();await rm(dir,{recursive:true,force:true});});
+  t.after(async()=>{await app.close();db.close();await rm(dir,{recursive:true,force:true,maxRetries:8,retryDelay:75});});
   let address=1;
   function client(){const jar=new Map(),remoteAddress='127.0.0.'+(address++);let user;
     const request=async(path,body,headers={})=>{
