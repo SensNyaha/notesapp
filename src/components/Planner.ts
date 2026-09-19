@@ -466,8 +466,9 @@ export function Planner({ user,section='notes',initialScreen='list',reminderTarg
     else showViewing(null);
     showDraft(null);void sync();
   }
-  const feedback = e('div', { 'aria-live': 'polite' },e('p',{class:'sync-state '+syncStatus},
-      syncStatus==='syncing'?'Синхронизация…':syncStatus==='synced'?'Синхронизировано':syncStatus==='offline'?'Нет подключения · сохранено на устройстве':syncStatus==='error'?'Ошибка синхронизации · локальная копия сохранена':'Сохранено на устройстве · ожидает синхронизации'),
+  const feedback = e('div', { class:'planner-feedback', 'aria-live': 'polite' },
+    syncStatus!=='synced'&&e('p',{class:'sync-state '+syncStatus},
+      syncStatus==='syncing'?'Синхронизация…':syncStatus==='offline'?'Нет подключения · сохранено на устройстве':syncStatus==='error'?'Ошибка синхронизации · локальная копия сохранена':'Сохранено на устройстве · ожидает синхронизации'),
     error && e('p', { class: 'error', role: 'alert' }, error),
     status && e('p', { class: 'hint' }, status));
   if(screen==='device')return e('section',{class:'planner device-name-screen'},
@@ -670,8 +671,10 @@ export function Planner({ user,section='notes',initialScreen='list',reminderTarg
   }
   if(viewing&&!draft){const current=state?.vaults.find(item=>item.header.id===viewing.vault),versions=current?heads(current).filter(item=>item.objectId===viewing.object):[],competing=versions.length>1,
     revision=versions.find(item=>item.id===viewing.revision),lifecycle=current&&revision?statusOf(current,revision,viewing):'active',readOnly=Boolean(current?.membershipRevoked||current?.role==='viewer'||entityKind(viewing)!=='note');return e('section',{class:'note-view'},
-    e('div',{class:'note-view-topbar'},e('button',{class:'ui-back',onClick:()=>{showViewing(null);setMenuOpen(false);}},e(UiIcon,{name:'back',size:18}),'Заметки'),
-      e('div',{class:'note-view-actions'},e('button',{class:'tertiary-button',disabled:competing,onClick:()=>setMenuOpen(!menuOpen),'aria-expanded':menuOpen&&!competing},e(UiIcon,{name:'more',size:18}),'Действия'),lifecycle==='active'&&!competing&&!readOnly&&e('button',{class:'primary',onClick:()=>showDraft({...viewing,dirty:false})},'Редактировать'))),
+    e('div',{class:'note-view-topbar'},e('button',{class:'ui-back',onClick:()=>{showViewing(null);setMenuOpen(false);}},e(UiIcon,{name:'back',size:18}),e('span',null,'Заметки')),
+      e('div',{class:'note-view-actions'},
+        e('button',{class:'tertiary-button note-view-action',disabled:competing,onClick:()=>setMenuOpen(!menuOpen),'aria-expanded':menuOpen&&!competing,'aria-label':'Действия с заметкой'},e(UiIcon,{name:'more',size:19}),e('span',null,'Действия')),
+        lifecycle==='active'&&!competing&&!readOnly&&e('button',{class:'primary note-view-action',onClick:()=>showDraft({...viewing,dirty:false}),'aria-label':'Редактировать заметку'},e(UiIcon,{name:'edit',size:19}),e('span',null,'Редактировать')))),
     competing&&e('div',{class:'error',role:'status'},'Заметка изменена на нескольких устройствах. Выберите версию, прежде чем редактировать.',
       e('button',{onClick:()=>{setComparison({objectId:viewing.object,versions:versions.map(item=>item.id),chosen:versions[0].id});showViewing(null);setMenuOpen(false);setScreen('conflict');}},'Сравнить версии')),
     menuOpen&&!competing&&e('div',{class:'note-action-menu',role:'menu'},
@@ -905,24 +908,62 @@ export function Planner({ user,section='notes',initialScreen='list',reminderTarg
     :Number(Boolean(b.note!.pinned))-Number(Boolean(a.note!.pinned))||(sort==='title'?a.note!.title.localeCompare(b.note!.title,'ru'):sort==='oldest'?(a.note!.author?.time??0)-(b.note!.author?.time??0):(b.note!.author?.time??0)-(a.note!.author?.time??0)));
   return e('section', { class: 'planner planner-list-screen notes-workspace' },
     e(PageHeader,{eyebrow:'Workspace',title:'Заметки',description:v?.key?(names[v.header.id]||'Открытое E2EE-хранилище'):'Выберите или откройте E2EE-хранилище.',
-      actions:e('button',{class:'tertiary-button',disabled:busy,onClick:()=>void run(sync)},e(UiIcon,{name:'sync',size:17}),busy?'Синхронизация…':'Синхронизировать')}),
-    e('div',{class:'notes-commandbar'},
+      actions:e('button',{class:'tertiary-button notes-sync-action',disabled:busy,onClick:()=>void run(sync)},e(UiIcon,{name:'sync',size:17}),busy?'Синхронизация…':'Синхронизировать')}),
+    e('div',{class:'notes-mobile-toolbar'},
+      e('label',{class:'notes-mobile-vault'},e('span',{class:'sr-only'},'Хранилище'),e('select',{value:selected,'aria-label':'Хранилище',onChange:(ev:Event)=>void activateVault((ev.target as HTMLSelectElement).value)},
+        e('option',{value:''},'Хранилище'),active.map(item=>e('option',{value:item.header.id,key:item.header.id},names[item.header.id]||'Хранилище')))),
+      e('details',{class:'notes-mobile-filter-menu'},
+        e('summary',{class:'icon-button','aria-label':'Поиск и фильтры',title:'Поиск и фильтры'},e(UiIcon,{name:'search',size:19}),
+          (Boolean(normalizedQuery)||quickFilter!=='all'||selectedTags.length>0)&&e('span',{class:'mobile-control-dot','aria-hidden':'true'})),
+        e('div',{class:'notes-mobile-panel'},
+          e('label',{class:'search-field'},e('span',{class:'sr-only'},'Поиск'),e('span',{class:'search-input-wrap'},e(UiIcon,{name:'search',size:18}),e('input',{type:'search',value:query,placeholder:'Поиск заметок',onInput:(ev:Event)=>setQuery((ev.target as HTMLInputElement).value)}))),
+          normalizedQuery?e('label',{class:'sort-control'},e('span',null,'Сортировка'),e('select',{value:searchSort,onChange:(ev:Event)=>setSearchSort((ev.target as HTMLSelectElement).value as typeof searchSort)},e('option',{value:'relevance'},'По релевантности'),e('option',{value:'newest'},'Сначала новые'),e('option',{value:'oldest'},'Сначала старые')))
+            :e('label',{class:'sort-control'},e('span',null,'Сортировка'),e('select',{value:sort,onChange:(ev:Event)=>setSort((ev.target as HTMLSelectElement).value as typeof sort)},e('option',{value:'newest'},'Сначала новые'),e('option',{value:'oldest'},'Сначала старые'),e('option',{value:'title'},'По заголовку'))),
+          v?.key&&e('div',{class:'mobile-filter-groups'},
+            e('div',{class:'quick-filters'},([['all','Все'],['pinned','Закреплённые'],['untagged','Без тегов'],['reminder','С напоминанием']] as const).map(([value,label])=>e('button',{class:quickFilter===value?'filter-chip selected':'filter-chip','aria-pressed':quickFilter===value,onClick:()=>setQuickFilter(value)},label))),
+            e('div',{class:'tag-filter'},activeTags(v.header.id).map(tag=>e('button',{key:tag.id,class:selectedTags.includes(tag.id)?'tag-chip selected':'tag-chip',style:{'--tag-color':tag.color},'aria-pressed':selectedTags.includes(tag.id),onClick:()=>setSelectedTags(current=>current.includes(tag.id)?current.filter(id=>id!==tag.id):[...current,tag.id])},tag.name)),
+              e('button',{class:'tertiary-button',onClick:()=>setScreen('tags')},'Управление тегами'))))),
+      e('details',{class:'notes-mobile-more-menu'},
+        e('summary',{class:'icon-button','aria-label':'Дополнительные действия',title:'Дополнительные действия'},e(UiIcon,{name:'more',size:20})),
+        e('div',{class:'notes-mobile-panel notes-mobile-more-panel'},
+          e('button',{class:'mobile-menu-row',disabled:busy,onClick:()=>void run(sync)},e(UiIcon,{name:'sync',size:18}),busy?'Синхронизация…':'Синхронизировать'),
+          e('button',{class:'mobile-menu-row',disabled:busy,onClick:()=>form('create')},e(UiIcon,{name:'plus',size:18}),'Новое хранилище'),
+          e('button',{class:'mobile-menu-row',disabled:!v?.key,onClick:()=>{setQuery('');setSelectedTags([]);setScreen('archive');}},e(UiIcon,{name:'archive',size:18}),'Архив'),
+          e('button',{class:'mobile-menu-row',disabled:!v?.key,onClick:()=>{setQuery('');setSelectedTags([]);setScreen('trash');}},e(UiIcon,{name:'trash',size:18}),'Корзина'),
+          e('button',{class:'mobile-menu-row',onClick:()=>setScreen('stash')},e(UiIcon,{name:'file',size:18}),'Отложенные · '+(state?.stash.length??0)),
+          e('button',{class:'mobile-menu-row',onClick:()=>{setName(state?.deviceName??'Устройство');setScreen('device');}},e(UiIcon,{name:'devices',size:18}),state?.deviceName??'Устройство'),
+          v&&!v.deleted&&e('div',{class:'mobile-vault-menu-section'},
+            e('p',{class:'mobile-menu-caption'},'Хранилище'),
+            v.systemUnlock&&v.key&&e('button',{class:'mobile-menu-row',disabled:busy,onClick:()=>void run(async()=>{await flush();showDraft(null);showViewing(null);await lockVault(user,selected);setStatus('Хранилище заблокировано.');})},e(UiIcon,{name:'lock',size:18}),'Заблокировать сейчас'),
+            v.systemUnlock&&e('button',{class:'mobile-menu-row',disabled:busy,onClick:()=>{setAutoLockMs(v.systemUnlock!.autoLockMs);setScreen('system-unlock');setPhrase('');setError('');}},e(UiIcon,{name:'settings',size:18}),'Настройки разблокировки'),
+            v.systemUnlock&&e('button',{class:'mobile-menu-row',disabled:busy,onClick:()=>{if(confirm('Забыть системную разблокировку на этом устройстве? Фраза хранилища останется рабочей.'))void run(async()=>{await flush();showDraft(null);showViewing(null);await forgetSystemUnlock(user,selected);setStatus('Системная разблокировка забыта. Для открытия введите фразу.');});}},e(UiIcon,{name:'key',size:18}),'Забыть системную разблокировку'),
+            !v.systemUnlock&&v.key&&e('button',{class:'mobile-menu-row',disabled:busy||Boolean(v.transfer),onClick:()=>{setAutoLockMs(900_000);setPhrase('');setScreen('system-unlock');}},e(UiIcon,{name:'lock',size:18}),'Включить системную разблокировку'),
+            e('button',{class:'mobile-menu-row',disabled:busy||Boolean(v.transfer)||!v.access,onClick:()=>form('close-all',selected)},e(UiIcon,{name:'devices',size:18}),'Закрыть на всех устройствах'),
+            v.key&&e('button',{class:'mobile-menu-row',disabled:busy||Boolean(v.transfer),onClick:()=>void run(()=>closeVault(user,selected))},e(UiIcon,{name:'lock',size:18}),'Закрыть хранилище'),
+            v.key&&e('button',{class:'mobile-menu-row',disabled:busy||Boolean(v.transfer),onClick:()=>form('transfer',selected)},e(UiIcon,{name:'key',size:18}),'Забыл фразу · перенести'),
+            v.key&&e('button',{class:'mobile-menu-row danger',disabled:busy||Boolean(v.transfer),onClick:()=>{
+              const label=names[selected]||'это хранилище';
+              if(confirm('Удалить «'+label+'» и все его серверные данные? Хранилище исчезнет на остальных устройствах после синхронизации. Отменить это действие средствами приложения будет невозможно.'))void run(async()=>{
+                await flush();showDraft(null);showViewing(null);await deleteVault(user,selected);select('');setScreen('list');setStatus('Хранилище удалено.');
+              });
+            }},e(UiIcon,{name:'trash',size:18}),'Удалить хранилище'))))),
+    e('div',{class:'notes-commandbar notes-desktop-controls'},
       e('label',{class:'vault-switcher'},e('span',null,'Хранилище'),e('select',{value:selected,onChange:(ev:Event)=>void activateVault((ev.target as HTMLSelectElement).value)},
         e('option',{value:''},'Выберите хранилище'),active.map(v=>e('option',{value:v.header.id,key:v.header.id},names[v.header.id]||'Хранилище')))),
       e('label',{class:'search-field'},e('span',null,'Поиск'),e('span',{class:'search-input-wrap'},e(UiIcon,{name:'search',size:18}),e('input',{type:'search',value:query,placeholder:'По всем открытым хранилищам',onInput:(ev:Event)=>setQuery((ev.target as HTMLInputElement).value)}))),
       normalizedQuery?e('label',{class:'sort-control'},e('span',null,'Сортировка'),e('select',{value:searchSort,onChange:(ev:Event)=>setSearchSort((ev.target as HTMLSelectElement).value as typeof searchSort)},e('option',{value:'relevance'},'По релевантности'),e('option',{value:'newest'},'Сначала новые'),e('option',{value:'oldest'},'Сначала старые')))
         :e('label',{class:'sort-control'},e('span',null,'Сортировка'),e('select',{value:sort,onChange:(ev:Event)=>setSort((ev.target as HTMLSelectElement).value as typeof sort)},e('option',{value:'newest'},'Сначала новые'),e('option',{value:'oldest'},'Сначала старые'),e('option',{value:'title'},'По заголовку')))),
     state?.sessionReviewRequired&&e('div',{class:'inline-alert warning session-review-banner',role:'status'},e(UiIcon,{name:'warning',size:18}),e('div',null,e('strong',null,'Синхронизация приостановлена'),e('p',null,reviewItems.length?`Проверьте локальные изменения: ${reviewItems.length}.`:'Проверяем актуальное состояние сервера…')),reviewItems.length>0&&e('button',{class:'primary',onClick:()=>setScreen('outbox-review')},'Проверить')),
-    v?.key&&e('div',{class:'filters'},e('div',{class:'quick-filters'},([['all','Все'],['pinned','Закреплённые'],['untagged','Без тегов'],['reminder','С напоминанием']] as const).map(([value,label])=>e('button',{class:quickFilter===value?'filter-chip selected':'filter-chip','aria-pressed':quickFilter===value,onClick:()=>setQuickFilter(value)},label))),
+    v?.key&&e('div',{class:'filters notes-desktop-filters'},e('div',{class:'quick-filters'},([['all','Все'],['pinned','Закреплённые'],['untagged','Без тегов'],['reminder','С напоминанием']] as const).map(([value,label])=>e('button',{class:quickFilter===value?'filter-chip selected':'filter-chip','aria-pressed':quickFilter===value,onClick:()=>setQuickFilter(value)},label))),
       e('div',{class:'tag-filter'},activeTags(v.header.id).map(tag=>e('button',{key:tag.id,class:selectedTags.includes(tag.id)?'tag-chip selected':'tag-chip',style:{'--tag-color':tag.color},'aria-pressed':selectedTags.includes(tag.id),onClick:()=>setSelectedTags(current=>current.includes(tag.id)?current.filter(id=>id!==tag.id):[...current,tag.id])},tag.name)),
         e('button',{class:'tertiary-button',onClick:()=>setScreen('tags')},'Теги'))),
-    e('details',{class:'notes-secondary-tools'},e('summary',null,e(UiIcon,{name:'more',size:18}),'Хранилище и дополнительные действия'),
+    e('details',{class:'notes-secondary-tools notes-desktop-more'},e('summary',null,e(UiIcon,{name:'more',size:18}),'Хранилище и дополнительные действия'),
       e('div',{class:'planner-tools'},e('button',{disabled:busy,onClick:()=>form('create')},e(UiIcon,{name:'plus',size:17}),'Новое хранилище'),
         e('button',{disabled:!v?.key,onClick:()=>{setQuery('');setSelectedTags([]);setScreen('archive');}},e(UiIcon,{name:'archive',size:17}),'Архив'+(v?.key?' · '+heads(v).filter(r=>notes[r.id]&&statusOf(v,r,notes[r.id])==='archived').length:'')),
         e('button',{disabled:!v?.key,onClick:()=>{setQuery('');setSelectedTags([]);setScreen('trash');}},e(UiIcon,{name:'trash',size:17}),'Корзина'+(v?.key?' · '+heads(v).filter(r=>notes[r.id]&&statusOf(v,r,notes[r.id])==='trashed'&&!v.purgePending?.includes(r.objectId)).length:'')),
         e('button',{onClick:()=>setScreen('stash')},'Отложенные · '+(state?.stash.length??0)),
         e('button',{onClick:()=>{setName(state?.deviceName??'Устройство');setScreen('device');}},e(UiIcon,{name:'devices',size:17}),state?.deviceName??'Устройство'))),
-    v&&!v.deleted&&e('div',{class:'vault-security'},
+    v&&!v.deleted&&e('div',{class:'vault-security notes-desktop-security'},
       e('h2',null,'Разблокировка'),
       v.systemUnlock
         ? e('div',null,
@@ -949,7 +990,7 @@ export function Planner({ user,section='notes',initialScreen='list',reminderTarg
       e('button',{onClick:()=>{if(confirm('Удалить эти локальные версии с устройства без возможности восстановления?'))void run(()=>discardPurgedObjects(user,v.header.id));}},'Удалить локальные версии'))),
     !active.length && e('div', { class: 'empty-state' }, e('h2', null, 'Пока нет хранилищ'), e('p', null, 'Создайте первое хранилище и задайте его фразу.')),
     v && !v.deleted && (!v.key ? e('button', { class: 'primary', onClick: () => void activateVault(selected) }, 'Открыть хранилище') : e('div', null,
-      e('div', { class: 'actions' }, e('button', { disabled: busy || Boolean(v.transfer), onClick: () => void run(() => closeVault(user, selected)) }, 'Закрыть хранилище'),
+      e('div', { class: 'actions vault-lifecycle-actions' }, e('button', { disabled: busy || Boolean(v.transfer), onClick: () => void run(() => closeVault(user, selected)) }, 'Закрыть хранилище'),
         e('button', { disabled: busy || Boolean(v.transfer), onClick: () => form('transfer', selected) }, 'Забыл фразу · перенести'),
         e('button',{class:'danger-button',disabled:busy||Boolean(v.transfer),onClick:()=>{
           const label=names[selected]||'это хранилище';
@@ -968,8 +1009,8 @@ export function Planner({ user,section='notes',initialScreen='list',reminderTarg
         tagChips(current.header.id,note!.tagIds).length>0&&e('span',{class:'tag-list'},tagChips(current.header.id,note!.tagIds).map(tag=>e('span',{class:'tag-chip',style:{'--tag-color':tag.color},key:tag.id},tag.name))),
         note!.checklist?.length&&e('small',null,'Чек-лист: '+note!.checklist.filter(item=>item.done).length+' / '+note!.checklist.length),
         note!.reminder&&e('small',null,'Напоминание: '+new Date(note!.reminder.local+'Z').toLocaleString('ru-RU',{timeZone:'UTC'})),
-        e('small',{class:'sync-state '+(r.pending?syncStatus==='syncing'?'syncing':syncStatus==='offline'?'offline':syncStatus==='error'?'error':'local':'synced')},
-          r.pending?syncStatus==='syncing'?'Синхронизация…':syncStatus==='offline'?'Нет подключения':syncStatus==='error'?'Ошибка синхронизации':'Сохранено на устройстве':'Синхронизировано'),
+        r.pending&&e('small',{class:'sync-state '+(syncStatus==='syncing'?'syncing':syncStatus==='offline'?'offline':syncStatus==='error'?'error':'local')},
+          syncStatus==='syncing'?'Синхронизация…':syncStatus==='offline'?'Нет подключения':syncStatus==='error'?'Ошибка синхронизации':'Сохранено на устройстве'),
         heads(current).filter(x => x.objectId === r.objectId).length > 1 && e('small', null, 'Есть другая версия — обе сохранены')),
         e('button',{class:'row-edit-button',disabled:Boolean(current.transfer),onClick:()=>editRevision(current,r),'aria-label':'Редактировать заметку «'+(note!.title||'Без заголовка')+'»'},'Редактировать'))),
       e('button', { class: 'primary note-fab', disabled: busy || Boolean(v.transfer), onClick: () => { if (v.key) showDraft({ vault: selected, object: crypto.randomUUID(), revision: null, title: '', text: '', dirty: false, key: v.key }); } }, '+ Новая заметка'))), feedback);
