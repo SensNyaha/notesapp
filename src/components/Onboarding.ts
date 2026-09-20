@@ -8,7 +8,7 @@ export function Onboarding({onDone}:{onDone:()=>void}){
   const benefits=[
     {icon:'notes' as const,title:'Всё в одном месте',text:'Заметки, напоминания, задачи и проекты связаны между собой.'},
     {icon:'wifi-off' as const,title:'Работает офлайн',text:'Продолжайте работу без сети — изменения дождутся синхронизации.'},
-    {icon:'lock' as const,title:'E2EE по умолчанию',text:'Содержимое хранилищ шифруется на устройстве и не раскрывается серверу.'},
+    {icon:'lock' as const,title:'Шифрование по умолчанию',text:'Содержимое хранилищ шифруется на устройстве и не раскрывается серверу.'},
   ];
   return e('main',{class:'onboarding-screen'},
     e('button',{class:'onboarding-skip text-button',onClick:onDone},'Пропустить'),

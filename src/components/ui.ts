@@ -1,6 +1,6 @@
 import { h as e, type ComponentChildren } from 'preact';
 
-export type UiIconName='notes'|'today'|'projects'|'settings'|'logout'|'search'|'plus'|'sync'|'chevron-right'|'back'|'user'|'bell'|'devices'|'key'|'archive'|'trash'|'contacts'|'database'|'diagnostics'|'users'|'info'|'palette'|'lock'|'more'|'check'|'warning'|'wifi-off'|'folder'|'calendar'|'menu'|'file'|'download'|'edit'|'image'|'upload';
+export type UiIconName='notes'|'today'|'projects'|'settings'|'logout'|'search'|'filter-dropdown'|'plus'|'sync'|'chevron-right'|'back'|'user'|'bell'|'devices'|'key'|'archive'|'trash'|'contacts'|'database'|'diagnostics'|'users'|'info'|'palette'|'lock'|'more'|'check'|'warning'|'wifi-off'|'folder'|'calendar'|'menu'|'file'|'paperclip'|'download'|'edit'|'image'|'upload'|'pin'|'copy'|'history'|'tag';
 
 export function UiIcon({name,size=20}:{name:UiIconName;size?:number}){
   const common={width:size,height:size,viewBox:'0 0 24 24',fill:'none',stroke:'currentColor','stroke-width':1.8,'stroke-linecap':'round','stroke-linejoin':'round','aria-hidden':'true'} as const;
@@ -8,9 +8,12 @@ export function UiIcon({name,size=20}:{name:UiIconName;size?:number}){
   if(name==='notes')return e('svg',common,p('M6 3.5h9l3 3V20.5H6z'),p('M15 3.5v4h4'),p('M9 11h6M9 15h6'));
   if(name==='today'||name==='calendar')return e('svg',common,e('rect',{x:3.5,y:5.5,width:17,height:15,rx:2}),p('M7 3.5v4M17 3.5v4M3.5 9.5h17'),name==='today'&&p('M8.5 13h3v3h-3z'));
   if(name==='projects'||name==='folder')return e('svg',common,p('M3.5 7h6l2-2h9v14.5h-17z'),p('M3.5 9.5h17'));
-  if(name==='settings')return e('svg',common,e('circle',{cx:12,cy:12,r:3}),e('path',{d:'M19 13.5v-3l-2-.6a7 7 0 0 0-.7-1.6l1-1.9-2.1-2.1-1.9 1a7 7 0 0 0-1.6-.7L11 2H8l-.6 2a7 7 0 0 0-1.6.7l-1.9-1-2.1 2.1 1 1.9a7 7 0 0 0-.7 1.6L0 10v3l2 .6a7 7 0 0 0 .7 1.6l-1 1.9 2.1 2.1 1.9-1a7 7 0 0 0 1.6.7l.6 2h3l.6-2a7 7 0 0 0 1.6-.7l1.9 1 2.1-2.1-1-1.9a7 7 0 0 0 .7-1.6z',transform:'translate(1 0) scale(.92)'}));
+  if(name==='settings')return e('svg',common,
+    e('circle',{cx:12,cy:12,r:3}),e('circle',{cx:12,cy:12,r:7}),
+    p('M12 2.5v2.5M12 19v2.5M2.5 12H5M19 12h2.5M5.3 5.3l1.8 1.8M16.9 16.9l1.8 1.8M18.7 5.3l-1.8 1.8M7.1 16.9l-1.8 1.8'));
   if(name==='logout')return e('svg',common,p('M10 5H5v14h5M14 8l4 4-4 4M8 12h10'));
   if(name==='search')return e('svg',common,e('circle',{cx:10.5,cy:10.5,r:6}),p('m15 15 4.5 4.5'));
+  if(name==='filter-dropdown')return e('svg',common,p('M3 5h13l-5 6v5l-3 1.5V11L3 5Z'),p('m16.5 11 2.5 2.5 2.5-2.5'));
   if(name==='plus')return e('svg',common,p('M12 5v14M5 12h14'));
   if(name==='sync')return e('svg',common,p('M20 7v5h-5'),p('M4 17v-5h5'),p('M6.1 8A7 7 0 0 1 18 6l2 1M18 16a7 7 0 0 1-11.9.1L4 17'));
   if(name==='chevron-right')return e('svg',common,p('m9 6 6 6-6 6'));
@@ -30,18 +33,23 @@ export function UiIcon({name,size=20}:{name:UiIconName;size?:number}){
   if(name==='lock')return e('svg',common,e('rect',{x:5,y:10,width:14,height:10,rx:2}),p('M8 10V7a4 4 0 0 1 8 0v3'));
   if(name==='more')return e('svg',common,e('circle',{cx:5,cy:12,r:1}),e('circle',{cx:12,cy:12,r:1}),e('circle',{cx:19,cy:12,r:1}));
   if(name==='check')return e('svg',common,p('m5 12 4 4L19 6'));
-  if(name==='warning')return e('svg',common,p('M12 3 2.8 19h18.4L12 3Z'),p('M12 9v4M12 16h.01'));
+  if(name==='warning')return e('svg',common,e('circle',{cx:12,cy:12,r:9}),p('M12 7v6'),p('M12 17h.01'));
   if(name==='wifi-off')return e('svg',common,p('M2 8a15 15 0 0 1 17.5-1.2M5 12a10 10 0 0 1 9.8-1.8M8.5 15.5a5 5 0 0 1 2.8-.5'),p('M3 3l18 18'),e('circle',{cx:12,cy:19,r:1}));
   if(name==='file')return e('svg',common,p('M6 3.5h8l4 4v13H6z'),p('M14 3.5v4h4'));
+  if(name==='paperclip')return e('svg',common,p('m9.5 12.5 5.7-5.7a3 3 0 0 1 4.2 4.2l-7.8 7.8a5 5 0 0 1-7.1-7.1l7.6-7.6'),p('m8 15 7.7-7.7'));
   if(name==='download')return e('svg',common,p('M12 3v12M7 10l5 5 5-5'),p('M5 20h14'));
   if(name==='edit')return e('svg',common,p('M4 20h4l11-11-4-4L4 16z'),p('m13.5 6.5 4 4'));
   if(name==='image')return e('svg',common,e('rect',{x:3.5,y:4,width:17,height:16,rx:2}),e('circle',{cx:9,cy:9,r:1.5}),p('m5 18 4.5-4.5 3 3 2-2 4.5 3.5'));
   if(name==='upload')return e('svg',common,p('M12 21V9M7 14l5-5 5 5'),p('M5 4h14'));
+  if(name==='pin')return e('svg',common,p('M8 4h8l-1 5 3 3H6l3-3-1-5Z'),p('M12 12v9'));
+  if(name==='copy')return e('svg',common,e('rect',{x:8,y:8,width:11,height:12,rx:2}),p('M16 8V6a2 2 0 0 0-2-2H6a2 2 0 0 0-2 2v9a2 2 0 0 0 2 2h2'));
+  if(name==='history')return e('svg',common,p('M4 5v5h5'),p('M5.5 9A8 8 0 1 1 4 14'),p('M12 8v5l3 2'));
+  if(name==='tag')return e('svg',common,p('M3 12V5a2 2 0 0 1 2-2h7l9 9-9 9-9-9Z'),e('circle',{cx:8,cy:8,r:1.2}));
   return e('svg',common,p('M4 6h16M4 12h16M4 18h16'));
 }
 
 export function BackButton({onClick,label='Назад'}:{onClick:()=>void;label?:string}){
-  return e('button',{type:'button',class:'ui-back',onClick},e(UiIcon,{name:'back'}),e('span',null,label));
+  return e('button',{type:'button',class:'ui-back',onClick,'aria-label':label,title:label},e(UiIcon,{name:'back'}));
 }
 
 export function PageHeader({eyebrow,title,description,actions,back}:{eyebrow?:string;title:string;description?:string;actions?:ComponentChildren;back?:()=>void}){
@@ -49,9 +57,16 @@ export function PageHeader({eyebrow,title,description,actions,back}:{eyebrow?:st
     e('div',{class:'ui-page-heading'},
       back&&e(BackButton,{onClick:back}),
       eyebrow&&e('p',{class:'eyebrow'},eyebrow),
-      e('h1',null,title),
-      description&&e('p',{class:'ui-page-description'},description)),
-    actions&&e('div',{class:'ui-page-actions'},actions));
+      e('h1',null,title)),
+    actions&&e('div',{class:'ui-page-actions'},actions),
+    description&&e('p',{class:'ui-page-description'},description));
+}
+
+export function InfoTip({children,label='Информация',textLabel,tone='info'}:{children?:ComponentChildren;label?:string;textLabel?:string;tone?:'info'|'warning'}){
+  return e('details',{class:`compact-info-tip app-popover ${tone}`},
+    e('summary',{class:textLabel?'tertiary-button':'icon-button','aria-label':label,title:label},
+      e(UiIcon,{name:'info',size:18}),textLabel),
+    e('div',{class:'context-tip-panel'},children));
 }
 
 export function SectionHeader({title,description,action}:{title:string;description?:string;action?:ComponentChildren}){

@@ -4,12 +4,12 @@ import type { User } from '../types/auth';
 import { edit } from '../planner';
 import { pushRequest, enablePush, disablePush } from '../push';
 import { reminderRequest, type ReminderSettings } from '../reminders';
-import { PageHeader,StatusDot,UiIcon } from './ui.ts';
+import { InfoTip,PageHeader,StatusDot,UiIcon } from './ui.ts';
 
 const statusText:Record<string,string>={scheduled:'Ожидает отправки',sending:'Отправляется',accepted:'Принято push-службой',
   expired:'Тест устарел и отменён',failed:'Push-служба отклонила отправку',unknown:'Результат отправки неизвестен. Проверьте телефон перед повтором.'};
 
-export function Notifications({user}:{user:User}){
+export function Notifications({user,onBack}:{user:User;onBack:()=>void}){
   const [device,setDevice]=useState(''),[name,setName]=useState('Это устройство');
   const [config,setConfig]=useState<{enabled:boolean;publicKey:string|null}>();
   const [permission,setPermission]=useState<string>(()=>'Notification'in window?Notification.permission:'unsupported'),[active,setActive]=useState(false),[browserActive,setBrowserActive]=useState(false);
@@ -55,7 +55,7 @@ export function Notifications({user}:{user:User}){
   const subscriptionText=!checked?'Нет актуальной проверки':active&&browserActive?'Активна':active||browserActive?'Требует переподключения':'Неактивна';
 
   return e('main',{class:'settings-screen notifications-screen'},
-    e(PageHeader,{eyebrow:'Настройки',title:'Уведомления и часовой пояс',description:'Push для этого устройства и повторы непросмотренных напоминаний.'}),
+    e(PageHeader,{eyebrow:'Настройки',title:'Уведомления и часовой пояс',description:'Push для этого устройства и повторы непросмотренных напоминаний.',back:onBack}),
     !standalone&&e('section',{class:'install-panel'},
       e('span',{class:'install-panel-icon'},e(UiIcon,{name:'bell',size:22})),
       e('div',null,e('strong',null,'Установите Tasks для надёжных push'),
@@ -70,7 +70,7 @@ export function Notifications({user}:{user:User}){
         e('div',null,e('span',null,'Разрешение'),e('strong',null,permissionText)),
         e('div',null,e('span',null,'Подписка'),e('strong',null,subscriptionText))),
       (!supported||(iphone&&!standalone))&&e('div',{class:'inline-alert warning'},e(UiIcon,{name:'warning',size:18}),e('span',null,'На iPhone push доступен из установленной PWA. В браузере проверьте поддержку Notification API.')),
-      config&&!config.enabled&&e('div',{class:'inline-alert info'},e(UiIcon,{name:'info',size:18}),e('span',null,'Сервер работает без реальной push-конфигурации. Для доставки нужен HTTPS-режим с Web Push.')),
+      config&&!config.enabled&&e(InfoTip,{label:'О настройке push'},'Сервер работает без реальной push-конфигурации. Для доставки нужен HTTPS-режим с Web Push.'),
       permission==='denied'&&e('div',{class:'inline-alert warning'},e(UiIcon,{name:'warning',size:18}),e('span',null,'Разрешение запрещено на уровне устройства или браузера. Измените его в системных настройках и повторите проверку.')),
       error&&e('div',{class:'inline-alert danger',role:'alert'},e(UiIcon,{name:'warning',size:18}),error),
       notice&&e('div',{class:'inline-alert success',role:'status'},e(UiIcon,{name:'check',size:18}),notice),

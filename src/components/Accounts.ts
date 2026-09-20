@@ -36,7 +36,7 @@ export function PasswordScreen({user,onDone,onBack,onLogout,onRefresh}:{user:Use
     event.preventDefault();if(busy)return;if(password!==repeat){setError('Пароли не совпадают.');return;}setBusy(true);setError('');
     try{
       const collaboration=await prepareCollaborationPasswordChange(user,currentPassword,password);
-      if(collaboration.recoveryRequired&&!user.mustChangePassword)throw Error('Не удалось открыть E2EE-ключ совместной работы. Сначала разблокируйте его системно или текущим паролем.');
+      if(collaboration.recoveryRequired&&!user.mustChangePassword)throw Error('Не удалось открыть ключ шифрования совместной работы. Сначала разблокируйте его системно или текущим паролем.');
       const collaborationRewrap=collaboration.rewrap?{identityVersion:collaboration.rewrap.version,passwordWrapper:collaboration.rewrap.wrapper}:undefined;
       const result=await accountRequest('change-password',{currentPassword,password,repeatPassword:repeat,revokeOthers,...(collaborationRewrap?{collaborationRewrap}:{})});
       if(!isUser(result.user))throw new Error('response');if(collaboration.recoveryRequired)await markCollaborationRecoveryRequired(user.id);

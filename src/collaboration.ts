@@ -21,7 +21,7 @@ export class ContactKeyChanged extends Error{userId:string;previous:string;curre
 export interface PublicIdentity{version:number;publicKey:CollaborationPublicKey;fingerprint:string}
 export interface ContactInfo{id:string;login:string;createdAt?:number;identity:PublicIdentity|null}
 export interface VaultMemberInfo{user:{id:string;login:string};role:'owner'|'editor'|'viewer';joinedAt:number;identity:PublicIdentity|null}
-export interface DecryptedComment{id:string;author:{id:string;login:string};text:string;createdAt:number;updatedAt:number;keyEpoch:number}
+export interface DecryptedComment{id:string;author:{id:string;login:string};text:string;html?:string;createdAt:number;updatedAt:number;keyEpoch:number}
 
 async function csrf(){
   const r=await fetch('/api/auth/csrf',{cache:'no-store',credentials:'same-origin',signal:AbortSignal.timeout(10_000)}),v=await r.json();
@@ -208,22 +208,27 @@ export async function loadComments(user:User,vaultId:string,objectId:string):Pro
   const state=await readState(user.id),v=state?.vaults.find(x=>x.header.id===vaultId);if(!v?.key)throw Error('Откройте хранилище.');
   const rows=(await collaborationRequest(user.id,'comments/'+vaultId+'/'+objectId,undefined,[vaultId])).comments as any[],result:DecryptedComment[]=[];
   for(const row of rows){const key=(row.keyEpoch??0)===0?(v.key??getVaultEpochKey(user.id,vaultId,0)):getVaultEpochKey(user.id,vaultId,row.keyEpoch);if(!key)throw Error('Ключ старого комментария недоступен.');
-    const value=await unseal(key,commentContext(user.id,v,objectId,row.id),null,row.payload) as any;if(!value||value.kind!=='note-comment-v1'||typeof value.text!=='string')throw Error('Повреждён комментарий');
-    result.push({id:row.id,author:row.author,text:value.text,createdAt:row.createdAt,updatedAt:row.updatedAt,keyEpoch:row.keyEpoch});}
+    const value=await unseal(key,commentContext(user.id,v,objectId,row.id),null,row.payload) as any;if(!value||value.kind!=='note-comment-v1'||typeof value.text!=='string'||value.html!==undefined&&typeof value.html!=='string')throw Error('Повреждён комментарий');
+    result.push({id:row.id,author:row.author,text:value.text,...(value.html?{html:value.html}:{}),createdAt:row.createdAt,updatedAt:row.updatedAt,keyEpoch:row.keyEpoch});}
   return result;
 }
-export async function createComment(user:User,vaultId:string,objectId:string,text:string){
+function commentContent(text:string,html?:string){
   const clean=text.trim();if(!clean||clean.length>4000)throw Error('Комментарий: от 1 до 4000 символов.');
+  const rich=html?.trim();if(rich&&rich.length>24_000)throw Error('Форматирование комментария слишком объёмное.');
+  return{kind:'note-comment-v1',text:clean,...(rich?{html:rich}:{})};
+}
+export async function createComment(user:User,vaultId:string,objectId:string,text:string,html?:string){
+  const content=commentContent(text,html);
   const state=await readState(user.id),v=state?.vaults.find(x=>x.header.id===vaultId);if(!v?.key)throw Error('Откройте хранилище.');
   const keyEpoch=v.keyring?.currentEpoch??0,key=keyEpoch===0?(v.key??getVaultEpochKey(user.id,vaultId,0)):getVaultEpochKey(user.id,vaultId,keyEpoch);if(!key)throw Error('Актуальный ключ недоступен.');
-  const id=crypto.randomUUID(),payload=await seal(key,commentContext(user.id,v,objectId,id),null,{kind:'note-comment-v1',text:clean});
+  const id=crypto.randomUUID(),payload=await seal(key,commentContext(user.id,v,objectId,id),null,content);
   return collaborationRequest(user.id,'comments/create',{id,vaultId,objectId,keyEpoch,payload},[vaultId]);
 }
-export async function updateComment(user:User,vaultId:string,objectId:string,id:string,text:string){
-  const clean=text.trim();if(!clean||clean.length>4000)throw Error('Комментарий: от 1 до 4000 символов.');
+export async function updateComment(user:User,vaultId:string,objectId:string,id:string,text:string,html?:string){
+  const content=commentContent(text,html);
   const state=await readState(user.id),v=state?.vaults.find(x=>x.header.id===vaultId);if(!v?.key)throw Error('Откройте хранилище.');
   const keyEpoch=v.keyring?.currentEpoch??0,key=keyEpoch===0?(v.key??getVaultEpochKey(user.id,vaultId,0)):getVaultEpochKey(user.id,vaultId,keyEpoch);if(!key)throw Error('Актуальный ключ недоступен.');
-  const payload=await seal(key,commentContext(user.id,v,objectId,id),null,{kind:'note-comment-v1',text:clean});
+  const payload=await seal(key,commentContext(user.id,v,objectId,id),null,content);
   return collaborationRequest(user.id,'comments/update',{id,vaultId,keyEpoch,payload},[vaultId]);
 }
 export const deleteComment=(user:User,vaultId:string,id:string)=>collaborationRequest(user.id,'comments/delete',{id,vaultId,confirmed:true},[vaultId]);

@@ -3,7 +3,7 @@ import { useEffect, useRef, useState } from 'preact/hooks';
 import type { User } from '../types/auth.ts';
 import { changes, readState, type State } from '../storage.ts';
 import {
-  createProject,createTask,deleteProject,entityKind,movePlannerObject,readProjectWorkspace,readTags,rescheduleTasks,setProjectArchived,synchronize,
+  createProject,createTag,createTask,deleteProject,deleteTag,entityKind,movePlannerObject,readProjectWorkspace,readTags,renameTag,rescheduleTasks,setProjectArchived,synchronize,
   updateProject,updateTask,vaultName,type ChecklistItem,type GanttCalendar,type Note,type ProjectWorkspace,type TagDefinition,type TaskDependency,type TaskDependencyType,type TaskPriority,type TaskReminderAnchor,type TaskStatus,type WorkspaceItem
 } from '../planner.ts';
 import { cascadeSchedule,dependencyConflicts,type ScheduleChange } from '../gantt.ts';
@@ -11,6 +11,9 @@ import { GanttView,type GanttDateChange } from './Gantt.ts';
 import { PageHeader,UiIcon } from './ui.ts';
 import { sharedVaultMembers,type VaultMemberInfo } from '../collaboration.ts';
 import type { ReminderPlan } from '../../shared/reminders.mjs';
+import { appConfirm } from './AppDialog.ts';
+import { TagPicker } from './TagPicker.ts';
+import type { ShellVaultContext } from './AppShell.ts';
 
 type ProjectFilter='active'|'all'|'favorite'|'archive';
 type ProjectTab='overview'|'tasks'|'notes'|'files';
@@ -34,7 +37,7 @@ const taskOf=(item:WorkspaceItem)=>item.value.task!;
 const byTitle=(a:WorkspaceItem,b:WorkspaceItem)=>a.value.title.localeCompare(b.value.title,'ru');
 const cleanProjectId=(value:string)=>value||undefined;
 
-export function ProjectsScreen({user,onBack}:{user:User;onBack:()=>void}){
+export function ProjectsScreen({user,onBack,onVaultContextChange}:{user:User;onBack:()=>void;onVaultContextChange?:(context:ShellVaultContext|null)=>void}){
   const [state,setState]=useState<State>();
   const [names,setNames]=useState<Record<string,string>>({});
   const [selectedVault,setSelectedVault]=useState('');
@@ -42,7 +45,7 @@ export function ProjectsScreen({user,onBack}:{user:User;onBack:()=>void}){
   const [workspace,setWorkspace]=useState<ProjectWorkspace>();
   const [tags,setTags]=useState<TagDefinition[]>([]);
   const [members,setMembers]=useState<VaultMemberInfo[]>([]);
-  const [screen,setScreen]=useState<'projects'|'project-form'|'project'|'task-form'>('projects');
+  const [screen,setScreen]=useState<'projects'|'project-form'|'project'|'task-form'|'tags'>('projects');
   const [selectedProject,setSelectedProject]=useState('');
   const [tab,setTab]=useState<ProjectTab>('overview');
   const [projectFilter,setProjectFilter]=useState<ProjectFilter>('active');
@@ -59,6 +62,7 @@ export function ProjectsScreen({user,onBack}:{user:User;onBack:()=>void}){
   const [taskProject,setTaskProject]=useState(''),[taskStatus,setTaskStatus]=useState<TaskStatus>('todo'),[taskPriority,setTaskPriority]=useState<TaskPriority>('none');
   const [taskStart,setTaskStart]=useState(''),[taskEnd,setTaskEnd]=useState(''),[taskAssignee,setTaskAssignee]=useState('');
   const [taskChecklist,setTaskChecklist]=useState<ChecklistItem[]>([]),[taskTags,setTaskTags]=useState<string[]>([]);
+  const [tagName,setTagName]=useState(''),[tagColor,setTagColor]=useState('#356AE6'),[editingTag,setEditingTag]=useState('');
   const [taskDependencies,setTaskDependencies]=useState<TaskDependency[]>([]);
   const [taskView,setTaskView]=useState<TaskView>('list'),[impact,setImpact]=useState<ImpactState|null>(null);
   const impactActions=useRef<{only:()=>Promise<void>;chain:()=>Promise<void>}>();
@@ -194,8 +198,16 @@ export function ProjectsScreen({user,onBack}:{user:User;onBack:()=>void}){
   async function chooseVault(vid:string){
     setSelectedVault(vid);setSelectedProject('');setScreen('projects');setTab('overview');setError('');await load(vid);
   }
-  const feedback=e('div',null,error&&e('p',{class:'error',role:'alert'},error),status&&e('p',{class:'auth-notice',role:'status'},status));
+  const feedback=e('div',null,error&&e('p',{class:'error',role:'alert'},error),status&&status!=='Синхронизировано.'&&e('p',{class:'auth-notice',role:'status'},status));
   const openedVaults=state?.vaults.filter(v=>!v.deleted&&!v.transfer&&Boolean(v.key))??[];
+  const shellVaultOptions=openedVaults.map(item=>({value:item.header.id,label:names[item.header.id]||'Хранилище'}));
+  const shellVaultSignature=shellVaultOptions.map(item=>item.value+'\u0000'+item.label).join('\u0001');
+  useEffect(()=>{
+    if(!onVaultContextChange)return;
+    if(!shellVaultOptions.length){onVaultContextChange(null);return;}
+    onVaultContextChange({value:selectedVault,options:shellVaultOptions,onChange:value=>void chooseVault(value)});
+    return()=>onVaultContextChange(null);
+  },[onVaultContextChange,selectedVault,shellVaultSignature]);
   const taskTitleById=new Map((workspace?.tasks??[]).map(item=>[item.revision.objectId,item.value.title]));
   const reminderShiftCount=impact?.changes.filter(change=>{const item=(workspace?.tasks??[]).find(row=>row.revision.objectId===change.id);return Boolean(item?.value.reminder&&item.value.task?.reminderAnchor);}).length??0;
   const impactNode=impact&&e('div',{class:'modal-backdrop',role:'presentation'},
@@ -213,11 +225,11 @@ export function ProjectsScreen({user,onBack}:{user:User;onBack:()=>void}){
         e('button',{disabled:busy,onClick:()=>void applyImpact('only')},'Только эту задачу'),
         e('button',{disabled:busy,onClick:()=>{impactActions.current=undefined;setImpact(null);}},'Отмена'))));
   if(!openedVaults.length)return e('main',{class:'projects-screen'},
-    e(PageHeader,{eyebrow:'Проекты',title:'Проекты',description:'Задачи, сроки и планирование внутри E2EE-хранилищ.'}),
-    e('div',{class:'empty-state card'},e(UiIcon,{name:'folder',size:32}),e('h2',null,'Сначала откройте хранилище'),e('p',null,'Проекты принадлежат конкретному E2EE-хранилищу. Откройте его в разделе «Заметки», затем вернитесь сюда.')),feedback);
+    e(PageHeader,{eyebrow:'Проекты',title:'Проекты',description:'Задачи, сроки и планирование внутри зашифрованных хранилищ.'}),
+    e('div',{class:'empty-state card'},e(UiIcon,{name:'folder',size:32}),e('h2',null,'Сначала откройте хранилище'),e('p',null,'Проекты принадлежат конкретному хранилищу. Откройте его в разделе «Заметки», затем вернитесь сюда.')),feedback);
 
   if(screen==='project-form')return e('main',{class:'projects-screen'},
-    e(PageHeader,{eyebrow:'Проект',title:editingProject?'Редактировать проект':'Новый проект',description:'Название, сроки и правила календаря остаются внутри E2EE-записи.',back:()=>setScreen(editingProject?'project':'projects')}),
+    e(PageHeader,{eyebrow:'Проект',title:editingProject?'Редактировать проект':'Новый проект',description:'Название, сроки и правила календаря хранятся в зашифрованном виде.',back:()=>setScreen(editingProject?'project':'projects')}),
     e('section',{class:'card project-form'},
       e('form',{onSubmit:submitProject},
         e('label',null,'Название',e('input',{required:true,maxLength:200,value:projectTitle,onInput:(ev:Event)=>setProjectTitle((ev.target as HTMLInputElement).value)})),
@@ -234,6 +246,17 @@ export function ProjectsScreen({user,onBack}:{user:User;onBack:()=>void}){
           e('select',{value:template,onChange:(ev:Event)=>setTemplate((ev.target as HTMLSelectElement).value)},
             e('option',{value:''},'Пустой проект'),templates.map(item=>e('option',{key:item.id,value:item.id},item.name)))),
         e('button',{class:'primary',disabled:busy},busy?'Сохраняем…':editingProject?'Сохранить':'Создать проект'))),feedback);
+
+  if(screen==='tags')return e('main',{class:'projects-screen tag-manager'},
+    e(PageHeader,{eyebrow:'Организация',title:'Теги хранилища',description:'Названия и цвета тегов хранятся в зашифрованном виде. Удаление тега не удаляет задачи и заметки.',back:()=>{setEditingTag('');setTagName('');setScreen('task-form');}}),
+    e('form',{class:'tag-form',onSubmit:(event:Event)=>{event.preventDefault();void run(async()=>{if(editingTag)await renameTag(user,selectedVault,editingTag,tagName,tagColor);else await createTag(user,selectedVault,tagName,tagColor);setTagName('');setEditingTag('');});}},
+      e('label',null,editingTag?'Название тега':'Новый тег',e('input',{required:true,maxLength:60,value:tagName,onInput:(event:Event)=>setTagName((event.target as HTMLInputElement).value)})),
+      e('label',null,'Цвет',e('input',{type:'color',value:tagColor,onInput:(event:Event)=>setTagColor((event.target as HTMLInputElement).value)})),
+      e('button',{class:'primary',disabled:busy},editingTag?'Сохранить':'Добавить'),editingTag&&e('button',{type:'button',onClick:()=>{setEditingTag('');setTagName('');}},'Отмена')),
+    tags.map(tag=>{const count=[...(workspace?.tasks??[]),...(workspace?.notes??[])].filter(item=>(item.value.tagIds??[]).includes(tag.id)).length;return e('div',{class:'tag-manage-row',key:tag.id},
+      e('span',{class:'tag-chip',style:{'--tag-color':tag.color}},tag.name),e('small',null,count+' объектов'),
+      e('button',{onClick:()=>{setEditingTag(tag.id);setTagName(tag.name);setTagColor(tag.color);}},'Изменить'),
+      e('button',{class:'icon-danger',onClick:async()=>{if(await appConfirm('Задачи и заметки останутся на месте.',{title:'Удалить тег «'+tag.name+'»?',confirmLabel:'Удалить',danger:true}))void run(async()=>{await deleteTag(user,selectedVault,tag.id);setTaskTags(current=>current.filter(id=>id!==tag.id));});}},'Удалить'));}),feedback);
 
   if(screen==='task-form')return e('main',{class:'projects-screen'},
     e(PageHeader,{eyebrow:'Задача',title:editingTask?'Редактировать задачу':'Новая задача',description:'Сроки, статус, зависимости и напоминание задачи.',back:()=>setScreen('project')}),
@@ -256,7 +279,7 @@ export function ProjectsScreen({user,onBack}:{user:User;onBack:()=>void}){
           taskAssignee&&!members.some(item=>item.user.id===taskAssignee)&&e('option',{value:taskAssignee},'Участник больше не имеет доступа'),
           members.map(item=>e('option',{key:item.user.id,value:item.user.id},item.user.login+' · '+(item.role==='owner'?'владелец':item.role==='editor'?'редактор':'просмотр'))))),
         e('fieldset',{class:'task-dependencies'},e('legend',null,'Зависимости'),
-          e('p',{class:'hint'},'Предшественники хранятся внутри E2EE-задачи. Циклические связи не сохраняются. Положительный лаг добавляет дни после контрольной точки, отрицательный — допускает перекрытие.'),
+          e('p',{class:'hint'},'Предшественники хранятся внутри зашифрованной задачи. Циклические связи не сохраняются. Положительный лаг добавляет дни после контрольной точки, отрицательный — допускает перекрытие.'),
           taskDependencies.map((dep,index)=>e('div',{class:'dependency-row',key:dep.taskId+'-'+index},
             e('select',{value:dep.taskId,'aria-label':'Предшественник',onChange:(ev:Event)=>setTaskDependencies(current=>current.map((item,i)=>i===index?{...item,taskId:(ev.target as HTMLSelectElement).value}:item))},
               dependencyCandidates.map(item=>e('option',{key:item.revision.objectId,value:item.revision.objectId},item.value.title))),
@@ -275,9 +298,7 @@ export function ProjectsScreen({user,onBack}:{user:User;onBack:()=>void}){
             e('input',{value:item.text,maxLength:1000,placeholder:'Пункт чек-листа',onInput:(ev:Event)=>setTaskChecklist(current=>current.map(row=>row.id===item.id?{...row,text:(ev.target as HTMLInputElement).value}:row))}),
             e('button',{type:'button',class:'icon-danger',onClick:()=>setTaskChecklist(current=>current.filter(row=>row.id!==item.id))},'Удалить'))),
           e('button',{type:'button',onClick:()=>setTaskChecklist(current=>[...current,{id:crypto.randomUUID(),text:'',done:false}])},'+ Пункт')),
-        tags.length>0&&e('fieldset',null,e('legend',null,'Теги'),
-          e('div',{class:'tag-filter'},tags.map(tag=>e('label',{class:'tag-choice',key:tag.id,style:{'--tag-color':tag.color}},
-            e('input',{type:'checkbox',checked:taskTags.includes(tag.id),onChange:(ev:Event)=>setTaskTags(current=>(ev.target as HTMLInputElement).checked?[...current,tag.id]:current.filter(id=>id!==tag.id))}),tag.name)))),
+        e('fieldset',{class:'task-tags'},e('legend',null,'Теги'),e(TagPicker,{tags,selectedIds:taskTags,onChange:setTaskTags,onManage:()=>setScreen('tags')})),
         e('fieldset',null,e('legend',null,'Напоминание'),
           e('label',null,'Когда напомнить',e('select',{value:reminderChoice,onChange:(ev:Event)=>setReminderChoice((ev.target as HTMLSelectElement).value as ReminderChoice)},
             e('option',{value:'none'},'Без напоминания'),e('option',{value:'exact'},'Точная дата и время'),
@@ -355,7 +376,7 @@ export function ProjectsScreen({user,onBack}:{user:User;onBack:()=>void}){
       :null;
     const notesNode=tab==='notes'?e('div',{class:'project-note-list'},
       e('div',{class:'section-heading'},e('h2',null,'Заметки проекта'),
-        e('span',{class:'muted'},'Перемещение остаётся внутри этого E2EE-хранилища.')),
+        e('span',{class:'muted'},'Перемещение остаётся внутри этого хранилища.')),
       !notes.length&&e('p',{class:'muted'},'В проекте пока нет заметок.'),
       notes.map(item=>e('article',{class:'note-row',key:item.revision.objectId},
         e('strong',null,item.value.title||'Без заголовка'),
@@ -376,7 +397,7 @@ export function ProjectsScreen({user,onBack}:{user:User;onBack:()=>void}){
       :null;
     const filesNode=tab==='files'?e('div',{class:'project-files'},
       e('h2',null,'Файлы'),
-      e('p',{class:'hint'},'Stage 17 агрегирует существующие малые вложения. Потоковая загрузка и file manager относятся к Stage 18.'),
+      e('p',{class:'hint'},'Вложения из заметок и задач этого проекта.'),
       !files.length&&e('p',{class:'muted'},'В этом проекте пока нет вложений.'),
       files.map(({file,owner,objectId})=>e('article',{class:'attachment-card',key:objectId+'.'+file.id},
         file.type.startsWith('image/')&&e('img',{src:file.data,alt:''}),
@@ -385,20 +406,23 @@ export function ProjectsScreen({user,onBack}:{user:User;onBack:()=>void}){
       :null;
     const actionsNode=selectedProject&&currentProject?e('div',{class:'project-actions'},
       !readOnly&&e('button',{onClick:()=>openProjectForm(currentProject)},'Редактировать проект'),
-      !readOnly&&e('button',{onClick:()=>void run(async()=>{
-        await setProjectArchived(user,selectedVault,selectedProject,currentProject.lifecycle!=='archived');
-        setScreen('projects');setSelectedProject('');
-      })},currentProject.lifecycle==='archived'?'Вернуть из архива':'Архивировать'),
-      !readOnly&&(!vault?.shared||vault.role==='owner')&&e('button',{class:'danger-button',onClick:()=>{
-        if(confirm('Удалить проект «'+currentProject.value.title+'»? Заметки и задачи останутся и перейдут в «Без проекта».'))void run(async()=>{
-          await deleteProject(user,selectedVault,selectedProject,false);setScreen('projects');setSelectedProject('');
-        });
-      }},'Удалить проект'),
-      !readOnly&&(!vault?.shared||vault.role==='owner')&&e('button',{class:'danger-button',onClick:()=>{
-        if(confirm('Удалить проект «'+currentProject.value.title+'» ВМЕСТЕ со всеми его заметками, задачами и вложениями? После синхронизации восстановить их средствами приложения будет невозможно.'))void run(async()=>{
-          await deleteProject(user,selectedVault,selectedProject,true);setScreen('projects');setSelectedProject('');
-        });
-      }},'Удалить проект со всем содержимым'))
+      !readOnly&&e('details',{class:'project-more-actions'},
+        e('summary',null,e(UiIcon,{name:'more',size:18}),'Дополнительно'),
+        e('div',{class:'project-more-panel'},
+          e('button',{onClick:()=>void run(async()=>{
+            await setProjectArchived(user,selectedVault,selectedProject,currentProject.lifecycle!=='archived');
+            setScreen('projects');setSelectedProject('');
+          })},currentProject.lifecycle==='archived'?'Вернуть из архива':'Архивировать'),
+          (!vault?.shared||vault.role==='owner')&&e('button',{class:'danger-button',onClick:async()=>{
+            if(await appConfirm('Заметки и задачи останутся и перейдут в «Без проекта».',{title:'Удалить проект «'+currentProject.value.title+'»?',confirmLabel:'Удалить',danger:true}))void run(async()=>{
+              await deleteProject(user,selectedVault,selectedProject,false);setScreen('projects');setSelectedProject('');
+            });
+          }},'Удалить проект'),
+          (!vault?.shared||vault.role==='owner')&&e('button',{class:'danger-button',onClick:async()=>{
+            if(await appConfirm('После синхронизации восстановить заметки, задачи и вложения средствами приложения будет невозможно.',{title:'Удалить проект «'+currentProject.value.title+'» со всем содержимым?',confirmLabel:'Удалить всё',danger:true}))void run(async()=>{
+              await deleteProject(user,selectedVault,selectedProject,true);setScreen('projects');setSelectedProject('');
+            });
+          }},'Удалить проект со всем содержимым'))))
       :null;
     return e('main',{class:'projects-screen'},
       e(PageHeader,{eyebrow:selectedProject?'Проект':'Системная группа',title:currentProjectName,
@@ -434,12 +458,10 @@ export function ProjectsScreen({user,onBack}:{user:User;onBack:()=>void}){
     .sort((a,b)=>Number(Boolean(b.value.project?.favorite))-Number(Boolean(a.value.project?.favorite))||byTitle(a,b));
   const unassignedTasks=projectTasks(''),unassignedNotes=projectNotes('');
   return e('main',{class:'projects-screen'},
-    e(PageHeader,{eyebrow:'Workspace',title:'Проекты',description:'Организуйте задачи и заметки внутри выбранного E2EE-хранилища.',
+    e(PageHeader,{eyebrow:'Рабочая область',title:'Проекты',description:'Организуйте задачи и заметки внутри выбранного хранилища.',
       actions:!readOnly?e('button',{class:'primary project-create-action',onClick:()=>openProjectForm(),'aria-label':'Новый проект'},e(UiIcon,{name:'plus',size:18}),e('span',null,'Новый проект')):undefined}),
     e('section',{class:'projects-toolbar card'},
       e('div',{class:'projects-mobile-toolbar'},
-        e('label',{class:'projects-mobile-vault'},e('span',{class:'sr-only'},'Хранилище'),e('select',{value:selectedVault,'aria-label':'Хранилище',onChange:(ev:Event)=>void chooseVault((ev.target as HTMLSelectElement).value)},
-          openedVaults.map(v=>e('option',{key:v.header.id,value:v.header.id},names[v.header.id]||'Хранилище')))),
         e('details',{class:'projects-mobile-filter-menu'},
           e('summary',{class:'icon-button','aria-label':'Поиск и фильтры проектов'},e(UiIcon,{name:'search',size:19}),Boolean(normalized||projectFilter!=='active')&&e('span',{class:'mobile-control-dot','aria-hidden':'true'})),
           e('div',{class:'projects-mobile-panel'},
@@ -449,7 +471,7 @@ export function ProjectsScreen({user,onBack}:{user:User;onBack:()=>void}){
       e('label',{class:'vault-project-selector projects-desktop-controls'},e('span',null,'Хранилище'),e('select',{value:selectedVault,onChange:(ev:Event)=>void chooseVault((ev.target as HTMLSelectElement).value)},
         openedVaults.map(v=>e('option',{key:v.header.id,value:v.header.id},names[v.header.id]||'Хранилище')))),
       vault?.shared&&e('p',{class:'hint'},'Совместное хранилище · роль: '+(vault.role==='owner'?'владелец':vault.role==='editor'?'редактор':'просмотр')+
-        '. Названия, статусы, сроки, исполнители и project links остаются внутри E2EE ciphertext.'),
+        '. Данные проекта защищены сквозным шифрованием.'),
       e('div',{class:'organization-tools projects-desktop-controls'},e('label',{class:'search-field'},'Поиск проектов',e('input',{type:'search',value:query,placeholder:'Название или описание',onInput:(ev:Event)=>setQuery((ev.target as HTMLInputElement).value)})),
         e('label',null,'Показывать',e('select',{value:projectFilter,onChange:(ev:Event)=>setProjectFilter((ev.target as HTMLSelectElement).value as ProjectFilter)},
           e('option',{value:'active'},'Активные'),e('option',{value:'all'},'Все'),e('option',{value:'favorite'},'Избранные'),e('option',{value:'archive'},'Архив')))),

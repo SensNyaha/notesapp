@@ -4,12 +4,12 @@ import type { User } from '../types/auth';
 import { readState,changes } from '../storage';
 import { exportVaultSnapshot,importVaultSnapshot,importPortableNote,noteImportIsDuplicate,validateVaultSnapshot,vaultName,synchronize,type PortableVaultSnapshot } from '../planner';
 import { backupFileName,decryptVaultBackup,downloadBytes,encryptVaultBackup,parseNoteImportFile,type PortableNotePackage } from '../portable';
-import { PageHeader,UiIcon } from './ui.ts';
+import { InfoTip,PageHeader,UiIcon } from './ui.ts';
 
 const e=h;
 interface VaultChoice{id:string;name:string;open:boolean}
 
-export function DataTransfer({user}:{user:User}){
+export function DataTransfer({user,onBack}:{user:User;onBack:()=>void}){
   const [vaults,setVaults]=useState<VaultChoice[]>([]);
   const [busy,setBusy]=useState(false),[error,setError]=useState(''),[status,setStatus]=useState('');
   const [exportVault,setExportVault]=useState(''),[backupPassword,setBackupPassword]=useState(''),[backupRepeat,setBackupRepeat]=useState('');
@@ -73,29 +73,29 @@ export function DataTransfer({user}:{user:User}){
   }
 
   return e('main',{class:'settings-screen data-transfer'},
-    e(PageHeader,{eyebrow:'Данные',title:'Импорт, экспорт и восстановление',description:'Пользовательские операции выполняются локально: сервер не получает открытый текст заметок, пароль backup или новую фразу vault.'}),
+    e(PageHeader,{eyebrow:'Данные',title:'Импорт, экспорт и восстановление',description:'Операции выполняются локально: сервер не получает открытый текст заметок, пароль резервной копии или новую фразу хранилища.',back:onBack}),
 
     error&&e('div',{class:'inline-alert danger',role:'alert'},e(UiIcon,{name:'warning',size:18}),error),
     status&&e('div',{class:'inline-alert success',role:'status'},e(UiIcon,{name:'check',size:18}),status),
 
     e('section',{class:'transfer-grid'},
       e('article',{class:'settings-panel transfer-panel'},
-        e('div',{class:'settings-panel-heading'},e('div',null,e('h2',null,'Резервная копия vault'),e('p',null,'Создать зашифрованный .tasks-backup из открытого хранилища.')),e('span',{class:'transfer-icon'},e(UiIcon,{name:'database',size:22}))),
+        e('div',{class:'settings-panel-heading'},e('div',null,e('h2',null,'Резервная копия хранилища'),e('p',null,'Создать зашифрованный файл .tasks-backup из открытого хранилища.')),e('span',{class:'transfer-icon'},e(UiIcon,{name:'database',size:22}))),
         e('div',{class:'form-grid'},
           e('label',null,e('span',null,'Открытое хранилище'),e('select',{value:exportVault,onChange:(ev:Event)=>setExportVault((ev.target as HTMLSelectElement).value)},e('option',{value:''},opened.length?'Выберите хранилище':'Нет открытых хранилищ'),opened.map(item=>e('option',{value:item.id,key:item.id},item.name)))),
-          e('label',null,e('span',null,'Пароль резервной копии'),e('input',{type:'password',autoComplete:'new-password',value:backupPassword,onInput:(ev:Event)=>setBackupPassword((ev.target as HTMLInputElement).value),placeholder:'Отдельный пароль backup'})),
+          e('label',null,e('span',null,'Пароль резервной копии'),e('input',{type:'password',autoComplete:'new-password',value:backupPassword,onInput:(ev:Event)=>setBackupPassword((ev.target as HTMLInputElement).value),placeholder:'Отдельный пароль'})),
           e('label',null,e('span',null,'Повторите пароль'),e('input',{type:'password',autoComplete:'new-password',value:backupRepeat,onInput:(ev:Event)=>setBackupRepeat((ev.target as HTMLInputElement).value)}))),
-        e('div',{class:'form-actions'},e('button',{class:'primary',disabled:busy||!exportVault,onClick:()=>void run(exportBackup)},busy?'Подождите…':'Создать backup')),
-        e('p',{class:'settings-footnote'},'Пароль backup независим от пароля аккаунта и фразы vault. Если формат не может сохранить данные полностью, экспорт останавливается вместо создания неполной копии.')),
+        e('div',{class:'form-actions'},e('button',{class:'primary',disabled:busy||!exportVault,onClick:()=>void run(exportBackup)},busy?'Подождите…':'Создать копию')),
+        e('p',{class:'settings-footnote'},'Пароль копии независим от пароля аккаунта и фразы хранилища. Если данные нельзя сохранить полностью, экспорт остановится вместо создания неполной копии.')),
 
       e('article',{class:'settings-panel transfer-panel'},
-        e('div',{class:'settings-panel-heading'},e('div',null,e('h2',null,'Восстановить backup'),e('p',null,'Проверить файл и создать новый vault без merge/overwrite.')),e('span',{class:'transfer-icon'},e(UiIcon,{name:'archive',size:22}))),
+        e('div',{class:'settings-panel-heading'},e('div',null,e('h2',null,'Восстановить резервную копию'),e('p',null,'Проверить файл и создать новое отдельное хранилище.')),e('span',{class:'transfer-icon'},e(UiIcon,{name:'archive',size:22}))),
         e('div',{class:'form-grid'},e('label',null,e('span',null,'Файл .tasks-backup'),e('input',{type:'file',accept:'.tasks-backup,application/octet-stream',onChange:(ev:Event)=>{setBackupFile((ev.target as HTMLInputElement).files?.[0]);setBackupPreview(undefined);}})),
-          e('label',null,e('span',null,'Пароль backup'),e('input',{type:'password',value:restorePassword,onInput:(ev:Event)=>setRestorePassword((ev.target as HTMLInputElement).value)}))),
+          e('label',null,e('span',null,'Пароль резервной копии'),e('input',{type:'password',value:restorePassword,onInput:(ev:Event)=>setRestorePassword((ev.target as HTMLInputElement).value)}))),
         e('div',{class:'form-actions'},e('button',{class:'secondary-button',disabled:busy||!backupFile,onClick:()=>void run(previewBackup)},'Проверить файл')),
         backupPreview&&e('div',{class:'import-preview'},e('div',{class:'preview-heading'},e('strong',null,backupPreview.name),e('span',{class:'badge accent'},'Проверено')),
           e('div',{class:'preview-stats'},e('span',null,'Объектов ',e('strong',null,String(backupObjects.size))),e('span',null,'Версий ',e('strong',null,String(backupPreview.revisions.length))),e('span',null,'Напоминаний ',e('strong',null,String(backupReminders)))),
-          e('div',{class:'inline-alert info'},e(UiIcon,{name:'info',size:17}),e('span',null,'Импортированные напоминания останутся выключенными до ручной проверки.')),
+          e(InfoTip,{label:'О напоминаниях после импорта'},'Импортированные напоминания останутся выключенными до ручной проверки.'),
           e('div',{class:'form-grid'},e('label',null,e('span',null,'Название нового хранилища'),e('input',{value:restoreName,maxLength:200,onInput:(ev:Event)=>setRestoreName((ev.target as HTMLInputElement).value)})),
             e('label',null,e('span',null,'Новая фраза хранилища'),e('input',{type:'password',autoComplete:'new-password',value:restorePhrase,onInput:(ev:Event)=>setRestorePhrase((ev.target as HTMLInputElement).value)})),
             e('label',null,e('span',null,'Повторите фразу'),e('input',{type:'password',autoComplete:'new-password',value:restoreRepeat,onInput:(ev:Event)=>setRestoreRepeat((ev.target as HTMLInputElement).value)}))),
@@ -111,5 +111,5 @@ export function DataTransfer({user}:{user:User}){
         noteDuplicate&&e('fieldset',{class:'duplicate-choice'},e('legend',null,'Такая Tasks-заметка уже импортировалась'),e('label',{class:'check-row'},e('input',{type:'radio',name:'duplicate',checked:duplicatePolicy==='skip',onChange:()=>setDuplicatePolicy('skip')}),'Пропустить'),e('label',{class:'check-row'},e('input',{type:'radio',name:'duplicate',checked:duplicatePolicy==='copy',onChange:()=>setDuplicatePolicy('copy')}),'Создать ещё одну копию')),
         e('button',{class:'primary',disabled:busy,onClick:()=>void run(importNote)},noteDuplicate&&duplicatePolicy==='skip'?'Пропустить':'Импортировать'))),
 
-    e('div',{class:'info-panel'},e(UiIcon,{name:'info',size:18}),e('p',null,'SQLite backup/restore сервера остаётся административной CLI-операцией. Он не заменяет пользовательский E2EE backup и не восстанавливает неизвестную фразу.')));
+    e(InfoTip,{label:'О резервном копировании'},'Резервное копирование базы сервера остаётся административной операцией. Оно не заменяет пользовательскую зашифрованную копию и не восстанавливает неизвестную фразу.'));
 }

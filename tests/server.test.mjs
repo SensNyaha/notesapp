@@ -29,6 +29,7 @@ test('API reads SQLite; reopening preserves identity and increments boot count',
     assert.equal(html.statusCode, 200);
     assert.match(html.headers['content-type'], /text\/html/);
     assert.match(html.headers['content-security-policy'], /script-src 'self'/);
+    assert.match(html.headers['content-security-policy'], /img-src 'self' blob:/);
     const assets = [...html.body.matchAll(/(?:src|href)="(\/assets\/[^\"]+)"/g)].map(match => match[1]);
     assert(assets.some(path => /-[\w-]+\.js$/.test(path)));
     assert(assets.some(path => /-[\w-]+\.css$/.test(path)));

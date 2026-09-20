@@ -1,7 +1,8 @@
 # syntax=docker/dockerfile:1.7
 FROM node:24-bookworm-slim AS build
 WORKDIR /app
-COPY package.json package-lock.json ./
+COPY package.docker.json package-lock.json ./
+RUN mv package.docker.json package.json
 RUN --mount=type=secret,id=npm_ca,required=false \
     if [ -s /run/secrets/npm_ca ]; then \
       NODE_EXTRA_CA_CERTS=/run/secrets/npm_ca npm ci; \

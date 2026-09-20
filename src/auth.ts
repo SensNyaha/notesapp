@@ -117,7 +117,7 @@ export async function deletePasskey(id: string): Promise<void> { await accountRe
 
 export function authMessage(error: unknown): string {
   const code = error instanceof AuthError ? error.code : 'network';
-  return ({ invalid_credentials: 'Проверьте логин и пароль. Для нового пароля нужны 6–128 символов, цифра, заглавная и строчная буквы.',
+  return ({ invalid_credentials: 'Проверьте логин и пароль.',
     invalid_request: 'Проверьте заполненные поля.', setup_complete: 'Администратор уже создан. Войдите с существующими данными.',
     unauthorized: 'Сеанс завершён. Войдите снова.', admin_required: 'Доступно только администратору.',
     password_change_required: 'Сначала смените временный пароль.',

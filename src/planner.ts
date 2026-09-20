@@ -843,7 +843,8 @@ async function streamedBlob(user:User,vid:string,item:NoteAttachment,kind:'data'
     const cryptoVaultId=item.cryptoVaultId??vid;
     try{for(let index=0;index<count;index++){const plain=await decryptFileChunk(key,cryptoAccount(user.id,v),cryptoVaultId,item.id,kind,index,await getFileChunk(user,vid,item.id,kind,index));await writer.write(plain);}}
     catch(error){await writer.abort().catch(()=>{});await directory.removeEntry(temp).catch(()=>{});throw error;}
-    await writer.close();const file=await handle.getFile();setTimeout(()=>void directory.removeEntry(temp).catch(()=>{}),10*60*1000);return file as Blob;
+    await writer.close();const file=await handle.getFile();setTimeout(()=>void directory.removeEntry(temp).catch(()=>{}),10*60*1000);
+    return file.slice(0,file.size,item.type||'application/octet-stream');
   }
   const cryptoVaultId=item.cryptoVaultId??vid;
   const parts:BlobPart[]=[];for(let index=0;index<count;index++)parts.push(Uint8Array.from(await decryptFileChunk(key,cryptoAccount(user.id,v),cryptoVaultId,item.id,kind,index,await getFileChunk(user,vid,item.id,kind,index))));
@@ -856,7 +857,19 @@ export async function attachmentPlainStream(user:User,vid:string,item:NoteAttach
   async function* chunks(){for(let index=0;index<item.chunks!;index++)yield await decryptFileChunk(key,cryptoAccount(user.id,v),cryptoVaultId,item.id,'data',index,await getFileChunk(user,vid,item.id,'data',index));}
   return{size:item.size,chunks:chunks()};
 }
-export async function attachmentPreviewBlob(user:User,vid:string,item:NoteAttachment){if(item.storage==='stream'&&item.preview)return streamedBlob(user,vid,item,'preview');if(item.type.startsWith('image/'))return attachmentBlob(user,vid,item);return null;}
+export async function attachmentPreviewBlob(user:User,vid:string,item:NoteAttachment){
+  if(!item.type.startsWith('image/'))return null;
+  if(item.storage==='stream'&&item.preview){
+    try{
+      const preview=await streamedBlob(user,vid,item,'preview');
+      if(preview.size){
+        if(typeof createImageBitmap==='function'){const bitmap=await createImageBitmap(preview);bitmap.close();return preview;}
+        const url=URL.createObjectURL(preview);try{await new Promise<void>((resolve,reject)=>{const image=new Image();image.onload=()=>resolve();image.onerror=()=>reject(Error('invalid_preview'));image.src=url;});return preview;}finally{URL.revokeObjectURL(url);}
+      }
+    }catch{}
+  }
+  return attachmentBlob(user,vid,item);
+}
 export async function deleteAttachmentFile(user:User,vid:string,attachmentId:string){await fileJson(user,vid,'delete',{vaultId:vid,attachmentId});}
 export async function moveAttachmentFile(user:User,vid:string,attachmentId:string,objectId:string){await fileJson(user,vid,'move',{vaultId:vid,attachmentId,objectId});}
 

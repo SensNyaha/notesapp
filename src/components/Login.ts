@@ -2,7 +2,7 @@ import { h } from 'preact';
 import { useEffect, useRef, useState } from 'preact/hooks';
 import { authMessage, setupRequired, signIn, signInWithPasskey, webAuthnCapability, AuthError } from '../auth';
 import type { User } from '../types/auth';
-import { UiIcon } from './ui.ts';
+import { InfoTip,UiIcon } from './ui.ts';
 
 const e=h;
 export function Login({onLogin}:{onLogin:(user:User)=>void}){
@@ -32,7 +32,7 @@ export function Login({onLogin}:{onLogin:(user:User)=>void}){
       e('a',{class:'auth-brand',href:'/'},e('span',{class:'auth-brand-mark'},e('img',{src:'/icon.svg',width:38,height:38,alt:''})),e('span',null,e('strong',null,'Tasks'),e('small',null,'Private productivity workspace'))),
       e('div',{class:'auth-heading'},e('p',{class:'eyebrow'},confirming?'Первичная настройка':'Добро пожаловать'),e('h1',null,confirming?'Создайте администратора':'Вход в Tasks'),
         e('p',null,confirming?'Это первый аккаунт на сервере. После создания вы войдёте автоматически.':'Продолжите работу со своими зашифрованными хранилищами.')),
-      confirming&&e('div',{class:'inline-alert info',role:'status'},e(UiIcon,{name:'info',size:18}),e('span',null,'Аккаунтов ещё нет. Создаётся первая учётная запись администратора.')),
+      confirming&&e(InfoTip,{label:'О первом аккаунте'},'Аккаунтов ещё нет. Создаётся первая учётная запись администратора.'),
       e('form',{class:'auth-form',onSubmit:submit,'aria-busy':busy},
         e('label',{for:'login'},e('span',null,'Логин'),e('input',{ref:loginField,id:'login',value:login,required:true,minLength:3,maxLength:32,pattern:'[a-zA-Z][a-zA-Z0-9._\\-]{2,31}',autoComplete:'username',autoCapitalize:'none',spellcheck:false,disabled:busy||confirming,onInput:(event:Event)=>setLogin((event.currentTarget as HTMLInputElement).value),placeholder:'например, makarov'})),
         confirming&&e('p',{class:'field-hint'},'3–32 символа: латиница, цифры, точка, дефис или _. Начните с буквы.'),
@@ -47,5 +47,5 @@ export function Login({onLogin}:{onLogin:(user:User)=>void}){
       !confirming&&passkeyAvailable&&e('div',{class:'auth-divider'},e('span',null,'или')),
       !confirming&&passkeyAvailable&&e('button',{class:'passkey-login secondary-button',type:'button',disabled:busy,onClick:()=>void passkeyLogin()},e(UiIcon,{name:'key',size:18}),'Войти с ключом доступа'),
       !confirming&&e('button',{class:'text-button auth-help-toggle',type:'button','aria-expanded':help,onClick:()=>setHelp(!help)},'Не получается войти?'),
-      help&&!confirming&&e('div',{class:'auth-help'},e('strong',null,'Восстановление доступа'),e('p',null,'Обратитесь к администратору за временным паролем. Он действует 48 часов. Сброс пароля аккаунта не восстанавливает фразу E2EE-хранилища.'))));
+      help&&!confirming&&e('div',{class:'auth-help'},e('strong',null,'Восстановление доступа'),e('p',null,'Обратитесь к администратору за временным паролем. Он действует 48 часов. Сброс пароля аккаунта не восстанавливает фразу зашифрованного хранилища.'))));
 }

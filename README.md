@@ -2,7 +2,7 @@
 
 Локально развёртываемая PWA для заметок, напоминаний и планирования со сквозным шифрованием содержимого.
 
-Текущая рабочая версия: **0.20.0**, SQLite schema **14**. Сервер и PWA слушают порт **3100**. Полная карта документации находится в [`docs/README.md`](docs/README.md), фактическое покрытие функций — в [`docs/IMPLEMENTATION_STATUS.md`](docs/IMPLEMENTATION_STATUS.md), итоговый аудит экранов 01–54 — в [`docs/STAGE20_SCREEN_AUDIT.md`](docs/STAGE20_SCREEN_AUDIT.md).
+Текущая рабочая версия: **0.20.8**, SQLite schema **14**. Сервер и PWA слушают порт **3100**. Полная карта документации находится в [`docs/README.md`](docs/README.md), фактическое покрытие функций — в [`docs/IMPLEMENTATION_STATUS.md`](docs/IMPLEMENTATION_STATUS.md), итоговый аудит экранов 01–54 — в [`docs/STAGE20_SCREEN_AUDIT.md`](docs/STAGE20_SCREEN_AUDIT.md).
 
 ## Что работает
 
@@ -102,7 +102,7 @@ docker compose restart app
 docker compose stop app
 ```
 
-Ожидаемый health текущей версии содержит `status: ok`, `version: 0.20.0`, `database: ok`, постоянный `installationId`, `bootCount` и время сервера.
+Ожидаемый health текущей версии содержит `status: ok`, `version: 0.20.8`, `database: ok`, постоянный `installationId`, `bootCount` и время сервера.
 
 ## Запуск без Docker
 
@@ -123,7 +123,7 @@ npm run build
 npm run check
 ```
 
-`npm run build` уже включает typecheck, Vite production build и создание Service Worker. На версии **0.20.0** набор содержит **110 тестов**. Они проверяют сервер и миграции, password/Passkey authentication, сессии, WebAuthn, PRF/auto-lock, portable backup, streaming ZIP/ZIP64, E2EE-файлы и GC, contacts/shared-vault, E2EE comments, outbox/sync, поиск, reminders/push, projects/tasks, зависимости, Gantt scheduling helpers и PWA shell.
+`npm run build` уже включает typecheck, Vite production build и создание Service Worker. На версии **0.20.8** набор содержит **110 тестов**. Они проверяют сервер и миграции, password/Passkey authentication, сессии, WebAuthn, PRF/auto-lock, portable backup, streaming ZIP/ZIP64, E2EE-файлы и GC, contacts/shared-vault, E2EE comments, outbox/sync, поиск, reminders/push, projects/tasks, зависимости, Gantt scheduling helpers и PWA shell.
 
 Автоматические проверки не заменяют проверку установленной PWA, Safari, реальной доставки push и адаптивных экранов. Тестовый push при закрытой PWA ранее подтверждён пользователем на iOS 26.6.1.
 

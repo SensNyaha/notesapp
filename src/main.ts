@@ -2,7 +2,6 @@ import { h, render } from 'preact';
 import { useEffect, useRef, useState } from 'preact/hooks';
 import { isHealthResponse, type HealthResponse } from './types/api';
 import './style.css';
-import './redesign.css';
 import { Login } from './components/Login';
 import { PasswordScreen, UsersScreen } from './components/Accounts';
 import { DevicesScreen } from './components/Devices';
@@ -14,7 +13,7 @@ import { ServerStorage } from './components/ServerStorage';
 import { DataTransfer } from './components/DataTransfer';
 import { CollaborationScreen } from './components/Collaboration';
 import { ProjectsScreen } from './components/Projects';
-import { AppShell,type ShellSection } from './components/AppShell';
+import { AppShell,type ShellSection,type ShellVaultContext } from './components/AppShell';
 import { AboutSettings,AccountOverview,AppearanceSettings,SettingsHub,type SettingsPage } from './components/Settings';
 import { Onboarding } from './components/Onboarding';
 import { PageHeader,StatusDot,UiIcon } from './components/ui.ts';
@@ -26,6 +25,7 @@ import type { User } from './types/auth';
 import { updateReminderZone, type ReminderTarget } from './reminders';
 import { clearCollaborationLocalRuntime } from './collaboration.ts';
 import { applyTheme } from './preferences.ts';
+import { AppDialogHost,appConfirm } from './components/AppDialog.ts';
 
 const e = h;
 applyTheme();
@@ -58,6 +58,7 @@ function App() {
   const [user, setUser] = useState<User | null>(null);
   const userRef = useRef<User | null>(null); userRef.current = user;
   const [page, setPage] = useState<'home'|'today'|'projects'|'settings'|'account'|'appearance'|'password'|'users'|'devices'|'passkeys'|'diagnostics'|'notifications'|'data'|'collaboration'|'archive'|'trash'|'about'>('home');
+  const previousWorkspacePage = useRef<'home'|'today'|'projects'>('home');
   const [localProfiles, setLocalProfiles] = useState<User[]>([]);
   const localMode = useRef(false);
   const [notice, setNotice] = useState('');
@@ -80,6 +81,7 @@ function App() {
   const [shell, setShell] = useState('Подготавливаем…');
   const [swError, setSwError] = useState('');
   const [waiting, setWaiting] = useState<ServiceWorker | null>(null);
+  const [vaultContext,setVaultContext]=useState<ShellVaultContext|null>(null);
   const secure = window.isSecureContext;
   const cryptoAvailable = secure && Boolean(window.crypto?.subtle);
 
@@ -153,7 +155,7 @@ function App() {
       }
       const completed = await exclusive(async () => {
         const s = user && await readState(user.id);
-        if (s && hasUnsaved(s) && !confirm('Есть заметки или стеш, не сохранённые на сервере. Выйти и удалить их вместе с ключами с этого устройства?')) return false;
+        if (s && hasUnsaved(s) && !await appConfirm('Есть заметки или отложенные изменения, не сохранённые на сервере. Выйти и удалить их вместе с ключами с этого устройства?',{title:'Выйти из аккаунта?',confirmLabel:'Выйти',danger:true})) return false;
         await signOut();
         await browserUnsubscribe().catch(() => {}); // Server session revocation already cancels its subscriptions.
         if (user) { clearCollaborationLocalRuntime(user.id);await eraseState(user.id); announce('logout:' + user.id); }
@@ -274,6 +276,14 @@ function App() {
   }
   const shellActive:ShellSection=page==='home'?'notes':page==='today'?'today':page==='projects'?'projects':'settings';
   const navigateSection=(section:ShellSection)=>{
+    if(section==='settings'){
+      if(shellActive==='settings')void navigate(previousWorkspacePage.current);
+      else{
+        previousWorkspacePage.current=page as 'home'|'today'|'projects';
+        void navigate('settings');
+      }
+      return;
+    }
     const next=section==='notes'?'home':section==='today'?'today':section==='projects'?'projects':'settings';
     void navigate(next);
   };
@@ -283,6 +293,7 @@ function App() {
   };
   const diagnostics=e('main',{class:'settings-screen diagnostics-screen'},
     e(PageHeader,{eyebrow:'Настройки',title:'Диагностика',description:'Состояние сервера, этого устройства, хранилища и локальной криптографии.',
+      back:()=>void navigate('settings'),
       actions:e('button',{class:'secondary-button',disabled:busy,onClick:checkServer},e(UiIcon,{name:'sync',size:17}),busy?'Обновляем…':'Обновить')}),
     e('div',{class:'diagnostics-grid'},
       e('section',{class:'diagnostic-panel settings-panel server-health-panel','aria-labelledby':'server-heading'},
@@ -312,17 +323,17 @@ function App() {
       user.role==='admin'&&e(ServerStorage,{key:user.id}),
       e(CryptoCheck,{key:user.id})));
   let content;
-  if(page==='home'||page==='today'||page==='archive'||page==='trash')content=e(Planner,{user,key:user.id+':'+page,section:page==='today'?'today':'notes',initialScreen:page==='archive'?'archive':page==='trash'?'trash':'list',reminderTarget,onReminderHandled:()=>setReminderTarget(undefined),onSyncState:syncCallback});
-  else if(page==='projects')content=e(ProjectsScreen,{user,key:user.id,onBack:()=>void navigate('home')});
+  if(page==='home'||page==='today'||page==='archive'||page==='trash')content=e(Planner,{user,key:user.id+':'+page,section:page==='today'?'today':'notes',initialScreen:page==='archive'?'archive':page==='trash'?'trash':'list',reminderTarget,onReminderHandled:()=>setReminderTarget(undefined),onSyncState:syncCallback,onOpenProjects:()=>void navigate('projects'),onVaultContextChange:setVaultContext});
+  else if(page==='projects')content=e(ProjectsScreen,{user,key:user.id,onBack:()=>void navigate('home'),onVaultContextChange:setVaultContext});
   else if(page==='settings')content=e(SettingsHub,{user,onOpen:openSetting,onLogout:logout,loggingOut});
-  else if(page==='account')content=e(AccountOverview,{user,onOpen:openSetting,onLogout:logout,loggingOut});
-  else if(page==='appearance')content=e(AppearanceSettings,null);
-  else if(page==='about')content=e(AboutSettings,null);
-  else if(page==='notifications')content=e(Notifications,{user,key:user.id});
+  else if(page==='account')content=e(AccountOverview,{user,onOpen:openSetting,onLogout:logout,loggingOut,onBack:()=>void navigate('settings')});
+  else if(page==='appearance')content=e(AppearanceSettings,{onBack:()=>void navigate('settings')});
+  else if(page==='about')content=e(AboutSettings,{onBack:()=>void navigate('settings')});
+  else if(page==='notifications')content=e(Notifications,{user,key:user.id,onBack:()=>void navigate('settings')});
   else if(page==='devices')content=e(DevicesScreen,{user,onBack:()=>void navigate('settings'),onAuthLost:checkSession});
   else if(page==='passkeys')content=e(PasskeysScreen,{user,onBack:()=>void navigate('settings')});
   else if(page==='collaboration')content=e(CollaborationScreen,{user,key:user.id,onBack:()=>void navigate('settings')});
-  else if(page==='data')content=e(DataTransfer,{user,key:user.id});
+  else if(page==='data')content=e(DataTransfer,{user,key:user.id,onBack:()=>void navigate('settings')});
   else if(page==='password')content=e(PasswordScreen,{key:user.id,user,onBack:()=>void navigate('settings'),onLogout:logout,onRefresh:checkSession,
     onDone:(result:User)=>{authGeneration.current++;void requireOutboxReview(result).catch(()=>{}).finally(()=>{userRef.current=result;setUser(result);setPage('settings');setAuthError('');setNotice('Пароль изменён.');});}});
   else if(page==='users'&&user.role==='admin')content=e(UsersScreen,{key:user.id,onBack:()=>void navigate('settings'),onRefresh:checkSession});
@@ -330,9 +341,9 @@ function App() {
   else content=e(SettingsHub,{user,onOpen:openSetting,onLogout:logout,loggingOut});
   const shellNotice=reminderTarget&&reminderTarget.accountId!==user.id?'Уведомление относится к другому аккаунту. Войдите в нужный аккаунт, чтобы открыть заметку.':notice;
   return e(AppShell,{user,active:shellActive,onNavigate:navigateSection,syncing,connection,loggingOut,onLogout:logout,
-    notice:shellNotice,error:authError,updateNotice},content);
+    notice:shellNotice,error:authError,updateNotice,vaultContext},content);
 }
 
 const root = document.getElementById('app');
 if (!root) throw new Error('Application root is missing');
-render(e(App, null), root);
+render(e('div',{class:'app-root'},e(App, null),e(AppDialogHost,null)), root);
