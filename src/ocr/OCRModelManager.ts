@@ -55,8 +55,8 @@ async function getManifest() {
   return manifestPromise;
 }
 
-async function cachedAsset(asset: OCRModelAsset) {
-  const response = await caches.match(asset.url);
+async function cachedAsset(cache: Cache, asset: OCRModelAsset) {
+  const response = await cache.match(asset.url);
   if (!response) return false;
   const length = Number(response.headers.get("content-length"));
   return !Number.isFinite(length) || length === 0 || length === asset.bytes;
@@ -68,9 +68,10 @@ export class OCRModelManager {
     const modelPackage = manifest.packages[id];
     if (!modelPackage) throw new Error(`Неизвестный OCR package: ${id}`);
 
+    const cache = await caches.open(MODEL_CACHE);
     let cachedBytes = 0;
     for (const asset of modelPackage.assets) {
-      if (await cachedAsset(asset)) cachedBytes += asset.bytes;
+      if (await cachedAsset(cache, asset)) cachedBytes += asset.bytes;
     }
 
     return {
@@ -103,7 +104,7 @@ export class OCRModelManager {
     let loaded = 0;
 
     for (const asset of modelPackage.assets) {
-      if (await cachedAsset(asset)) {
+      if (await cachedAsset(cache, asset)) {
         loaded += asset.bytes;
         onProgress?.({
           packageId: id,
@@ -167,6 +168,10 @@ export class OCRModelManager {
     if (!modelPackage) return;
     const cache = await caches.open(MODEL_CACHE);
     await Promise.all(modelPackage.assets.map((asset) => cache.delete(asset.url)));
+  }
+
+  async isPrintedInstalled() {
+    return (await this.state("printed-ru-en-v1")).installed;
   }
 
   async isHandwritingInstalled(language: "ru" | "en") {

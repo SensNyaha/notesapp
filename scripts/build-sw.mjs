@@ -20,14 +20,13 @@ const shellPaths = [];
 for (const path of paths) {
   const rel = relative(root, path).replaceAll('\\', '/');
   const size = (await stat(path)).size;
-  const largeHtrModel = rel.startsWith('ocr-models/htr/');
-  const rawPaddleSource =
-    rel.startsWith('ocr-models/paddle/') &&
-    /\/(?:inference\.onnx|inference\.yml)$/.test(rel);
+  const deferredOcrModel =
+    rel.startsWith('ocr-models/') &&
+    rel !== 'ocr-models/manifest.json';
   const deferredOcrBundle =
     /(?:htr\.worker-|worker-entry-|ort\.bundle\.min-)/.test(rel) ||
     (rel.startsWith('assets/dist-') && size > 5_000_000);
-  if (!largeHtrModel && !rawPaddleSource && !deferredOcrBundle)
+  if (!deferredOcrModel && !deferredOcrBundle)
     shellPaths.push(path);
 }
 const assets = shellPaths.map(path => '/' + relative(root, path).replaceAll('\\', '/'));

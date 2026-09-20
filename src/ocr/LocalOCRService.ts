@@ -262,6 +262,12 @@ export class LocalOCRService {
       message: "Подготавливаем изображение…",
     });
 
+    if (!(await this.modelManager.isPrintedInstalled())) {
+      throw new Error(
+        "Сначала скачайте базовую модель печатного OCR (PP-OCRv5) на это устройство.",
+      );
+    }
+
     const paddle = await this.getPaddle(onProgress);
     onProgress?.({
       phase: "detecting",

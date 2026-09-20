@@ -2264,6 +2264,7 @@
     background: var(--surface);
     border-color: var(--border-strong);
     color: var(--text-primary);
+    font-weight: bold;
   }
   .tertiary-button,
   .text-button,
@@ -3965,6 +3966,25 @@
     border: 1px solid var(--border);
     border-radius: 14px;
     background: var(--surface);
+  }
+  .ocr-model-row {
+    display: grid;
+    gap: 6px;
+    padding: 12px 0;
+    border-top: 1px solid var(--border);
+  }
+  .ocr-model-row:first-of-type {
+    margin-top: 8px;
+  }
+  .ocr-model-row > p {
+    margin: 0;
+  }
+  .ocr-model-row > button {
+    justify-self: start;
+  }
+  .ocr-model-progress {
+    width: 100%;
+    height: 8px;
   }
   .checklist-row,
   .checklist-view-row {
@@ -9303,8 +9323,9 @@
   inset: 0;
   display: grid;
   place-items: center;
-  padding: max(8px, env(safe-area-inset-top)) max(8px, env(safe-area-inset-right))
-    max(8px, env(safe-area-inset-bottom)) max(8px, env(safe-area-inset-left));
+  padding: max(8px, env(safe-area-inset-top))
+    max(8px, env(safe-area-inset-right)) max(8px, env(safe-area-inset-bottom))
+    max(8px, env(safe-area-inset-left));
   background: rgba(4, 7, 6, 0.94);
   backdrop-filter: blur(8px);
 }

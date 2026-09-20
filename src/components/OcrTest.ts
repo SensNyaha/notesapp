@@ -40,6 +40,31 @@ function ocrFragment(text: string) {
     )
     .join("");
 }
+
+const OCR_MODEL_PACKAGES: Array<{
+  id: OCRModelPackageId;
+  label: string;
+  detail: string;
+}> = [
+  {
+    id: "printed-ru-en-v1",
+    label: "Печатный OCR RU + EN",
+    detail: "PP-OCRv5 · базовая модель, обязательна для любого режима OCR",
+  },
+  {
+    id: "handwriting-ru-v1",
+    label: "Рукописный русский",
+    detail: "TrOCR RU · рукописный русский; для детекции строк также требуется базовая PP-OCRv5",
+  },
+  {
+    id: "handwriting-en-v1",
+    label: "Рукописный English",
+    detail: "TrOCR EN · рукописный English; для детекции строк также требуется базовая PP-OCRv5",
+  },
+];
+
+type OCRModelInstallChoice = OCRModelPackageId | "all";
+
 export function OcrTestScreen({ onBack }: { onBack: () => void }) {
   const service = useRef<LocalOCRService | null>(null);
   const modelManager = useRef(new OCRModelManager()).current;
@@ -58,6 +83,8 @@ export function OcrTestScreen({ onBack }: { onBack: () => void }) {
   const [error, setError] = useState("");
   const [busy, setBusy] = useState(false);
   const [modelStates, setModelStates] = useState<OCRModelState[]>([]);
+  const [modelChoice, setModelChoice] =
+    useState<OCRModelInstallChoice>("printed-ru-en-v1");
   const [modelBusy, setModelBusy] = useState<OCRModelPackageId | null>(null);
   const [modelProgress, setModelProgress] = useState<OCRModelProgress | null>(null);
   const capabilities = useRef(detectOCRCapabilities()).current;
@@ -124,14 +151,88 @@ export function OcrTestScreen({ onBack }: { onBack: () => void }) {
     setOcrDraft("");
   };
 
-  const installModel = async (id: OCRModelPackageId) => {
+  const modelState = (id: OCRModelPackageId) =>
+    modelStates.find((state) => state.id === id);
+
+  const printedState = modelState("printed-ru-en-v1");
+  const ruHandwritingState = modelState("handwriting-ru-v1");
+  const enHandwritingState = modelState("handwriting-en-v1");
+  const modelsChecked = modelStates.length === OCR_MODEL_PACKAGES.length;
+  const printedInstalled = Boolean(printedState?.installed);
+  const ruHandwritingInstalled = Boolean(ruHandwritingState?.installed);
+  const enHandwritingInstalled = Boolean(enHandwritingState?.installed);
+  const anyModelInstalled =
+    printedInstalled || ruHandwritingInstalled || enHandwritingInstalled;
+  const allModelsInstalled =
+    printedInstalled && ruHandwritingInstalled && enHandwritingInstalled;
+  const handwritingAvailable =
+    printedInstalled && (ruHandwritingInstalled || enHandwritingInstalled);
+
+  const selectedModeAvailable =
+    printedInstalled &&
+    (mode !== "handwriting" ||
+      (language === "ru"
+        ? ruHandwritingInstalled
+        : language === "en"
+          ? enHandwritingInstalled
+          : ruHandwritingInstalled && enHandwritingInstalled));
+
+  useEffect(() => {
+    if (!modelsChecked || !printedInstalled) return;
+    if (mode !== "handwriting") return;
+
+    if (!ruHandwritingInstalled && !enHandwritingInstalled) {
+      setMode("printed");
+      return;
+    }
+    if (language === "ru+en" &&
+        !(ruHandwritingInstalled && enHandwritingInstalled)) {
+      setLanguage(ruHandwritingInstalled ? "ru" : "en");
+      return;
+    }
+    if (language === "ru" && !ruHandwritingInstalled)
+      setLanguage("en");
+    else if (language === "en" && !enHandwritingInstalled)
+      setLanguage("ru");
+  }, [
+    modelsChecked,
+    printedInstalled,
+    ruHandwritingInstalled,
+    enHandwritingInstalled,
+    mode,
+    language,
+  ]);
+
+  useEffect(() => {
+    if (!modelsChecked || modelChoice === "all") return;
+    if (!modelState(modelChoice)?.installed) return;
+    const nextMissing = OCR_MODEL_PACKAGES.find(
+      ({ id }) => !modelState(id)?.installed,
+    );
+    setModelChoice(nextMissing?.id ?? "all");
+  }, [modelStates, modelChoice, modelsChecked]);
+
+  const installModels = async (ids: OCRModelPackageId[]) => {
     if (modelBusy) return;
-    setModelBusy(id);
-    setModelProgress(null);
     setError("");
+    setProgress(null);
     try {
-      await modelManager.install(id, setModelProgress);
-      await refreshModelStates();
+      for (const id of ids) {
+        const state = modelState(id);
+        if (state?.installed) continue;
+        setModelBusy(id);
+        setModelProgress(
+          state
+            ? {
+                packageId: id,
+                loaded: state.cachedBytes,
+                total: state.bytes,
+              }
+            : null,
+        );
+        await modelManager.install(id, setModelProgress);
+        await refreshModelStates();
+      }
     } catch (caught) {
       setError(
         caught instanceof Error
@@ -144,11 +245,23 @@ export function OcrTestScreen({ onBack }: { onBack: () => void }) {
     }
   };
 
+  const installSelectedModels = () => {
+    const ids: OCRModelPackageId[] =
+      modelChoice === "all"
+        ? OCR_MODEL_PACKAGES.map(({ id }) => id)
+        : modelChoice === "printed-ru-en-v1"
+          ? ["printed-ru-en-v1"]
+          : ["printed-ru-en-v1", modelChoice];
+    void installModels(ids);
+  };
+
   const removeModel = async (id: OCRModelPackageId) => {
     if (modelBusy) return;
     setModelBusy(id);
     setError("");
     try {
+      await service.current?.dispose();
+      service.current = null;
       await modelManager.remove(id);
       await refreshModelStates();
     } catch (caught) {
@@ -163,12 +276,26 @@ export function OcrTestScreen({ onBack }: { onBack: () => void }) {
     }
   };
 
-  const modelState = (id: OCRModelPackageId) =>
-    modelStates.find((state) => state.id === id);
-
   const recognize = async () => {
-    if (!file || busy) {
-      if (!file) setError("Сначала сфотографируйте или выберите изображение.");
+    if (busy) return;
+    if (!modelsChecked) {
+      setError("Подождите, пока проверяется состояние OCR-моделей.");
+      return;
+    }
+    if (!printedInstalled) {
+      setError(
+        "OCR недоступен: сначала скачайте базовую модель печатного OCR (PP-OCRv5).",
+      );
+      return;
+    }
+    if (!selectedModeAvailable) {
+      setError(
+        "Выбранный режим OCR недоступен: скачайте необходимую TrOCR-модель для выбранного языка.",
+      );
+      return;
+    }
+    if (!file) {
+      setError("Сначала сфотографируйте или выберите изображение.");
       return;
     }
     setBusy(true);
@@ -200,6 +327,37 @@ export function OcrTestScreen({ onBack }: { onBack: () => void }) {
       setBusy(false);
     }
   };
+
+  const accessStatus = !modelsChecked
+    ? "Проверяем модели OCR на этом устройстве…"
+    : !anyModelInstalled
+      ? "OCR недоступен: на этом устройстве ещё не загружено ни одной модели."
+      : !printedInstalled
+        ? "OCR недоступен: базовая PP-OCRv5 не установлена. TrOCR-модели без неё не могут находить строки текста."
+        : allModelsInstalled
+          ? "Полный доступ: печатный, автоматический и рукописный OCR RU + EN доступны."
+          : handwritingAvailable
+            ? `Частичный доступ: печатный OCR доступен; рукописный — ${[
+                ruHandwritingInstalled ? "RU" : "",
+                enHandwritingInstalled ? "EN" : "",
+              ].filter(Boolean).join(" + ")}.`
+            : "Частичный доступ: доступны печатный OCR и Auto без TrOCR. Для рукописного текста скачайте HTR-модель.";
+
+  const canChooseImage =
+    modelsChecked && printedInstalled && !busy && !modelBusy;
+  const canRunOCR =
+    Boolean(file) &&
+    modelsChecked &&
+    selectedModeAvailable &&
+    !busy &&
+    !modelBusy;
+  const selectedChoiceInstalled =
+    modelChoice === "all"
+      ? allModelsInstalled
+      : modelChoice === "printed-ru-en-v1"
+        ? printedInstalled
+        : printedInstalled && Boolean(modelState(modelChoice)?.installed);
+
   return e(
     "section",
     { class: "note-editor" },
@@ -252,7 +410,138 @@ export function OcrTestScreen({ onBack }: { onBack: () => void }) {
       e(
         "p",
         { class: "hint" },
-        "OCR выполняется только локально на этом устройстве. Изображение и распознанный текст не отправляются на сервер или во внешние OCR-сервисы; рабочие OCR-модели входят в приложение.",
+        "OCR выполняется только локально на этом устройстве. На сервер отправляются только запросы на скачивание статических моделей; изображения и распознанный текст с устройства не уходят.",
+      ),
+      e(
+        "p",
+        {
+          class: printedInstalled ? "hint" : "error",
+          role: "status",
+          "aria-live": "polite",
+        },
+        accessStatus,
+      ),
+      e(
+        "div",
+        { class: "editor-label" },
+        e("span", null, "Модели OCR на этом устройстве"),
+        e(
+          "p",
+          { class: "hint" },
+          "Выберите пакет и скачайте его с сервера в локальный Cache Storage. После загрузки соответствующие режимы станут доступны офлайн.",
+        ),
+        e(
+          "label",
+          { class: "editor-label" },
+          "Что загрузить",
+          e(
+            "select",
+            {
+              value: modelChoice,
+              disabled: busy || Boolean(modelBusy) || !modelsChecked,
+              onChange: (event: Event) =>
+                setModelChoice(
+                  (event.target as HTMLSelectElement)
+                    .value as OCRModelInstallChoice,
+                ),
+            },
+            ...OCR_MODEL_PACKAGES.map(({ id, label }) => {
+              const state = modelState(id);
+              return e(
+                "option",
+                {
+                  key: id,
+                  value: id,
+                  disabled: Boolean(state?.installed),
+                },
+                state
+                  ? `${label} · ${formatModelBytes(state.bytes)}${state.installed ? " · установлена" : ""}`
+                  : `${label} · проверяем…`,
+              );
+            }),
+            e(
+              "option",
+              { value: "all", disabled: allModelsInstalled },
+              allModelsInstalled
+                ? "Все модели установлены"
+                : "Все недостающие модели",
+            ),
+          ),
+        ),
+        e(
+          "div",
+          { class: "onboarding-actions" },
+          e(
+            "button",
+            {
+              type: "button",
+              class: "primary",
+              disabled:
+                busy ||
+                Boolean(modelBusy) ||
+                !modelsChecked ||
+                allModelsInstalled ||
+                selectedChoiceInstalled,
+              onClick: installSelectedModels,
+            },
+            modelBusy
+              ? "Загружаем модель…"
+              : allModelsInstalled
+                ? "Все модели установлены"
+                : "Скачать на устройство",
+          ),
+        ),
+        ...OCR_MODEL_PACKAGES.map(({ id, label, detail }) => {
+          const state = modelState(id);
+          const activeProgress =
+            modelProgress?.packageId === id ? modelProgress : null;
+          const loaded = activeProgress?.loaded ?? state?.cachedBytes ?? 0;
+          const total = activeProgress?.total ?? state?.bytes ?? 0;
+          const percent = total > 0
+            ? Math.min(100, Math.round((loaded / total) * 100))
+            : 0;
+          return e(
+            "div",
+            { class: "ocr-model-row", key: id },
+            e("strong", null, label),
+            e("p", { class: "hint" }, detail),
+            state &&
+              e("progress", {
+                class: "ocr-model-progress",
+                max: state.bytes,
+                value: state.installed ? state.bytes : loaded,
+                "aria-label": `Состояние загрузки: ${label}`,
+              }),
+            e(
+              "p",
+              {
+                class: "hint",
+                role: activeProgress ? "status" : undefined,
+                "aria-live": activeProgress ? "polite" : undefined,
+              },
+              !state
+                ? "Проверяем состояние…"
+                : state.installed
+                  ? `Установлена · ${formatModelBytes(state.bytes)}`
+                  : activeProgress
+                    ? `Загрузка ${percent}% · ${formatModelBytes(loaded)} / ${formatModelBytes(total)}`
+                    : state.cachedBytes > 0
+                      ? `Частично загружено · ${formatModelBytes(state.cachedBytes)} / ${formatModelBytes(state.bytes)}`
+                      : `Не установлена · ${formatModelBytes(state.bytes)}`,
+            ),
+            state?.installed &&
+              e(
+                "button",
+                {
+                  type: "button",
+                  class: "secondary-button",
+                  disabled: busy || Boolean(modelBusy),
+                  onClick: () => void removeModel(id),
+                },
+                modelBusy === id ? "Подождите…" : "Удалить с устройства",
+              ),
+          );
+        }),
       ),
       e(
         "label",
@@ -262,13 +551,27 @@ export function OcrTestScreen({ onBack }: { onBack: () => void }) {
           "select",
           {
             value: mode,
-            disabled: busy,
+            disabled: busy || Boolean(modelBusy) || !printedInstalled,
             onChange: (event: Event) =>
               setMode((event.target as HTMLSelectElement).value as OCRMode),
           },
-          e("option", { value: "auto" }, "Авто"),
-          e("option", { value: "printed" }, "Печатный"),
-          e("option", { value: "handwriting" }, "Рукописный"),
+          e(
+            "option",
+            { value: "auto", disabled: !printedInstalled },
+            "Авто",
+          ),
+          e(
+            "option",
+            { value: "printed", disabled: !printedInstalled },
+            "Печатный",
+          ),
+          e(
+            "option",
+            { value: "handwriting", disabled: !handwritingAvailable },
+            handwritingAvailable
+              ? "Рукописный"
+              : "Рукописный · требуется TrOCR",
+          ),
         ),
       ),
       e(
@@ -279,73 +582,43 @@ export function OcrTestScreen({ onBack }: { onBack: () => void }) {
           "select",
           {
             value: language,
-            disabled: busy,
+            disabled:
+              busy ||
+              Boolean(modelBusy) ||
+              !printedInstalled ||
+              (mode === "handwriting" && !handwritingAvailable),
             onChange: (event: Event) =>
               setLanguage(
                 (event.target as HTMLSelectElement).value as OCRLanguage,
               ),
           },
-          e("option", { value: "ru+en" }, "Русский + English"),
-          e("option", { value: "ru" }, "Русский"),
-          e("option", { value: "en" }, "English"),
-        ),
-      ),
-      e(
-        "div",
-        { class: "editor-label" },
-        e("span", null, "Локальные OCR-модели"),
-        (() => {
-          const printed = modelState("printed-ru-en-v1");
-          return printed
-            ? e(
-                "p",
-                { class: "hint" },
-                `Печатный RU + EN · ${printed.installed ? "установлен" : "загружается с приложением"} · ${formatModelBytes(printed.bytes)}`,
-              )
-            : e("p", { class: "hint" }, "Проверяем базовую PP-OCRv5 модель…");
-        })(),
-        ...([
-          ["handwriting-ru-v1", "Рукописный русский"],
-          ["handwriting-en-v1", "Рукописный English"],
-        ] as Array<[OCRModelPackageId, string]>).map(([id, label]) => {
-          const state = modelState(id);
-          const installing = modelBusy === id;
-          return e(
-            "div",
-            { class: "onboarding-actions", key: id },
-            e(
-              "span",
-              { class: "hint" },
-              state
-                ? `${label} · ${state.installed ? "установлен" : "не установлен"} · ${formatModelBytes(state.bytes)}`
-                : `${label} · проверяем…`,
-            ),
-            state &&
-              e(
-                "button",
-                {
-                  type: "button",
-                  class: "secondary-button",
-                  disabled: busy || Boolean(modelBusy),
-                  onClick: () =>
-                    void (state.installed
-                      ? removeModel(id)
-                      : installModel(id)),
-                },
-                installing
-                  ? "Подождите…"
-                  : state.installed
-                    ? "Удалить"
-                    : "Скачать",
-              ),
-          );
-        }),
-        modelProgress &&
           e(
-            "p",
-            { class: "hint", role: "status", "aria-live": "polite" },
-            `Загрузка модели: ${formatModelBytes(modelProgress.loaded)} / ${formatModelBytes(modelProgress.total)}`,
+            "option",
+            {
+              value: "ru+en",
+              disabled:
+                mode === "handwriting" &&
+                !(ruHandwritingInstalled && enHandwritingInstalled),
+            },
+            "Русский + English",
           ),
+          e(
+            "option",
+            {
+              value: "ru",
+              disabled: mode === "handwriting" && !ruHandwritingInstalled,
+            },
+            "Русский",
+          ),
+          e(
+            "option",
+            {
+              value: "en",
+              disabled: mode === "handwriting" && !enHandwritingInstalled,
+            },
+            "English",
+          ),
+        ),
       ),
       e("input", {
         ref: cameraInput,
@@ -370,7 +643,7 @@ export function OcrTestScreen({ onBack }: { onBack: () => void }) {
           {
             type: "button",
             class: "secondary-button",
-            disabled: busy,
+            disabled: !canChooseImage,
             onClick: () => cameraInput.current?.click(),
           },
           e(UiIcon, { name: "image", size: 17 }),
@@ -381,7 +654,7 @@ export function OcrTestScreen({ onBack }: { onBack: () => void }) {
           {
             type: "button",
             class: "secondary-button",
-            disabled: busy,
+            disabled: !canChooseImage,
             onClick: () => fileInput.current?.click(),
           },
           e(UiIcon, { name: "upload", size: 17 }),
@@ -392,7 +665,7 @@ export function OcrTestScreen({ onBack }: { onBack: () => void }) {
           {
             type: "button",
             class: "primary",
-            disabled: busy || !file,
+            disabled: !canRunOCR,
             onClick: () => void recognize(),
           },
           busy ? "Распознаём…" : "Распознать",
