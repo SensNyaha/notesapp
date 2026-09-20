@@ -67,8 +67,8 @@ type OCRModelInstallChoice = OCRModelPackageId | "all";
 
 export function OcrTestScreen({ onBack }: { onBack: () => void }) {
   const service = useRef<LocalOCRService | null>(null);
+  const modelAbort = useRef<AbortController | null>(null);
   const modelManager = useRef(new OCRModelManager()).current;
-  const cameraInput = useRef<HTMLInputElement>(null);
   const fileInput = useRef<HTMLInputElement>(null);
   const [title, setTitle] = useState("");
   const [html, setHtml] = useState("");
@@ -104,6 +104,7 @@ export function OcrTestScreen({ onBack }: { onBack: () => void }) {
   useEffect(() => {
     void refreshModelStates();
     return () => {
+      modelAbort.current?.abort();
       void service.current?.dispose();
     };
   }, []);
@@ -121,6 +122,14 @@ export function OcrTestScreen({ onBack }: { onBack: () => void }) {
     setProgress(null);
     setLastResult(null);
     setOcrDraft("");
+  };
+
+  const openImagePicker = (capture: boolean) => {
+    const input = fileInput.current;
+    if (!input) return;
+    if (capture) input.setAttribute("capture", "environment");
+    else input.removeAttribute("capture");
+    input.click();
   };
 
   const insertOcrDraft = () => {
@@ -214,6 +223,8 @@ export function OcrTestScreen({ onBack }: { onBack: () => void }) {
 
   const installModels = async (ids: OCRModelPackageId[]) => {
     if (modelBusy) return;
+    const controller = new AbortController();
+    modelAbort.current = controller;
     setError("");
     setProgress(null);
     try {
@@ -230,18 +241,22 @@ export function OcrTestScreen({ onBack }: { onBack: () => void }) {
               }
             : null,
         );
-        await modelManager.install(id, setModelProgress);
+        await modelManager.install(id, setModelProgress, controller.signal);
         await refreshModelStates();
       }
     } catch (caught) {
-      setError(
-        caught instanceof Error
-          ? caught.message
-          : "Не удалось установить OCR-модель.",
-      );
+      if (!controller.signal.aborted) {
+        setError(
+          caught instanceof Error
+            ? caught.message
+            : "Не удалось установить OCR-модель.",
+        );
+      }
     } finally {
+      if (modelAbort.current === controller) modelAbort.current = null;
       setModelBusy(null);
       setModelProgress(null);
+      await refreshModelStates();
     }
   };
 
@@ -254,6 +269,8 @@ export function OcrTestScreen({ onBack }: { onBack: () => void }) {
           : ["printed-ru-en-v1", modelChoice];
     void installModels(ids);
   };
+
+  const cancelModelInstall = () => modelAbort.current?.abort();
 
   const removeModel = async (id: OCRModelPackageId) => {
     if (modelBusy) return;
@@ -343,8 +360,7 @@ export function OcrTestScreen({ onBack }: { onBack: () => void }) {
               ].filter(Boolean).join(" + ")}.`
             : "Частичный доступ: доступны печатный OCR и Auto без TrOCR. Для рукописного текста скачайте HTR-модель.";
 
-  const canChooseImage =
-    modelsChecked && printedInstalled && !busy && !modelBusy;
+  const canChooseImage = !busy && !modelBusy;
   const canRunOCR =
     Boolean(file) &&
     modelsChecked &&
@@ -360,7 +376,7 @@ export function OcrTestScreen({ onBack }: { onBack: () => void }) {
 
   return e(
     "section",
-    { class: "note-editor" },
+    { class: "note-editor ocr-test-screen" },
     e(
       "div",
       { class: "note-editor-header" },
@@ -378,7 +394,7 @@ export function OcrTestScreen({ onBack }: { onBack: () => void }) {
       e(
         "span",
         { class: "note-editor-state" },
-        busy ? "OCR выполняется" : "Тестовая заметка · не сохраняется",
+        busy ? "OCR выполняется" : "OCR · тестовый экран",
       ),
       e(
         "button",
@@ -386,7 +402,7 @@ export function OcrTestScreen({ onBack }: { onBack: () => void }) {
         "Готово",
       ),
     ),
-    e("h1", { class: "note-editor-title" }, "Создание новой заметки"),
+    e("h1", { class: "note-editor-title" }, "Тестовая заметка"),
     e(
       "label",
       { class: "note-title-field" },
@@ -401,38 +417,49 @@ export function OcrTestScreen({ onBack }: { onBack: () => void }) {
     ),
     e(
       "section",
-      { class: "reminder-card" },
+      { class: "reminder-card ocr-workbench" },
       e(
         "div",
         { class: "section-heading" },
-        e("h2", null, "Локальный OCR"),
+        e("div", null,
+          e("h2", null, "Распознать текст"),
+          e("p", { class: "hint" }, "Добавьте изображение и вставьте результат в заметку"),
+        ),
       ),
       e(
         "p",
-        { class: "hint" },
-        "OCR выполняется только локально на этом устройстве. На сервер отправляются только запросы на скачивание статических моделей; изображения и распознанный текст с устройства не уходят.",
+        { class: "hint ocr-privacy-note" },
+        "Изображение и распознанный текст обрабатываются только на этом устройстве.",
       ),
       e(
         "p",
         {
-          class: printedInstalled ? "hint" : "error",
+          class: `${printedInstalled ? "hint" : "error"} ocr-access-status`,
           role: "status",
           "aria-live": "polite",
         },
         accessStatus,
       ),
       e(
-        "div",
-        { class: "editor-label" },
-        e("span", null, "Модели OCR на этом устройстве"),
+        "details",
+        {
+          class: "ocr-model-manager",
+          open: !printedInstalled || Boolean(modelBusy),
+        },
+        e(
+          "summary",
+          { class: "ocr-model-summary" },
+          e("span", null, "Модели OCR"),
+          e("small", null, allModelsInstalled ? "Все установлены" : "Настроить"),
+        ),
         e(
           "p",
-          { class: "hint" },
-          "Выберите пакет и скачайте его с сервера в локальный Cache Storage. После загрузки соответствующие режимы станут доступны офлайн.",
+          { class: "hint ocr-model-intro" },
+          "Модели загружаются один раз и после проверки доступны без интернета.",
         ),
         e(
           "label",
-          { class: "editor-label" },
+          { class: "editor-label ocr-model-choice" },
           "Что загрузить",
           e(
             "select",
@@ -470,22 +497,23 @@ export function OcrTestScreen({ onBack }: { onBack: () => void }) {
         ),
         e(
           "div",
-          { class: "onboarding-actions" },
+          { class: "onboarding-actions ocr-model-actions" },
           e(
             "button",
             {
               type: "button",
-              class: "primary",
+              class: modelBusy ? "secondary-button" : "primary",
               disabled:
                 busy ||
-                Boolean(modelBusy) ||
-                !modelsChecked ||
-                allModelsInstalled ||
-                selectedChoiceInstalled,
-              onClick: installSelectedModels,
+                (!modelBusy && (
+                  !modelsChecked ||
+                  allModelsInstalled ||
+                  selectedChoiceInstalled
+                )),
+              onClick: modelBusy ? cancelModelInstall : installSelectedModels,
             },
             modelBusy
-              ? "Загружаем модель…"
+              ? "Отменить загрузку"
               : allModelsInstalled
                 ? "Все модели установлены"
                 : "Скачать на устройство",
@@ -521,7 +549,9 @@ export function OcrTestScreen({ onBack }: { onBack: () => void }) {
               },
               !state
                 ? "Проверяем состояние…"
-                : state.installed
+                : state.updateAvailable
+                  ? `Доступно обновление · версия ${state.version}`
+                  : state.installed
                   ? `Установлена · ${formatModelBytes(state.bytes)}`
                   : activeProgress
                     ? `Загрузка ${percent}% · ${formatModelBytes(loaded)} / ${formatModelBytes(total)}`
@@ -543,9 +573,10 @@ export function OcrTestScreen({ onBack }: { onBack: () => void }) {
           );
         }),
       ),
+      e("h3", { class: "ocr-step-title ocr-options-title" }, "Параметры"),
       e(
         "label",
-        { class: "editor-label" },
+        { class: "editor-label ocr-setting" },
         "Режим",
         e(
           "select",
@@ -576,7 +607,7 @@ export function OcrTestScreen({ onBack }: { onBack: () => void }) {
       ),
       e(
         "label",
-        { class: "editor-label" },
+        { class: "editor-label ocr-setting" },
         "Язык",
         e(
           "select",
@@ -621,33 +652,26 @@ export function OcrTestScreen({ onBack }: { onBack: () => void }) {
         ),
       ),
       e("input", {
-        ref: cameraInput,
-        type: "file",
-        accept: "image/*",
-        capture: "environment",
-        hidden: true,
-        onChange: selectFile,
-      }),
-      e("input", {
         ref: fileInput,
         type: "file",
         accept: "image/*",
         hidden: true,
         onChange: selectFile,
       }),
+      e("h3", { class: "ocr-step-title ocr-source-title" }, "Изображение"),
       e(
         "div",
-        { class: "onboarding-actions" },
-        e(
+        { class: "onboarding-actions ocr-source-actions" },
+        capabilities.touch && e(
           "button",
           {
             type: "button",
             class: "secondary-button",
             disabled: !canChooseImage,
-            onClick: () => cameraInput.current?.click(),
+            onClick: () => openImagePicker(true),
           },
           e(UiIcon, { name: "image", size: 17 }),
-          "Сфотографировать",
+          "Снять фото",
         ),
         e(
           "button",
@@ -655,10 +679,10 @@ export function OcrTestScreen({ onBack }: { onBack: () => void }) {
             type: "button",
             class: "secondary-button",
             disabled: !canChooseImage,
-            onClick: () => fileInput.current?.click(),
+            onClick: () => openImagePicker(false),
           },
           e(UiIcon, { name: "upload", size: 17 }),
-          "Выбрать изображение",
+          capabilities.touch ? "Из галереи" : "Выбрать изображение",
         ),
         e(
           "button",
@@ -673,28 +697,39 @@ export function OcrTestScreen({ onBack }: { onBack: () => void }) {
       ),
       file &&
         e(
-          "p",
-          { class: "hint" },
-          "Выбрано: ",
-          e("strong", null, file.name),
+          "div",
+          { class: "ocr-selected-file" },
+          e("span", { class: "ocr-selected-icon" }, e(UiIcon, { name: "image", size: 18 })),
+          e("span", { class: "ocr-selected-copy" },
+            e("strong", null, file.name),
+            e("small", null, `${formatModelBytes(file.size)} · ${file.type || "image"}`),
+          ),
+          e("button", {
+            type: "button",
+            class: "icon-button",
+            disabled: busy,
+            onClick: () => setFile(null),
+            "aria-label": "Убрать изображение",
+            title: "Убрать изображение",
+          }, e(UiIcon, { name: "trash", size: 16 })),
         ),
       progress &&
         e(
           "p",
-          { class: "hint", role: "status", "aria-live": "polite" },
+          { class: "hint ocr-progress-status", role: "status", "aria-live": "polite" },
           progress.message,
         ),
       error && e("p", { class: "error", role: "alert" }, error),
       lastResult &&
         e(
           "p",
-          { class: "hint" },
+          { class: "hint ocr-result-meta" },
           `${lastResult.modeUsed} · ${lastResult.backend} · ${lastResult.durationMs} мс · строк: ${lastResult.lines.length}`,
         ),
       lastResult &&
         e(
           "div",
-          { class: "editor-label" },
+          { class: "editor-label ocr-result-editor" },
           e("span", null, "Распознанный текст"),
           e("textarea", {
             value: ocrDraft,

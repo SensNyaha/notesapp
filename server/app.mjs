@@ -9,6 +9,8 @@ const version = JSON.parse(readFileSync(new URL('../package.json', import.meta.u
 const contentTypes = new Map([
   ['.html', 'text/html; charset=utf-8'],
   ['.js', 'text/javascript; charset=utf-8'],
+  ['.mjs', 'text/javascript; charset=utf-8'],
+  ['.wasm', 'application/wasm'],
   ['.css', 'text/css; charset=utf-8'],
   ['.json', 'application/json; charset=utf-8'],
   ['.webmanifest', 'application/manifest+json; charset=utf-8'],
@@ -37,10 +39,13 @@ export async function createApp({ dataDir = resolve('data'), staticDir = resolve
     if (status === 500) app.log.error({ requestId: request.id }, 'Request failed');
     reply.code(status).send({ error: status === 500 ? 'server_error' : 'invalid_request' });
   });
-  app.addHook('onSend', async (_request, reply, payload) => {
+  app.addHook('onSend', async (request, reply, payload) => {
     reply.header('X-Content-Type-Options', 'nosniff');
     reply.header('Referrer-Policy', 'no-referrer');
-    reply.header('Content-Security-Policy', "default-src 'self'; script-src 'self'; style-src 'self'; img-src 'self' blob:; connect-src 'self'; worker-src 'self'; manifest-src 'self'; object-src 'none'; base-uri 'none'; frame-ancestors 'none'; form-action 'self'");
+    reply.header(
+      'Content-Security-Policy',
+      "default-src 'self'; script-src 'self' 'unsafe-eval'; style-src 'self'; img-src 'self' blob: data:; connect-src 'self' data: blob:; worker-src 'self' blob:; manifest-src 'self'; object-src 'none'; base-uri 'none'; frame-ancestors 'none'; form-action 'self'",
+    );
     // Only public, content-hashed bundles can use a long HTTP cache.
     if (!reply.hasHeader('Cache-Control')) reply.header('Cache-Control', 'no-store');
     return payload;

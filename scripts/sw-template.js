@@ -1,9 +1,53 @@
 /* Generated at build time. Only the public application shell is cached. */
 const CACHE = __CACHE__;
 const OCR_MODEL_CACHE = 'tasks-ocr-models-v1';
+const OCR_MANIFEST = '/ocr-models/manifest.json';
 const ASSETS = __ASSETS__;
+const OCR_ASSETS = __OCR_ASSETS__;
+async function shellReady() {
+  const cache = await caches.open(CACHE);
+  return (await Promise.all(ASSETS.map(path => cache.match(path)))).every(Boolean);
+}
+async function downloadShell(report) {
+  await caches.delete(CACHE);
+  const cache = await caches.open(CACHE);
+  report?.({ type: 'UPDATE_PROGRESS', loaded: 0, total: ASSETS.length });
+  try {
+    for (let index = 0; index < ASSETS.length; index++) {
+      const path = ASSETS[index];
+      const response = await fetch(path, { cache: 'no-store' });
+      if (!response || response.ok === false) throw new Error(`Unable to download ${path}`);
+      await cache.put(path, response.clone ? response.clone() : response);
+      report?.({ type: 'UPDATE_PROGRESS', loaded: index + 1, total: ASSETS.length });
+    }
+  } catch (error) {
+    await caches.delete(CACHE);
+    throw error;
+  }
+}
 self.addEventListener('install', event => {
-  event.waitUntil(caches.open(CACHE).then(cache => cache.addAll(ASSETS)));
+  event.waitUntil((async () => {
+    // One-time migration from the broken OCR shell that precached ORT runtime
+    // responses with stale MIME headers. It must remain automatic because that
+    // worker cannot display the new deferred-download interface.
+    const keys = await caches.keys();
+    let migrateLegacyOcrShell = false;
+    for (const key of keys) {
+      if (!key.startsWith('tasks-shell-') || key === CACHE) continue;
+      const legacy = await caches.open(key);
+      if (await legacy.match('/ocr-runtime/paddle/ort-wasm-simd-threaded.jsep.mjs')) {
+        migrateLegacyOcrShell = true;
+        break;
+      }
+    }
+    // On a normal update only this small worker is installed. The application
+    // shell is downloaded later, after the user presses the update button.
+    if (!self.registration.active || migrateLegacyOcrShell) {
+      const cache = await caches.open(CACHE);
+      await cache.addAll(ASSETS);
+    }
+    if (migrateLegacyOcrShell) await self.skipWaiting();
+  })());
 });
 self.addEventListener('activate', event => {
   event.waitUntil((async () => {
@@ -13,8 +57,29 @@ self.addEventListener('activate', event => {
   })());
 });
 self.addEventListener('message', event => {
+  if (event.data?.type === 'DOWNLOAD_UPDATE') {
+    event.waitUntil((async () => {
+      const port = event.ports?.[0];
+      try {
+        await downloadShell(message => port?.postMessage(message));
+        port?.postMessage({ type: 'UPDATE_READY', loaded: ASSETS.length, total: ASSETS.length });
+      } catch {
+        port?.postMessage({ type: 'UPDATE_ERROR' });
+      }
+    })());
+    return;
+  }
   if (event.data?.type !== 'SKIP_WAITING') return;
   event.waitUntil((async () => {
+    if (!await shellReady()) {
+      // Compatibility with the previously released UI, whose update button
+      // sends SKIP_WAITING directly. Its click still counts as confirmation.
+      try { await downloadShell(); }
+      catch {
+        event.ports?.[0]?.postMessage({ ok: false, reason: 'download_failed' });
+        return;
+      }
+    }
     const clients = await self.clients.matchAll({ type: 'window', includeUncontrolled: true });
     // Older tabs cannot reliably acknowledge saving their drafts. Defer activation.
     if (clients.length !== 1 || clients[0].id !== event.source?.id) {
@@ -28,12 +93,38 @@ self.addEventListener('message', event => {
 self.addEventListener('fetch', event => {
   const url = new URL(event.request.url);
   if (event.request.method !== 'GET' || url.origin !== self.location.origin || url.pathname.startsWith('/api/')) return;
-  const path = event.request.mode === 'navigate' && url.pathname === '/' ? '/index.html' : url.pathname;
-  if (path.startsWith('/ocr-models/')) {
+  if (event.request.mode === 'navigate' && url.pathname === '/') {
     event.respondWith((async () => {
-      const shellCache = await caches.open(CACHE);
-      const shellCached = await shellCache.match(path);
-      if (shellCached) return shellCached;
+      const cache = await caches.open(CACHE);
+      const cached = await cache.match('/index.html');
+      if (cached) return cached;
+      try {
+        const response = await fetch(event.request);
+        if (response.ok) await cache.put('/index.html', response.clone());
+        return response;
+      } catch {
+        return await cache.match('/index.html') || Response.error();
+      }
+    })());
+    return;
+  }
+  const path = url.pathname;
+  if (path === OCR_MANIFEST) {
+    event.respondWith((async () => {
+      const modelCache = await caches.open(OCR_MODEL_CACHE);
+      try {
+        const response = await fetch(event.request);
+        if (response.ok) await modelCache.put(OCR_MANIFEST, response.clone());
+        return response;
+      } catch {
+        return await modelCache.match(OCR_MANIFEST) || Response.error();
+      }
+    })());
+    return;
+  }
+  if (OCR_ASSETS.includes(path)) {
+    event.respondWith((async () => {
+      if (url.searchParams.has('ocr-download')) return fetch(event.request);
       const modelCache = await caches.open(OCR_MODEL_CACHE);
       return await modelCache.match(path) || fetch(event.request);
     })());

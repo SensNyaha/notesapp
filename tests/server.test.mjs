@@ -1,6 +1,6 @@
 import test from 'node:test';
 import assert from 'node:assert/strict';
-import { mkdtemp, rm } from 'node:fs/promises';
+import { mkdtemp, readdir, rm } from 'node:fs/promises';
 import { tmpdir } from 'node:os';
 import { join, resolve } from 'node:path';
 import { createApp } from '../server/app.mjs';
@@ -28,8 +28,13 @@ test('API reads SQLite; reopening preserves identity and increments boot count',
     const html = await app.inject('/');
     assert.equal(html.statusCode, 200);
     assert.match(html.headers['content-type'], /text\/html/);
-    assert.match(html.headers['content-security-policy'], /script-src 'self'/);
-    assert.match(html.headers['content-security-policy'], /img-src 'self' blob:/);
+    assert.match(
+      html.headers['content-security-policy'],
+      /script-src 'self' 'unsafe-eval'/,
+    );
+    assert.match(html.headers['content-security-policy'], /img-src 'self' blob: data:/);
+    assert.match(html.headers['content-security-policy'], /worker-src 'self' blob:/);
+    assert.match(html.headers['content-security-policy'], /connect-src 'self' data: blob:/);
     const assets = [...html.body.matchAll(/(?:src|href)="(\/assets\/[^\"]+)"/g)].map(match => match[1]);
     assert(assets.some(path => /-[\w-]+\.js$/.test(path)));
     assert(assets.some(path => /-[\w-]+\.css$/.test(path)));
@@ -38,12 +43,34 @@ test('API reads SQLite; reopening preserves identity and increments boot count',
       assert.equal(asset.statusCode, 200, path);
       assert.equal(asset.headers['cache-control'], 'public, max-age=31536000, immutable');
       assert.match(asset.headers['content-type'], path.endsWith('.css') ? /text\/css/ : /text\/javascript/);
+      if (path.endsWith('.js'))
+        assert.match(
+          asset.headers['content-security-policy'],
+          /script-src 'self' 'unsafe-eval'/,
+        );
       assert.equal((await app.inject(path + '.map')).statusCode, 404);
     }
+    const workerEntry = (await readdir(resolve('dist/assets')))
+      .find(name => /^worker-entry-[\w-]+\.js$/.test(name));
+    assert(workerEntry, 'Paddle OCR worker bundle exists');
+    const workerAsset = await app.inject('/assets/' + workerEntry);
+    assert.equal(workerAsset.statusCode, 200);
+    assert.match(
+      workerAsset.headers['content-security-policy'],
+      /script-src 'self' 'unsafe-eval'/,
+    );
     assert(!html.body.includes('/vendor/') && !html.body.includes('/src/'));
     assert.equal((await app.inject('/index.html')).statusCode, 200);
     assert.equal((await app.inject('/sw.js')).headers['cache-control'], 'no-cache');
     assert.match((await app.inject('/manifest.webmanifest')).headers['content-type'], /application\/manifest\+json/);
+    assert.match(
+      (await app.inject('/ocr-runtime/paddle/ort-wasm-simd-threaded.jsep.mjs')).headers['content-type'],
+      /text\/javascript/,
+    );
+    assert.match(
+      (await app.inject('/ocr-runtime/paddle/ort-wasm-simd-threaded.jsep.wasm')).headers['content-type'],
+      /application\/wasm/,
+    );
     for (const url of ['/api/missing', '/server/app.mjs', '/data/tasks.sqlite', '/package.json', '/src/main.ts', '/vite.config.ts', '/tsconfig.json']) {
       assert.equal((await app.inject(url)).statusCode, 404);
     }

@@ -185,7 +185,10 @@ function ImageGallery({
   onClose: () => void;
 }) {
   const item = items.find((current) => current.id === activeId) ?? items[0];
-  const index = Math.max(0, items.findIndex((current) => current.id === item.id));
+  const index = Math.max(
+    0,
+    items.findIndex((current) => current.id === item.id),
+  );
   const [url, setUrl] = useState("");
   const [loading, setLoading] = useState(true);
   const [failed, setFailed] = useState(false);
@@ -376,15 +379,11 @@ export function Attachments({
     e(
       "div",
       { class: "section-heading" },
+      e("h2", null, "Файлы"),
       e(
-        "div",
-        null,
-        e("h2", null, "Файлы"),
-        e(
-          "p",
-          { class: "muted" },
-          items.length + " " + (items.length === 1 ? "файл" : "файлов"),
-        ),
+        "p",
+        { class: "muted" },
+        items.length + " " + (items.length === 1 ? "файл" : "файлов"),
       ),
     ),
     e(
@@ -448,7 +447,11 @@ export function Attachments({
             { class: "attachment-actions" },
             viewMode &&
               cover &&
-              e("span", { class: "badge accent attachment-cover-badge" }, "Обложка"),
+              e(
+                "span",
+                { class: "badge accent attachment-cover-badge" },
+                "Обложка",
+              ),
             item.data && !onDownload
               ? e(
                   "a",
@@ -507,7 +510,9 @@ export function Attachments({
                       ? " attachment-icon-button attachment-action-control attachment-cover-action"
                       : ""),
                   onClick: () => onSetCover(item),
-                  "aria-label": cover ? "Обложка" : "Сделать обложкой " + item.name,
+                  "aria-label": cover
+                    ? "Обложка"
+                    : "Сделать обложкой " + item.name,
                   title: cover ? "Обложка" : "Сделать обложкой",
                 },
                 e(UiIcon, { name: "image", size: 17 }),
@@ -899,6 +904,12 @@ export function RichTextEditor({
     }),
     !comment &&
       e(
+        "p",
+        { class: "hint" },
+        "Поддерживаются стандартные сочетания Ctrl/⌘+B, I, U; списки — Ctrl/⌘+Shift+7 или 8.",
+      ),
+    !comment &&
+      e(
         "div",
         { class: "editor-attachment-controls" },
         e(
@@ -922,12 +933,7 @@ export function RichTextEditor({
           "Добавить файлы",
         ),
       ),
-    !comment &&
-      e(
-        "p",
-        { class: "hint" },
-        "Поддерживаются стандартные сочетания Ctrl/⌘+B, I, U; списки — Ctrl/⌘+Shift+7 или 8.",
-      ),
+
     !comment &&
       e("input", {
         ref: cover,

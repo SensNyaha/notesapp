@@ -6,6 +6,8 @@ import {
   stat,
   writeFile,
 } from 'node:fs/promises';
+import { createReadStream } from 'node:fs';
+import { createHash } from 'node:crypto';
 import { dirname, relative, resolve } from 'node:path';
 import { fileURLToPath } from 'node:url';
 
@@ -27,6 +29,12 @@ async function listFiles(dir) {
     else result.push(full);
   }
   return result.sort();
+}
+
+async function sha256File(path) {
+  const hash = createHash('sha256');
+  for await (const chunk of createReadStream(path)) hash.update(chunk);
+  return hash.digest('hex');
 }
 
 await rm(tessRoot, { recursive: true, force: true });
@@ -59,6 +67,9 @@ await Promise.all([
   stat(resolve(paddleRec, 'model.tar')),
 ]);
 
+const paddleRuntimeAssets = await listFiles(resolve(runtimeRoot, 'paddle'));
+const htrRuntimeAssets = await listFiles(resolve(runtimeRoot, 'htr'));
+
 const packageDefinitions = {
   'printed-ru-en-v1': {
     kind: 'printed',
@@ -66,25 +77,32 @@ const packageDefinitions = {
     assets: [
       resolve(paddleDet, 'model.tar'),
       resolve(paddleRec, 'model.tar'),
+      ...paddleRuntimeAssets,
     ],
   },
   'handwriting-ru-v1': {
     kind: 'handwriting',
     language: 'ru',
     required: false,
-    assets: (await listFiles(resolve(modelsRoot, 'htr/ru')))
-      .filter((file) => !file.endsWith('quantize_config.json')),
+    assets: [
+      ...(await listFiles(resolve(modelsRoot, 'htr/ru')))
+        .filter((file) => !file.endsWith('quantize_config.json')),
+      ...htrRuntimeAssets,
+    ],
   },
   'handwriting-en-v1': {
     kind: 'handwriting',
     language: 'en',
     required: false,
-    assets: (await listFiles(resolve(modelsRoot, 'htr/en')))
-      .filter((file) => !file.endsWith('quantize_config.json')),
+    assets: [
+      ...(await listFiles(resolve(modelsRoot, 'htr/en')))
+        .filter((file) => !file.endsWith('quantize_config.json')),
+      ...htrRuntimeAssets,
+    ],
   },
 };
 
-const manifest = { version: 1, packages: {} };
+const manifest = { version: 3, runtimeComplete: false, packages: {} };
 for (const [id, definition] of Object.entries(packageDefinitions)) {
   const assets = [];
   for (const file of definition.assets) {
@@ -92,15 +110,20 @@ for (const [id, definition] of Object.entries(packageDefinitions)) {
     assets.push({
       url: '/' + relative(resolve(root, 'public'), file).replaceAll('\\', '/'),
       bytes: info.size,
+      sha256: await sha256File(file),
     });
   }
   manifest.packages[id] = {
     kind: definition.kind,
     ...(definition.language ? { language: definition.language } : {}),
     required: definition.required,
+    version: id.match(/-v(\d+)$/)?.[1] ?? '1',
     bytes: assets.reduce((sum, asset) => sum + asset.bytes, 0),
     assets,
   };
+  manifest.packages[id].integrity = createHash('sha256')
+    .update(JSON.stringify(assets))
+    .digest('hex');
 }
 
 await writeFile(

@@ -329,7 +329,7 @@
     color: #59657a;
   }
   .hint {
-    margin: 18px 0 0;
+    margin: 18px 0 0 !important;
   }
   .actions {
     display: flex;
@@ -5176,7 +5176,33 @@
     font-weight: 700;
   }
 
-  .update button:hover {
+  .update .update-action {
+    background-color: transparent;
+    background-image: linear-gradient(
+      90deg,
+      color-mix(in srgb, var(--info) 28%, transparent),
+      color-mix(in srgb, var(--info) 28%, transparent)
+    );
+    background-position: left center;
+    background-repeat: no-repeat;
+    background-size: var(--update-progress, 0%) 100%;
+    transition:
+      background-size 180ms ease,
+      border-color 180ms ease,
+      color 180ms ease;
+  }
+
+  .update .update-action:disabled {
+    cursor: progress;
+    opacity: 1;
+  }
+
+  .update .update-action-ready {
+    border-color: var(--success);
+    color: var(--success);
+  }
+
+  .update button:not(:disabled):hover {
     background: color-mix(in srgb, var(--info) 10%, transparent);
   }
 
@@ -9209,6 +9235,211 @@
   }
 }
 
+/* OCR sandbox follows the note editor visual language without exposing its
+   implementation-only file inputs. */
+.ocr-test-screen {
+  display: flex;
+  flex-direction: column;
+}
+.ocr-test-screen > .rich-editor {
+  order: 3;
+}
+.ocr-test-screen > .ocr-workbench {
+  order: 4;
+}
+.ocr-workbench {
+  display: grid;
+  grid-template-columns: repeat(2, minmax(0, 1fr));
+  gap: 12px;
+  margin-top: 16px;
+  padding: 18px;
+}
+.ocr-workbench > :not(.ocr-setting) {
+  grid-column: 1 / -1;
+}
+.ocr-workbench > .section-heading {
+  margin: 0;
+}
+.ocr-workbench > .section-heading h2,
+.ocr-workbench > .section-heading p {
+  margin: 0;
+}
+.ocr-workbench > .section-heading p {
+  margin-top: 3px;
+}
+.ocr-privacy-note {
+  display: flex !important;
+  align-items: center;
+  min-height: 34px;
+  margin: 0 !important;
+  padding: 8px 10px;
+  border-radius: 10px;
+  background: color-mix(in srgb, var(--accent) 9%, transparent);
+  color: var(--text-secondary);
+}
+.ocr-step-title {
+  margin: 6px 0 -2px;
+  color: var(--text-secondary);
+  font-size: 12px;
+  font-weight: 750;
+  letter-spacing: .06em;
+  text-transform: uppercase;
+}
+.ocr-setting {
+  min-width: 0;
+  margin: 0;
+}
+.ocr-setting select {
+  width: 100%;
+  margin-top: 6px;
+}
+.ocr-source-actions {
+  display: grid;
+  grid-template-columns: repeat(2, minmax(0, 1fr));
+  gap: 8px;
+  margin: 0;
+}
+.ocr-source-actions button {
+  justify-content: center;
+  min-width: 0;
+}
+.ocr-source-actions .primary {
+  grid-column: 1 / -1;
+}
+.ocr-selected-file {
+  display: grid;
+  grid-template-columns: auto minmax(0, 1fr) auto;
+  align-items: center;
+  gap: 10px;
+  min-width: 0;
+  padding: 10px;
+  border: 1px solid var(--border);
+  border-radius: 12px;
+  background: var(--surface-subtle);
+}
+.ocr-selected-icon {
+  display: grid;
+  place-items: center;
+  width: 38px;
+  height: 38px;
+  border-radius: 10px;
+  background: color-mix(in srgb, var(--accent) 14%, var(--surface));
+  color: var(--accent);
+}
+.ocr-selected-copy {
+  display: grid;
+  min-width: 0;
+}
+.ocr-selected-copy strong,
+.ocr-selected-copy small {
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}
+.ocr-selected-copy small {
+  margin-top: 2px;
+  color: var(--text-tertiary);
+}
+.ocr-progress-status,
+.ocr-result-meta {
+  margin: 0 !important;
+}
+.ocr-result-editor {
+  display: grid;
+  gap: 8px;
+  margin: 0;
+  padding-top: 12px;
+  border-top: 1px solid var(--border);
+}
+.ocr-result-editor textarea {
+  min-height: 170px;
+  resize: vertical;
+}
+.ocr-access-status {
+  order: 90;
+  margin: 8px 0 0 !important;
+}
+.ocr-model-manager {
+  order: 100;
+  overflow: hidden;
+  margin-top: 0;
+  border: 1px solid var(--border);
+  border-radius: 12px;
+  background: var(--surface-subtle);
+}
+.ocr-model-summary {
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  gap: 12px;
+  min-height: 48px;
+  padding: 10px 12px;
+  font-weight: 750;
+  cursor: pointer;
+  list-style: none;
+}
+.ocr-model-summary::-webkit-details-marker {
+  display: none;
+}
+.ocr-model-summary small {
+  color: var(--accent);
+  font-weight: 700;
+}
+.ocr-model-manager[open] > .ocr-model-summary {
+  border-bottom: 1px solid var(--border);
+}
+.ocr-model-manager > :not(summary) {
+  margin-right: 12px;
+  margin-left: 12px;
+}
+.ocr-model-intro {
+  margin-top: 12px !important;
+}
+.ocr-model-actions {
+  margin: 8px 12px 12px !important;
+}
+.ocr-model-row {
+  padding: 12px 0;
+}
+
+@media (max-width: 760px) {
+  .ocr-workbench {
+    grid-template-columns: minmax(0, 1fr);
+    gap: 10px;
+    margin-top: 12px;
+    padding: 14px;
+    border: 1px solid var(--border);
+    border-radius: 14px;
+    background: var(--surface);
+  }
+  .ocr-workbench > .ocr-setting {
+    grid-column: 1 / -1;
+  }
+  .ocr-workbench .hint {
+    display: block;
+  }
+  .ocr-source-actions {
+    grid-template-columns: repeat(2, minmax(0, 1fr));
+  }
+  .ocr-source-actions button {
+    padding-inline: 9px;
+    font-size: 13px;
+  }
+  .ocr-source-actions .primary,
+  .ocr-source-actions > button:only-child {
+    grid-column: 1 / -1;
+  }
+}
+
+@media (max-width: 390px) {
+  .ocr-source-actions {
+    grid-template-columns: minmax(0, 1fr);
+  }
+  .ocr-source-actions .primary {
+    grid-column: auto;
+  }
+}
+
 /* Compact attachment actions in note view. */
 .attachment-card.is-view-mode {
   position: relative;
@@ -9416,4 +9647,25 @@
     bottom: 8px;
     transform: none;
   }
+}
+
+/* PWA edge-swipe navigation feedback. */
+.pwa-swipe-back-indicator {
+  position: fixed;
+  z-index: 320;
+  top: 50%;
+  left: max(6px, env(safe-area-inset-left));
+  display: grid;
+  place-items: center;
+  width: 44px;
+  height: 44px;
+  border: 1px solid color-mix(in srgb, var(--accent) 42%, var(--border));
+  border-radius: 50%;
+  background: color-mix(in srgb, var(--surface-raised) 92%, transparent);
+  color: var(--accent);
+  box-shadow: var(--shadow-float);
+  opacity: calc(0.35 + var(--swipe-progress) * 0.65);
+  pointer-events: none;
+  transform: translate(calc(var(--swipe-progress) * 22px), -50%)
+    scale(calc(0.82 + var(--swipe-progress) * 0.18));
 }

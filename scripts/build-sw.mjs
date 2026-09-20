@@ -13,7 +13,16 @@ async function list(dir) {
   return result.sort();
 }
 const paths = await list(root);
+const ocrManifest = JSON.parse(
+  await readFile(resolve(root, 'ocr-models/manifest.json'), 'utf8'),
+);
+const ocrAssets = [...new Set(
+  Object.values(ocrManifest.packages)
+    .flatMap((modelPackage) => modelPackage.assets.map((asset) => asset.url)),
+)].sort();
+const template = await readFile('scripts/sw-template.js', 'utf8');
 const hash = createHash('sha256');
+hash.update(template);
 for (const path of paths) { hash.update(relative(root, path)); hash.update(await readFile(path)); }
 const version = hash.digest('hex').slice(0, 16);
 const shellPaths = [];
@@ -21,15 +30,22 @@ for (const path of paths) {
   const rel = relative(root, path).replaceAll('\\', '/');
   const size = (await stat(path)).size;
   const deferredOcrModel =
-    rel.startsWith('ocr-models/') &&
-    rel !== 'ocr-models/manifest.json';
+    rel.startsWith('ocr-models/') || rel.startsWith('ocr-runtime/');
   const deferredOcrBundle =
     /(?:htr\.worker-|worker-entry-|ort\.bundle\.min-)/.test(rel) ||
     (rel.startsWith('assets/dist-') && size > 5_000_000);
-  if (!deferredOcrModel && !deferredOcrBundle)
+  const ocrManaged = ocrAssets.includes('/' + rel);
+  if (!deferredOcrModel && !deferredOcrBundle && !ocrManaged)
     shellPaths.push(path);
 }
 const assets = shellPaths.map(path => '/' + relative(root, path).replaceAll('\\', '/'));
-const template = await readFile('scripts/sw-template.js', 'utf8');
-await writeFile(resolve(root, 'sw.js'), template.replace('__CACHE__', JSON.stringify(`tasks-shell-${version}`)).replace('__ASSETS__', JSON.stringify(assets)));
-console.log(`Service Worker: ${assets.length} public assets, version ${version}`);
+await writeFile(
+  resolve(root, 'sw.js'),
+  template
+    .replace('__CACHE__', JSON.stringify(`tasks-shell-${version}`))
+    .replace('__ASSETS__', JSON.stringify(assets))
+    .replace('__OCR_ASSETS__', JSON.stringify(ocrAssets)),
+);
+console.log(
+  `Service Worker: ${assets.length} shell assets, ${ocrAssets.length} OCR assets, version ${version}`,
+);

@@ -34,6 +34,10 @@ export interface OCRResult {
 export interface OCRRecognizeOptions {
   mode: OCRMode;
   languages: OCRLanguage;
+  preprocessing?: {
+    grayscale?: boolean;
+    normalizeContrast?: boolean;
+  };
 }
 
 export interface OCRProgress {

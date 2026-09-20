@@ -1,6 +1,6 @@
 {
   "name": "tasks",
-  "version": "0.20.8",
+  "version": "0.20.10",
   "private": true,
   "allowScripts": {
     "argon2@0.45.1": true
@@ -12,7 +12,7 @@
   "scripts": {
     "typecheck": "tsc --noEmit",
     "ocr:sync-assets": "node scripts/sync-ocr-assets.mjs",
-    "build": "npm run ocr:sync-assets && npm run typecheck && vite build && node scripts/build-sw.mjs",
+    "build": "npm run ocr:sync-assets && npm run typecheck && vite build && node scripts/finalize-ocr-manifest.mjs && node scripts/build-sw.mjs",
     "start": "node server/index.mjs",
     "check": "node --test tests/*.test.mjs",
     "compose:up": "node scripts/write-docker-package.mjs && docker compose -f compose.yaml -f compose.ca.yaml up -d --build",
@@ -23,6 +23,7 @@
   },
   "dependencies": {
     "@fastify/cookie": "11.1.2",
+    "@noble/hashes": "2.4.0",
     "@simplewebauthn/browser": "^14.0.0",
     "@simplewebauthn/server": "^14.0.2",
     "argon2": "0.45.1",

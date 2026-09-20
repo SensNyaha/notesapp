@@ -19,9 +19,15 @@ interface HtrRequest {
 
 interface DisposeRequest {
   type: "dispose";
+  port: MessagePort;
 }
 
-type RequestMessage = HtrRequest | DisposeRequest;
+interface CancelRequest {
+  type: "cancel";
+  id: string;
+}
+
+type RequestMessage = HtrRequest | DisposeRequest | CancelRequest;
 type HtrLanguage = "ru" | "en";
 interface WorkerContext {
   postMessage(message: unknown): void;
@@ -35,6 +41,14 @@ interface WorkerContext {
 const ctx = self as unknown as WorkerContext;
 let activeLanguage: HtrLanguage | null = null;
 let activeRuntime: Promise<LocalTrocr> | null = null;
+const cancelledRequests = new Set<string>();
+let workQueue = Promise.resolve();
+
+function throwIfCancelled(id: string) {
+  if (cancelledRequests.has(id)) {
+    throw new DOMException("Распознавание отменено.", "AbortError");
+  }
+}
 
 function postProgress(
   id: string,
@@ -112,56 +126,70 @@ function bounds(
   ] as const;
 }
 async function recognize(message: HtrRequest) {
+  throwIfCancelled(message.id);
   const blob = new Blob([message.image.buffer], {
     type: message.image.mime,
   });
   const source = await RawImage.fromBlob(blob);
-  const recognized = new Map<number, OCRLine>();
-  const groups: Record<HtrLanguage, number[]> = { ru: [], en: [] };
+  try {
+    throwIfCancelled(message.id);
+    const recognized = new Map<number, OCRLine>();
+    const groups: Record<HtrLanguage, number[]> = { ru: [], en: [] };
 
-  for (const index of message.indexes) {
-    const item = message.items[index];
-    if (!item) continue;
-    groups[languageFor(item, message.languages)].push(index);
-  }
-
-  let current = 0;
-  const total = groups.ru.length + groups.en.length;
-  for (const language of ["ru", "en"] as const) {
-    if (!groups[language].length) continue;
-    const recognizer = await getRuntime(language, message.id);
-    for (const index of groups[language]) {
+    for (const index of message.indexes) {
       const item = message.items[index];
       if (!item) continue;
-      current += 1;
-      postProgress(
-        message.id,
-        `Распознаём рукописную строку ${current} из ${total}…`,
-        current,
-        total,
-      );
-      const [x0, y0, x1, y1] = bounds(
-        item.poly,
-        source.width,
-        source.height,
-      );
-      const crop = await source.clone().crop([x0, y0, x1, y1]);
-      const text = await recognizer.recognize(crop);
-      if (!text) continue;
-      recognized.set(index, {
-        text,
-        engine: "trocr",
-        language,
-        poly: item.poly.map(({ x, y }) => ({ x, y })),
-      });
+      groups[languageFor(item, message.languages)].push(index);
     }
-  }
 
-  ctx.postMessage({
-    type: "result",
-    id: message.id,
-    lines: [...recognized.entries()],
-  });
+    let current = 0;
+    const total = groups.ru.length + groups.en.length;
+    for (const language of ["ru", "en"] as const) {
+      throwIfCancelled(message.id);
+      if (!groups[language].length) continue;
+      const recognizer = await getRuntime(language, message.id);
+      throwIfCancelled(message.id);
+      for (const index of groups[language]) {
+        throwIfCancelled(message.id);
+        const item = message.items[index];
+        if (!item) continue;
+        current += 1;
+        postProgress(
+          message.id,
+          `Распознаём рукописную строку ${current} из ${total}…`,
+          current,
+          total,
+        );
+        const [x0, y0, x1, y1] = bounds(
+          item.poly,
+          source.width,
+          source.height,
+        );
+        const crop = await source.clone().crop([x0, y0, x1, y1]);
+        try {
+          const text = await recognizer.recognize(crop);
+          throwIfCancelled(message.id);
+          if (!text) continue;
+          recognized.set(index, {
+            text,
+            engine: "trocr",
+            language,
+            poly: item.poly.map(({ x, y }) => ({ x, y })),
+          });
+        } finally {
+          crop.data = new Uint8Array(0);
+        }
+      }
+    }
+
+    ctx.postMessage({
+      type: "result",
+      id: message.id,
+      lines: [...recognized.entries()],
+    });
+  } finally {
+    source.data = new Uint8Array(0);
+  }
 }
 
 async function dispose() {
@@ -179,19 +207,39 @@ async function dispose() {
 
 ctx.addEventListener("message", (event: MessageEvent<RequestMessage>) => {
   const message = event.data;
-  if (message.type === "dispose") {
-    void dispose().finally(() => ctx.close());
+  if (message.type === "cancel") {
+    cancelledRequests.add(message.id);
     return;
   }
 
-  void recognize(message).catch((caught) => {
-    ctx.postMessage({
-      type: "error",
-      id: message.id,
-      message:
-        caught instanceof Error
-          ? caught.message
-          : "Не удалось распознать рукописный текст.",
+  if (message.type === "dispose") {
+    workQueue = workQueue.finally(async () => {
+      await dispose();
+      message.port.postMessage({ type: "disposed" });
+      message.port.close();
+      ctx.close();
     });
+    return;
+  }
+
+  workQueue = workQueue.finally(async () => {
+    try {
+      await recognize(message);
+    } catch (caught) {
+      ctx.postMessage({
+        type: "error",
+        id: message.id,
+        code:
+          caught instanceof DOMException && caught.name === "AbortError"
+            ? "cancelled"
+            : "worker-failed",
+        message:
+          caught instanceof Error
+            ? caught.message
+            : "Не удалось распознать рукописный текст.",
+      });
+    } finally {
+      cancelledRequests.delete(message.id);
+    }
   });
 });

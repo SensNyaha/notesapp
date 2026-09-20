@@ -1,5 +1,5 @@
 import { h, render } from 'preact';
-import { useEffect, useRef, useState } from 'preact/hooks';
+import { useCallback, useEffect, useRef, useState } from 'preact/hooks';
 import { lazy, Suspense } from 'preact/compat';
 import { isHealthResponse, type HealthResponse } from './types/api';
 import './style.css';
@@ -35,6 +35,7 @@ const OcrTestScreen = lazy(() =>
 applyTheme();
 
 type DefinitionRow = [term: string, value: string, wide?: boolean];
+type UpdatePhase = 'available' | 'downloading' | 'ready' | 'error';
 function initialReminderTarget():ReminderTarget|undefined{
   const match=location.hash.match(/^#reminder=([0-9a-f.-]+)$/),parts=match?.[1].split('.');
   const uuid=/^[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}$/;
@@ -63,6 +64,10 @@ function App() {
   const userRef = useRef<User | null>(null); userRef.current = user;
   const [page, setPage] = useState<'home'|'today'|'projects'|'settings'|'account'|'appearance'|'password'|'users'|'ocr-test'|'devices'|'passkeys'|'diagnostics'|'notifications'|'data'|'collaboration'|'archive'|'trash'|'about'>('home');
   const previousWorkspacePage = useRef<'home'|'today'|'projects'>('home');
+  const pageHistory=useRef<Array<typeof page>>([]),gestureBackInProgress=useRef(false);
+  const logoNavigationGuard = useRef<(() => Promise<boolean>) | null>(null);
+  const [notesHomeVersion,setNotesHomeVersion]=useState(0);
+  const registerLogoNavigationGuard=useCallback((guard:(()=>Promise<boolean>)|null)=>{logoNavigationGuard.current=guard;},[]);
   const [localProfiles, setLocalProfiles] = useState<User[]>([]);
   const localMode = useRef(false);
   const [notice, setNotice] = useState('');
@@ -85,6 +90,8 @@ function App() {
   const [shell, setShell] = useState('Подготавливаем…');
   const [swError, setSwError] = useState('');
   const [waiting, setWaiting] = useState<ServiceWorker | null>(null);
+  const [updatePhase, setUpdatePhase] = useState<UpdatePhase>('available');
+  const [updateProgress, setUpdateProgress] = useState(0);
   const [vaultContext,setVaultContext]=useState<ShellVaultContext|null>(null);
   const secure = window.isSecureContext;
   const cryptoAvailable = secure && Boolean(window.crypto?.subtle);
@@ -201,15 +208,28 @@ function App() {
       return undefined;
     }
     let alive = true;
+    let updateTimer: number | undefined;
+    let checkForUpdate: (() => void) | undefined;
     navigator.serviceWorker.register('/sw.js', { updateViaCache: 'none' }).then(async registration => {
       if (!alive) return;
-      if (registration.waiting) setWaiting(registration.waiting);
+      const offerUpdate = (worker: ServiceWorker) => {
+        setWaiting(worker);
+        setUpdatePhase('available');
+        setUpdateProgress(0);
+      };
+      if (registration.waiting) offerUpdate(registration.waiting);
       registration.addEventListener('updatefound', () => {
         const worker = registration.installing;
         worker?.addEventListener('statechange', () => {
-          if (alive && worker.state === 'installed' && navigator.serviceWorker.controller) setWaiting(worker);
+          if (alive && worker.state === 'installed' && navigator.serviceWorker.controller) offerUpdate(worker);
         });
       });
+      checkForUpdate = () => {
+        if (document.visibilityState === 'visible' && navigator.onLine) void registration.update().catch(() => {});
+      };
+      document.addEventListener('visibilitychange', checkForUpdate);
+      window.addEventListener('online', checkForUpdate);
+      updateTimer = window.setInterval(checkForUpdate, 15 * 60 * 1000);
       await navigator.serviceWorker.ready;
       if (alive) setShell('Готова к открытию без сети');
     }).catch(() => {
@@ -218,10 +238,47 @@ function App() {
         setSwError('Не удалось сохранить оболочку. Перезагрузите страницу при работающем сервере.');
       }
     });
-    return () => { alive = false; };
+    return () => {
+      alive = false;
+      if (checkForUpdate) {
+        document.removeEventListener('visibilitychange', checkForUpdate);
+        window.removeEventListener('online', checkForUpdate);
+      }
+      if (updateTimer !== undefined) window.clearInterval(updateTimer);
+    };
   }, []);
 
-  async function applyUpdate() {
+  function downloadUpdate() {
+    if (!waiting || updatePhase === 'downloading') return;
+    setUpdatePhase('downloading');
+    setUpdateProgress(0);
+    setAuthError('');
+    const channel = new MessageChannel();
+    channel.port1.onmessage = ({ data }) => {
+      if (data?.type === 'UPDATE_PROGRESS') {
+        const total = Number(data.total);
+        const loaded = Number(data.loaded);
+        setUpdateProgress(total > 0 ? Math.max(0, Math.min(1, loaded / total)) : 0);
+      } else if (data?.type === 'UPDATE_READY') {
+        setUpdateProgress(1);
+        setUpdatePhase('ready');
+        channel.port1.close();
+      } else if (data?.type === 'UPDATE_ERROR') {
+        setUpdatePhase('error');
+        setAuthError('Не удалось загрузить обновление. Проверьте подключение и повторите попытку.');
+        channel.port1.close();
+      }
+    };
+    try {
+      waiting.postMessage({ type: 'DOWNLOAD_UPDATE' }, [channel.port2]);
+    } catch {
+      channel.port1.close();
+      setUpdatePhase('error');
+      setAuthError('Не удалось начать загрузку обновления. Повторите попытку.');
+    }
+  }
+
+  async function restartAfterUpdate() {
     if (!waiting) return;
     try { await flushDraft(); } catch { setAuthError('Сначала сохраните черновик. Обновление отложено.'); return; }
     const reload = async () => {
@@ -236,7 +293,13 @@ function App() {
       channel.port1.close();
       if (!data.ok) {
         navigator.serviceWorker.removeEventListener('controllerchange', reload);
-        setAuthError('Закройте другие вкладки приложения и повторите обновление. Их черновики должны сохраниться перед закрытием.');
+        if (data.reason === 'not_ready') {
+          setUpdatePhase('available');
+          setUpdateProgress(0);
+          setAuthError('Файлы обновления ещё не загружены. Запустите загрузку повторно.');
+        } else {
+          setAuthError('Закройте другие вкладки приложения и повторите обновление. Их черновики должны сохраниться перед закрытием.');
+        }
       }
     };
     waiting.postMessage({ type: 'SKIP_WAITING' }, [channel.port2]);
@@ -255,8 +318,21 @@ function App() {
     ['Часовой пояс', Intl.DateTimeFormat().resolvedOptions().timeZone],
   ];
 
+  const updateButtonLabel = updatePhase === 'ready' ? 'Перезапустить приложение'
+    : updatePhase === 'downloading' ? `Загрузка ${Math.round(updateProgress * 100)}%`
+    : updatePhase === 'error' ? 'Повторить загрузку'
+    : 'Обновить приложение';
   const updateNotice = waiting && e('div', { class: 'update', role: 'status' },
-    'Доступна новая версия оболочки.', e('button', { onClick: applyUpdate }, 'Обновить приложение'));
+    e('span', null, updatePhase === 'ready' ? 'Новая версия загружена и готова к запуску.'
+      : updatePhase === 'downloading' ? 'Загружаем новую версию приложения…'
+      : updatePhase === 'error' ? 'Загрузка обновления прервана.'
+      : 'Доступна новая версия приложения.'),
+    e('button', {
+      class: `update-action update-action-${updatePhase}`,
+      disabled: updatePhase === 'downloading',
+      style: `--update-progress:${Math.round(updateProgress * 100)}%`,
+      onClick: updatePhase === 'ready' ? restartAfterUpdate : downloadUpdate,
+    }, updateButtonLabel));
   if (authLoading) return e('main', { class: 'auth-screen', role: 'status' }, 'Проверяем вход…');
   if (!user) return e('div', {class:'logged-out-shell'},
     updateNotice && e('div', { class: 'auth-status' }, updateNotice),
@@ -275,9 +351,26 @@ function App() {
     e(PasswordScreen, { key: user.id, user, onBack: () => setPage('home'), onLogout: logout, onRefresh: checkSession,
       onDone: (result) => { authGeneration.current++;void requireOutboxReview(result).catch(()=>{}).finally(()=>{userRef.current=result;setUser(result);setPage('home');setAuthError('');setNotice('Пароль изменён.');}); } }));
   async function navigate(next:typeof page){
-    try{await flushDraft();setAuthError('');setPage(next);}
+    try{await flushDraft();if(next!==page&&!gestureBackInProgress.current){pageHistory.current.push(page);if(pageHistory.current.length>15)pageHistory.current.shift();}gestureBackInProgress.current=false;setAuthError('');setPage(next);}
     catch{setAuthError('Сначала сохраните черновик.');}
   }
+  async function navigateHomeFromLogo(){
+    const guard=logoNavigationGuard.current;
+    if(guard&&!await guard())return;
+    if(page!=='home'){pageHistory.current.push(page);if(pageHistory.current.length>15)pageHistory.current.shift();}
+    setAuthError('');
+    setPage('home');
+    setNotesHomeVersion(value=>value+1);
+  }
+  const navigateBackFromGesture=useCallback(()=>{
+    const buttons=[...document.querySelectorAll<HTMLButtonElement>('.shell-content .ui-back')];
+    const back=buttons.find(button=>!button.disabled&&button.offsetParent!==null);
+    if(back){gestureBackInProgress.current=true;back.click();window.setTimeout(()=>{gestureBackInProgress.current=false;},1200);return;}
+    let previous=pageHistory.current.pop();
+    while(previous===page)previous=pageHistory.current.pop();
+    if(previous){setAuthError('');setPage(previous);}
+    else if(page!=='home'){setAuthError('');setPage('home');}
+  },[page]);
   const shellActive:ShellSection=page==='home'?'notes':page==='today'?'today':page==='projects'?'projects':'settings';
   const navigateSection=(section:ShellSection)=>{
     if(section==='settings'){
@@ -327,7 +420,7 @@ function App() {
       user.role==='admin'&&e(ServerStorage,{key:user.id}),
       e(CryptoCheck,{key:user.id})));
   let content;
-  if(page==='home'||page==='today'||page==='archive'||page==='trash')content=e(Planner,{user,key:user.id+':'+page,section:page==='today'?'today':'notes',initialScreen:page==='archive'?'archive':page==='trash'?'trash':'list',reminderTarget,onReminderHandled:()=>setReminderTarget(undefined),onSyncState:syncCallback,onOpenProjects:()=>void navigate('projects'),onVaultContextChange:setVaultContext});
+  if(page==='home'||page==='today'||page==='archive'||page==='trash')content=e(Planner,{user,key:user.id+':'+page+':'+(page==='home'?notesHomeVersion:0),section:page==='today'?'today':'notes',initialScreen:page==='archive'?'archive':page==='trash'?'trash':'list',reminderTarget,onReminderHandled:()=>setReminderTarget(undefined),onSyncState:syncCallback,onOpenProjects:()=>void navigate('projects'),onVaultContextChange:setVaultContext,onNavigationGuardChange:registerLogoNavigationGuard});
   else if(page==='projects')content=e(ProjectsScreen,{user,key:user.id,onBack:()=>void navigate('home'),onVaultContextChange:setVaultContext});
   else if(page==='settings')content=e(SettingsHub,{user,onOpen:openSetting,onLogout:logout,loggingOut});
   else if(page==='account')content=e(AccountOverview,{user,onOpen:openSetting,onLogout:logout,loggingOut,onBack:()=>void navigate('settings')});
@@ -345,7 +438,7 @@ function App() {
   else if(page==='diagnostics')content=diagnostics;
   else content=e(SettingsHub,{user,onOpen:openSetting,onLogout:logout,loggingOut});
   const shellNotice=reminderTarget&&reminderTarget.accountId!==user.id?'Уведомление относится к другому аккаунту. Войдите в нужный аккаунт, чтобы открыть заметку.':notice;
-  return e(AppShell,{user,active:shellActive,onNavigate:navigateSection,syncing,connection,loggingOut,onLogout:logout,
+  return e(AppShell,{user,active:shellActive,onNavigate:navigateSection,onHome:()=>void navigateHomeFromLogo(),onBackGesture:navigateBackFromGesture,syncing,connection,loggingOut,onLogout:logout,
     notice:shellNotice,error:authError,updateNotice,vaultContext},content);
 }
 

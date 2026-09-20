@@ -42,6 +42,10 @@ test('offline shell works; API and non-public paths bypass the Service Worker ca
   assert(publicAssets.includes('/manifest.webmanifest'));
   assert(!publicAssets.some(path => /\.(?:ts|map)$/.test(path) || path.startsWith('/src/')));
   assert(!publicAssets.some(path => path.startsWith('/api/') || path.includes('sqlite')));
+  assert(!publicAssets.some(path => path.startsWith('/ocr-models/')),
+    'OCR manifests and model weights must not be precached in the shell');
+  assert(!publicAssets.some(path => path.startsWith('/ocr-runtime/')),
+    'OCR runtime files must not be precached in the shell');
   assert.equal(activationRequests, 0, 'installation must wait for user action');
   handlers.message({ data: { type: 'IGNORED' }, waitUntil(promise) { pending = promise; } });
   assert.equal(activationRequests, 0);
@@ -87,4 +91,188 @@ test('offline shell works; API and non-public paths bypass the Service Worker ca
   const click={notification:{close(){closed++;},data:{url:'https://evil.test'}},waitUntil(promise){pending=promise;}};
   handlers.notificationclick(click);await pending;assert.equal(focused,2);assert.equal(opened,undefined);
   windows=[];handlers.notificationclick(click);await pending;assert.equal(opened,'/');assert.equal(closed,3);
+});
+
+test('PWA update downloads its shell only after confirmation and reports progress', async () => {
+  const code = await readFile('dist/sw.js', 'utf8');
+  const handlers = {}, stores = new Map([['tasks-shell-current', new Map([['/index.html', 'old shell']])]]);
+  let pending, addAllCalls = 0, activationRequests = 0, downloaded = 0;
+  const cacheApi = {
+    async open(key) {
+      if (!stores.has(key)) stores.set(key, new Map());
+      const entries = stores.get(key);
+      return {
+        async addAll() { addAllCalls++; },
+        async match(path) { return entries.get(path); },
+        async put(path, response) { entries.set(path, response); },
+      };
+    },
+    async keys() { return [...stores.keys()]; },
+    async delete(key) { return stores.delete(key); },
+  };
+  vm.runInNewContext(code, {
+    URL, caches: cacheApi,
+    fetch: async path => { downloaded++; return { ok: true, path, clone() { return this; } }; },
+    self: {
+      location: { origin: 'http://localhost:3100' },
+      registration: { active: {}, showNotification: async () => {} },
+      clients: { claim: async () => {}, matchAll: async () => [{ id: 'current' }], openWindow: async () => {} },
+      addEventListener: (name, fn) => { handlers[name] = fn; },
+      skipWaiting: async () => { activationRequests++; },
+    },
+  });
+  handlers.install({ waitUntil(promise) { pending = promise; } });
+  await pending;
+  assert.equal(addAllCalls, 0, 'an update must not download the application shell during install');
+  assert.equal(downloaded, 0);
+
+  const messages = [];
+  handlers.message({
+    data: { type: 'DOWNLOAD_UPDATE' },
+    ports: [{ postMessage(value) { messages.push(value); } }],
+    waitUntil(promise) { pending = promise; },
+  });
+  await pending;
+  assert(downloaded > 0);
+  assert.equal(messages[0].type, 'UPDATE_PROGRESS');
+  assert.equal(messages[0].loaded, 0);
+  assert.equal(messages.at(-1).type, 'UPDATE_READY');
+  assert.equal(messages.at(-1).loaded, messages.at(-1).total);
+
+  let reply;
+  handlers.message({
+    data: { type: 'SKIP_WAITING' }, source: { id: 'current' },
+    ports: [{ postMessage(value) { reply = value; } }],
+    waitUntil(promise) { pending = promise; },
+  });
+  await pending;
+  assert.equal(reply.ok, true);
+  assert.equal(activationRequests, 1);
+});
+
+
+test('broken OCR shell auto-activates the fixed Service Worker once', async () => {
+  const code = await readFile('dist/sw.js', 'utf8');
+  const handlers = {};
+  const stores = new Map([
+    ['tasks-shell-broken', new Map([
+      ['/ocr-runtime/paddle/ort-wasm-simd-threaded.jsep.mjs', 'stale-runtime'],
+    ])],
+  ]);
+  let activationRequests = 0;
+  const cacheApi = {
+    async open(key) {
+      if (!stores.has(key)) stores.set(key, new Map());
+      const entries = stores.get(key);
+      return {
+        async addAll(paths) {
+          for (const path of paths) entries.set(path, 'cached:' + path);
+        },
+        async match(path) { return entries.get(path); },
+      };
+    },
+    async keys() { return [...stores.keys()]; },
+    async delete(key) { return stores.delete(key); },
+  };
+  vm.runInNewContext(code, {
+    URL,
+    Response,
+    caches: cacheApi,
+    fetch: async () => { throw new Error('offline'); },
+    self: {
+      location: { origin: 'http://localhost:3100' },
+      clients: { claim: async () => {}, matchAll: async () => [] },
+      registration: { showNotification: async () => {} },
+      addEventListener: (name, fn) => { handlers[name] = fn; },
+      skipWaiting: async () => { activationRequests++; },
+    },
+  });
+
+  let pending;
+  handlers.install({ waitUntil(promise) { pending = promise; } });
+  await pending;
+  assert.equal(activationRequests, 1);
+});
+
+
+test('installed OCR runtime is served from its dedicated cache while fully offline', async () => {
+  const code = await readFile('dist/sw.js', 'utf8');
+  const manifest = JSON.parse(await readFile('dist/ocr-models/manifest.json', 'utf8'));
+  assert.equal(manifest.runtimeComplete, true);
+
+  const printed = manifest.packages['printed-ru-en-v1'];
+  const runtimeAsset = printed.assets.find(
+    asset => asset.url.startsWith('/ocr-runtime/paddle/') && asset.url.endsWith('.mjs'),
+  );
+  const workerAsset = printed.assets.find(
+    asset => /^\/assets\/worker-entry-.*\.js$/.test(asset.url),
+  );
+  const dynamicBundle = printed.assets.find(
+    asset => /^\/assets\/dist-.*\.js$/.test(asset.url),
+  );
+  assert(runtimeAsset, 'printed OCR package includes Paddle ORT runtime');
+  assert(workerAsset, 'printed OCR package includes Paddle worker');
+  assert(dynamicBundle, 'printed OCR package includes the dynamically imported Paddle bundle');
+
+  const handlers = {};
+  const ocrEntries = new Map([
+    ['/ocr-models/manifest.json', 'cached:manifest'],
+    [runtimeAsset.url, 'cached:runtime'],
+    [workerAsset.url, 'cached:worker'],
+    [dynamicBundle.url, 'cached:bundle'],
+  ]);
+  const stores = new Map([['tasks-ocr-models-v1', ocrEntries]]);
+  let modelDownloads = 0;
+  const cacheApi = {
+    async open(key) {
+      if (!stores.has(key)) stores.set(key, new Map());
+      const entries = stores.get(key);
+      return {
+        async match(path) { return entries.get(path); },
+        async put(path, response) { entries.set(path, response); },
+      };
+    },
+    async keys() { return [...stores.keys()]; },
+    async delete(key) { return stores.delete(key); },
+  };
+
+  vm.runInNewContext(code, {
+    URL,
+    Response,
+    caches: cacheApi,
+    fetch: async request => {
+      if (new URL(request.url).searchParams.has('ocr-download')) {
+        modelDownloads++;
+        return 'network:verified-update';
+      }
+      throw new Error('offline');
+    },
+    self: {
+      location: { origin: 'http://localhost:3100' },
+      registration: { showNotification: async () => {} },
+      clients: { claim: async () => {}, matchAll: async () => [] },
+      addEventListener: (name, fn) => { handlers[name] = fn; },
+      skipWaiting: async () => {},
+    },
+  });
+
+  function request(path) {
+    let handled = false;
+    let result;
+    handlers.fetch({
+      request: { url: 'http://localhost:3100' + path, mode: 'cors', method: 'GET' },
+      respondWith(promise) { handled = true; result = promise; },
+    });
+    return { handled, result };
+  }
+
+  assert.equal(await request(runtimeAsset.url).result, 'cached:runtime');
+  assert.equal(await request(workerAsset.url).result, 'cached:worker');
+  assert.equal(await request(dynamicBundle.url).result, 'cached:bundle');
+  assert.equal(await request('/ocr-models/manifest.json').result, 'cached:manifest');
+  assert.equal(
+    await request(runtimeAsset.url + '?ocr-download=integrity').result,
+    'network:verified-update',
+  );
+  assert.equal(modelDownloads, 1);
 });

@@ -4,6 +4,11 @@ import {
   PADDLE_RECOGNITION_ASSET,
 } from "./modelAssets.ts";
 import { OCRModelManager } from "./OCRModelManager.ts";
+import { composeOCRText, resolveReadingOrder } from "./layout.ts";
+import { asOCRError, OCRError, throwIfOCRAborted } from "./errors.ts";
+import type { OCRErrorCode } from "./errors.ts";
+import { detectOCRDeviceProfile } from "./deviceProfile.ts";
+import { prepareOCRImage } from "./imagePreprocessing.ts";
 import type {
   OCRLanguage,
   OCRLine,
@@ -20,6 +25,7 @@ interface HtrPending {
   resolve: (value: Map<number, OCRLine>) => void;
   reject: (reason: Error) => void;
   onProgress?: (progress: OCRProgress) => void;
+  cleanup?: () => void;
 }
 
 interface HtrResponse {
@@ -28,68 +34,7 @@ interface HtrResponse {
   progress?: OCRProgress;
   lines?: Array<[number, OCRLine]>;
   message?: string;
-}
-
-function lineBounds(line: OCRLine) {
-  const points = line.poly ?? [];
-  if (!points.length)
-    return { left: 0, top: 0, right: 0, bottom: 0, height: 0 };
-
-  const xs = points.map((point) => point.x);
-  const ys = points.map((point) => point.y);
-  const top = Math.min(...ys);
-  const bottom = Math.max(...ys);
-  return {
-    left: Math.min(...xs),
-    top,
-    right: Math.max(...xs),
-    bottom,
-    height: Math.max(1, bottom - top),
-  };
-}
-
-function readingOrder(lines: OCRLine[]) {
-  return [...lines].sort((a, b) => {
-    const ab = lineBounds(a);
-    const bb = lineBounds(b);
-    const tolerance = Math.max(8, Math.min(ab.height, bb.height) * 0.6);
-    if (Math.abs(ab.top - bb.top) <= tolerance)
-      return ab.left - bb.left;
-    return ab.top - bb.top;
-  });
-}
-
-function median(values: number[]) {
-  const filtered = values.filter((value) => Number.isFinite(value) && value > 0);
-  if (!filtered.length) return 0;
-  const sorted = filtered.sort((a, b) => a - b);
-  const middle = Math.floor(sorted.length / 2);
-  return sorted.length % 2
-    ? sorted[middle]
-    : (sorted[middle - 1] + sorted[middle]) / 2;
-}
-
-function composeText(lines: OCRLine[]) {
-  const ordered = readingOrder(lines).filter((line) => line.text.trim());
-  if (!ordered.length) return "";
-
-  const medianHeight = median(
-    ordered.map((line) => lineBounds(line).height),
-  );
-
-  let result = "";
-  for (let index = 0; index < ordered.length; index++) {
-    const current = ordered[index];
-    if (index > 0) {
-      const previous = ordered[index - 1];
-      const gap = lineBounds(current).top - lineBounds(previous).bottom;
-      result += medianHeight > 0 && gap > medianHeight * 1.15
-        ? "\n\n"
-        : "\n";
-    }
-    result += current.text.trimEnd();
-  }
-  return result.trim();
+  code?: OCRErrorCode;
 }
 
 function paddleLine(item: OcrResultItem): OCRLine {
@@ -181,18 +126,26 @@ export class LocalOCRService {
       }
 
       this.htrPending.delete(message.id);
+      pending.cleanup?.();
       if (message.type === "result") {
         pending.resolve(new Map(message.lines ?? []));
       } else {
-        pending.reject(
-          new Error(message.message || "Не удалось выполнить локальный TrOCR."),
-        );
+        pending.reject(new OCRError(
+          message.code ?? "worker-failed",
+          message.message || "Не удалось выполнить локальный TrOCR.",
+        ));
       }
     });
 
     worker.addEventListener("error", () => {
-      const error = new Error("Локальный TrOCR worker завершился с ошибкой.");
-      for (const request of this.htrPending.values()) request.reject(error);
+      const error = new OCRError(
+        "worker-failed",
+        "Локальный TrOCR worker завершился с ошибкой.",
+      );
+      for (const request of this.htrPending.values()) {
+        request.cleanup?.();
+        request.reject(error);
+      }
       this.htrPending.clear();
       this.htrWorker?.terminate();
       this.htrWorker = null;
@@ -219,14 +172,31 @@ export class LocalOCRService {
     indexes: number[],
     options: OCRRecognizeOptions,
     onProgress?: (progress: OCRProgress) => void,
+    signal?: AbortSignal,
   ) {
     if (!indexes.length) return new Map<number, OCRLine>();
+    throwIfOCRAborted(signal);
     const worker = this.getHtrWorker();
     const id = crypto.randomUUID();
     const buffer = await file.arrayBuffer();
+    throwIfOCRAborted(signal);
 
     return new Promise<Map<number, OCRLine>>((resolve, reject) => {
-      this.htrPending.set(id, { resolve, reject, onProgress });
+      const abort = () => {
+        const pending = this.htrPending.get(id);
+        if (!pending) return;
+        this.htrPending.delete(id);
+        pending.cleanup?.();
+        worker.postMessage({ type: "cancel", id });
+        reject(new OCRError("cancelled", "Распознавание отменено.", {
+          cause: signal?.reason,
+        }));
+      };
+      const cleanup = signal
+        ? () => signal.removeEventListener("abort", abort)
+        : undefined;
+      signal?.addEventListener("abort", abort, { once: true });
+      this.htrPending.set(id, { resolve, reject, onProgress, cleanup });
       worker.postMessage(
         {
           type: "recognize",
@@ -252,9 +222,28 @@ export class LocalOCRService {
     file: File,
     options: OCRRecognizeOptions,
     onProgress?: (progress: OCRProgress) => void,
+    signal?: AbortSignal,
   ): Promise<OCRResult> {
+    try {
+      return await this.recognizeInternal(file, options, onProgress, signal);
+    } catch (caught) {
+      throw asOCRError(
+        caught,
+        "backend-failed",
+        "Не удалось выполнить локальное распознавание.",
+      );
+    }
+  }
+
+  private async recognizeInternal(
+    file: File,
+    options: OCRRecognizeOptions,
+    onProgress?: (progress: OCRProgress) => void,
+    signal?: AbortSignal,
+  ): Promise<OCRResult> {
+    throwIfOCRAborted(signal);
     if (!file.type.startsWith("image/"))
-      throw new Error("Для OCR выберите изображение.");
+      throw new OCRError("invalid-image", "Для OCR выберите изображение.");
 
     const started = performance.now();
     onProgress?.({
@@ -263,27 +252,44 @@ export class LocalOCRService {
     });
 
     if (!(await this.modelManager.isPrintedInstalled())) {
-      throw new Error(
+      throw new OCRError(
+        "model-not-installed",
         "Сначала скачайте базовую модель печатного OCR (PP-OCRv5) на это устройство.",
       );
     }
 
+    throwIfOCRAborted(signal);
     const paddle = await this.getPaddle(onProgress);
+    throwIfOCRAborted(signal);
+    onProgress?.({
+      phase: "preparing",
+      message: "Подготавливаем изображение…",
+    });
+    const prepared = await prepareOCRImage(file, {
+      profile: detectOCRDeviceProfile(),
+      grayscale: options.preprocessing?.grayscale,
+      normalizeContrast: options.preprocessing?.normalizeContrast,
+      signal,
+    });
     onProgress?.({
       phase: "detecting",
       message: "Ищем строки текста…",
     });
 
-    const raw = await paddle.predict(file);
+    const raw = await paddle.predict(prepared.file);
+    throwIfOCRAborted(signal);
     const page = raw[0];
-    if (!page) throw new Error("PP-OCRv5 не смог прочитать изображение.");
+    if (!page) {
+      throw new OCRError("no-result", "PP-OCRv5 не смог прочитать изображение.");
+    }
 
-    let lines = readingOrder(page.items.map(paddleLine));
+    let lines = resolveReadingOrder(page.items.map(paddleLine));
     let usedHtr = false;
 
     if (options.mode === "handwriting") {
       if (!(await this.htrAvailable(options.languages))) {
-        throw new Error(
+        throw new OCRError(
+          "model-not-installed",
           "Для рукописного OCR сначала установите выбранную локальную TrOCR-модель.",
         );
       }
@@ -292,11 +298,12 @@ export class LocalOCRService {
         line.poly?.length ? [index] : [],
       );
       const replacements = await this.runHtr(
-        file,
+        prepared.file,
         lines,
         indexes,
         options,
         onProgress,
+        signal,
       );
       lines = lines.map((line, index) => replacements.get(index) ?? line);
       usedHtr = replacements.size > 0;
@@ -309,19 +316,21 @@ export class LocalOCRService {
       );
       if (indexes.length) {
         const replacements = await this.runHtr(
-          file,
+          prepared.file,
           lines,
           indexes,
           options,
           onProgress,
+          signal,
         );
         lines = lines.map((line, index) => replacements.get(index) ?? line);
         usedHtr = replacements.size > 0;
       }
     }
 
-    lines = readingOrder(lines).filter((line) => line.text.trim().length > 0);
-    const text = composeText(lines);
+    lines = resolveReadingOrder(lines).filter((line) => line.text.trim().length > 0);
+    throwIfOCRAborted(signal);
+    const text = composeOCRText(lines);
     const provider = page.runtime.recProvider || page.runtime.detProvider;
 
     onProgress?.({
@@ -350,6 +359,33 @@ export class LocalOCRService {
   async dispose() {
     const paddlePromise = this.paddlePromise;
     this.paddlePromise = null;
+    let htrDispose: Promise<void> | undefined;
+    if (this.htrWorker) {
+      const worker = this.htrWorker;
+      this.htrWorker = null;
+      const error = new OCRError("cancelled", "OCR остановлен.");
+      for (const [id, request] of this.htrPending) {
+        request.cleanup?.();
+        request.reject(error);
+        worker.postMessage({ type: "cancel", id });
+      }
+      this.htrPending.clear();
+      const channel = new MessageChannel();
+      const acknowledged = new Promise<void>((resolve) => {
+        const timer = globalThis.setTimeout(resolve, 2_000);
+        channel.port1.addEventListener("message", () => {
+          globalThis.clearTimeout(timer);
+          resolve();
+        }, { once: true });
+        channel.port1.start();
+      });
+      worker.postMessage({ type: "dispose", port: channel.port2 }, [channel.port2]);
+      htrDispose = acknowledged.finally(() => {
+        channel.port1.close();
+        worker.terminate();
+      });
+    }
+
     if (paddlePromise) {
       try {
         const paddle = await paddlePromise;
@@ -358,15 +394,6 @@ export class LocalOCRService {
         // Failed initialization leaves nothing reusable.
       }
     }
-
-    if (this.htrWorker) {
-      this.htrWorker.postMessage({ type: "dispose" });
-      this.htrWorker.terminate();
-      this.htrWorker = null;
-    }
-
-    const error = new Error("OCR остановлен.");
-    for (const request of this.htrPending.values()) request.reject(error);
-    this.htrPending.clear();
+    await htrDispose;
   }
 }

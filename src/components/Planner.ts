@@ -186,6 +186,7 @@ export function Planner({
   onSyncState,
   onOpenProjects,
   onVaultContextChange,
+  onNavigationGuardChange,
 }: {
   user: User;
   section?: "notes" | "today";
@@ -194,6 +195,9 @@ export function Planner({
   onReminderHandled: () => void;
   onOpenProjects?: () => void;
   onVaultContextChange?: (context: ShellVaultContext | null) => void;
+  onNavigationGuardChange?: (
+    guard: (() => Promise<boolean>) | null,
+  ) => void;
   onSyncState: (
     state: "syncing" | "online" | "offline" | "auth" | "error" | "idle",
   ) => void;
@@ -269,6 +273,11 @@ export function Planner({
   const [target, setTarget] = useState("");
   const [draft, setDraft] = useState<Draft | null>(null);
   const draftRef = useRef<Draft | null>(null);
+  useEffect(() => {
+    const guard = () => confirmDiscardEditing();
+    onNavigationGuardChange?.(guard);
+    return () => onNavigationGuardChange?.(null);
+  }, [onNavigationGuardChange]);
   const tagEditorDraft = useRef<Draft | null>(null);
   const tagEditorReturn = useRef<"list" | "archive" | "trash" | "schedule">(
     "list",
@@ -2001,12 +2010,11 @@ export function Planner({
     showDraft(null);
     void sync();
   }
-  async function cancelEditing() {
+  async function confirmDiscardEditing() {
     const current = draftRef.current;
-    if (!current) return;
-    if (
-      current.dirty &&
-      !(await appConfirm(
+    return (
+      !current?.dirty ||
+      (await appConfirm(
         "При возвращении на предыдущую вкладку Ваш прогресс изменения заметки сбросится. Вы уверен, что хотите выйти с потерей прогресса?",
         {
           title: "Выйти без сохранения?",
@@ -2015,8 +2023,11 @@ export function Planner({
           danger: true,
         },
       ))
-    )
-      return;
+    );
+  }
+  async function cancelEditing() {
+    const current = draftRef.current;
+    if (!current || !(await confirmDiscardEditing())) return;
     if (timer.current) {
       clearTimeout(timer.current);
       timer.current = undefined;
