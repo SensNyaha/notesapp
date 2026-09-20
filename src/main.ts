@@ -1,5 +1,6 @@
 import { h, render } from 'preact';
 import { useEffect, useRef, useState } from 'preact/hooks';
+import { lazy, Suspense } from 'preact/compat';
 import { isHealthResponse, type HealthResponse } from './types/api';
 import './style.css';
 import { Login } from './components/Login';
@@ -28,6 +29,9 @@ import { applyTheme } from './preferences.ts';
 import { AppDialogHost,appConfirm } from './components/AppDialog.ts';
 
 const e = h;
+const OcrTestScreen = lazy(() =>
+  import('./components/OcrTest.ts').then((module) => ({ default: module.OcrTestScreen })),
+);
 applyTheme();
 
 type DefinitionRow = [term: string, value: string, wide?: boolean];
@@ -57,7 +61,7 @@ function DefinitionList({ rows }: { rows: DefinitionRow[] }) {
 function App() {
   const [user, setUser] = useState<User | null>(null);
   const userRef = useRef<User | null>(null); userRef.current = user;
-  const [page, setPage] = useState<'home'|'today'|'projects'|'settings'|'account'|'appearance'|'password'|'users'|'devices'|'passkeys'|'diagnostics'|'notifications'|'data'|'collaboration'|'archive'|'trash'|'about'>('home');
+  const [page, setPage] = useState<'home'|'today'|'projects'|'settings'|'account'|'appearance'|'password'|'users'|'ocr-test'|'devices'|'passkeys'|'diagnostics'|'notifications'|'data'|'collaboration'|'archive'|'trash'|'about'>('home');
   const previousWorkspacePage = useRef<'home'|'today'|'projects'>('home');
   const [localProfiles, setLocalProfiles] = useState<User[]>([]);
   const localMode = useRef(false);
@@ -337,6 +341,7 @@ function App() {
   else if(page==='password')content=e(PasswordScreen,{key:user.id,user,onBack:()=>void navigate('settings'),onLogout:logout,onRefresh:checkSession,
     onDone:(result:User)=>{authGeneration.current++;void requireOutboxReview(result).catch(()=>{}).finally(()=>{userRef.current=result;setUser(result);setPage('settings');setAuthError('');setNotice('Пароль изменён.');});}});
   else if(page==='users'&&user.role==='admin')content=e(UsersScreen,{key:user.id,onBack:()=>void navigate('settings'),onRefresh:checkSession});
+  else if(page==='ocr-test'&&user.role==='admin')content=e(Suspense,{fallback:e('div',{class:'settings-detail'},'Загрузка OCR…')},e(OcrTestScreen,{onBack:()=>void navigate('settings')}));
   else if(page==='diagnostics')content=diagnostics;
   else content=e(SettingsHub,{user,onOpen:openSetting,onLogout:logout,loggingOut});
   const shellNotice=reminderTarget&&reminderTarget.accountId!==user.id?'Уведомление относится к другому аккаунту. Войдите в нужный аккаунт, чтобы открыть заметку.':notice;

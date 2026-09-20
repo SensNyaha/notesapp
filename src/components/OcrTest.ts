@@ -1,0 +1,483 @@
+import { h as e } from "preact";
+import { useEffect, useRef, useState } from "preact/hooks";
+import { LocalOCRService } from "../ocr/LocalOCRService.ts";
+import { detectOCRCapabilities } from "../ocr/capabilities.ts";
+import {
+  OCRModelManager,
+  formatModelBytes,
+  type OCRModelPackageId,
+  type OCRModelProgress,
+  type OCRModelState,
+} from "../ocr/OCRModelManager.ts";
+import type {
+  OCRLanguage,
+  OCRMode,
+  OCRProgress,
+  OCRResult,
+} from "../ocr/types.ts";
+import { RichTextEditor } from "./RichTextEditor.ts";
+import { UiIcon } from "./ui.ts";
+
+function escapeHtml(value: string) {
+  return value
+    .replaceAll("&", "&amp;")
+    .replaceAll("<", "&lt;")
+    .replaceAll(">", "&gt;")
+    .replaceAll('"', "&quot;");
+}
+
+function normalizeOcrText(value: string) {
+  return value.replace(/\r\n?/g, "\n").trim();
+}
+
+function ocrFragment(text: string) {
+  return normalizeOcrText(text)
+    .split("\n")
+    .map((line) =>
+      line.trim().length
+        ? `<p>${escapeHtml(line.trimEnd())}</p>`
+        : "<p><br></p>",
+    )
+    .join("");
+}
+export function OcrTestScreen({ onBack }: { onBack: () => void }) {
+  const service = useRef<LocalOCRService | null>(null);
+  const modelManager = useRef(new OCRModelManager()).current;
+  const cameraInput = useRef<HTMLInputElement>(null);
+  const fileInput = useRef<HTMLInputElement>(null);
+  const [title, setTitle] = useState("");
+  const [html, setHtml] = useState("");
+  const [text, setText] = useState("");
+  const [editorKey, setEditorKey] = useState(0);
+  const [file, setFile] = useState<File | null>(null);
+  const [mode, setMode] = useState<OCRMode>("auto");
+  const [language, setLanguage] = useState<OCRLanguage>("ru+en");
+  const [progress, setProgress] = useState<OCRProgress | null>(null);
+  const [lastResult, setLastResult] = useState<OCRResult | null>(null);
+  const [ocrDraft, setOcrDraft] = useState("");
+  const [error, setError] = useState("");
+  const [busy, setBusy] = useState(false);
+  const [modelStates, setModelStates] = useState<OCRModelState[]>([]);
+  const [modelBusy, setModelBusy] = useState<OCRModelPackageId | null>(null);
+  const [modelProgress, setModelProgress] = useState<OCRModelProgress | null>(null);
+  const capabilities = useRef(detectOCRCapabilities()).current;
+
+  const refreshModelStates = async () => {
+    try {
+      setModelStates(await modelManager.states());
+    } catch (caught) {
+      setError(
+        caught instanceof Error
+          ? caught.message
+          : "Не удалось проверить локальные OCR-модели.",
+      );
+    }
+  };
+
+  useEffect(() => {
+    void refreshModelStates();
+    return () => {
+      void service.current?.dispose();
+    };
+  }, []);
+  const selectFile = (event: Event) => {
+    const input = event.target as HTMLInputElement;
+    const selected = input.files?.[0] ?? null;
+    input.value = "";
+    if (!selected) return;
+    if (!selected.type.startsWith("image/")) {
+      setError("Выберите изображение.");
+      return;
+    }
+    setFile(selected);
+    setError("");
+    setProgress(null);
+    setLastResult(null);
+    setOcrDraft("");
+  };
+
+  const insertOcrDraft = () => {
+    const normalized = normalizeOcrText(ocrDraft);
+    const fragment = ocrFragment(normalized);
+    if (!fragment) return;
+    setHtml((current) => current + fragment);
+    setText((current) =>
+      [current.trimEnd(), normalized].filter(Boolean).join("\n"),
+    );
+    setEditorKey((value) => value + 1);
+    setLastResult(null);
+    setOcrDraft("");
+  };
+
+  const replaceWithOcrDraft = () => {
+    const normalized = normalizeOcrText(ocrDraft);
+    if (!normalized) return;
+    setHtml(ocrFragment(normalized));
+    setText(normalized);
+    setEditorKey((value) => value + 1);
+    setLastResult(null);
+    setOcrDraft("");
+  };
+
+  const cancelOcrDraft = () => {
+    setLastResult(null);
+    setOcrDraft("");
+  };
+
+  const installModel = async (id: OCRModelPackageId) => {
+    if (modelBusy) return;
+    setModelBusy(id);
+    setModelProgress(null);
+    setError("");
+    try {
+      await modelManager.install(id, setModelProgress);
+      await refreshModelStates();
+    } catch (caught) {
+      setError(
+        caught instanceof Error
+          ? caught.message
+          : "Не удалось установить OCR-модель.",
+      );
+    } finally {
+      setModelBusy(null);
+      setModelProgress(null);
+    }
+  };
+
+  const removeModel = async (id: OCRModelPackageId) => {
+    if (modelBusy) return;
+    setModelBusy(id);
+    setError("");
+    try {
+      await modelManager.remove(id);
+      await refreshModelStates();
+    } catch (caught) {
+      setError(
+        caught instanceof Error
+          ? caught.message
+          : "Не удалось удалить OCR-модель.",
+      );
+    } finally {
+      setModelBusy(null);
+      setModelProgress(null);
+    }
+  };
+
+  const modelState = (id: OCRModelPackageId) =>
+    modelStates.find((state) => state.id === id);
+
+  const recognize = async () => {
+    if (!file || busy) {
+      if (!file) setError("Сначала сфотографируйте или выберите изображение.");
+      return;
+    }
+    setBusy(true);
+    setError("");
+    setLastResult(null);
+    setOcrDraft("");
+    setProgress({ phase: "preparing", message: "Подготавливаем OCR…" });
+    try {
+      const ocr = service.current ?? new LocalOCRService();
+      service.current = ocr;
+      const result = await ocr.recognize(
+        file,
+        { mode, languages: language },
+        setProgress,
+      );
+      if (!result.text.trim()) {
+        setError("Текст на изображении не распознан.");
+        return;
+      }
+      setLastResult(result);
+      setOcrDraft(normalizeOcrText(result.text));
+    } catch (caught) {
+      setError(
+        caught instanceof Error
+          ? caught.message
+          : "Не удалось выполнить локальный OCR.",
+      );
+    } finally {
+      setBusy(false);
+    }
+  };
+  return e(
+    "section",
+    { class: "note-editor" },
+    e(
+      "div",
+      { class: "note-editor-header" },
+      e(
+        "button",
+        {
+          class: "ui-back",
+          disabled: busy,
+          onClick: onBack,
+          "aria-label": "Назад",
+          title: "Назад",
+        },
+        e(UiIcon, { name: "back", size: 18 }),
+      ),
+      e(
+        "span",
+        { class: "note-editor-state" },
+        busy ? "OCR выполняется" : "Тестовая заметка · не сохраняется",
+      ),
+      e(
+        "button",
+        { class: "primary", disabled: busy, onClick: onBack },
+        "Готово",
+      ),
+    ),
+    e("h1", { class: "note-editor-title" }, "Создание новой заметки"),
+    e(
+      "label",
+      { class: "note-title-field" },
+      e("span", { class: "sr-only" }, "Заголовок"),
+      e("input", {
+        value: title,
+        maxLength: 500,
+        placeholder: "Название заметки",
+        onInput: (event: Event) =>
+          setTitle((event.target as HTMLInputElement).value),
+      }),
+    ),
+    e(
+      "section",
+      { class: "reminder-card" },
+      e(
+        "div",
+        { class: "section-heading" },
+        e("h2", null, "Локальный OCR"),
+      ),
+      e(
+        "p",
+        { class: "hint" },
+        "OCR выполняется только локально на этом устройстве. Изображение и распознанный текст не отправляются на сервер или во внешние OCR-сервисы; рабочие OCR-модели входят в приложение.",
+      ),
+      e(
+        "label",
+        { class: "editor-label" },
+        "Режим",
+        e(
+          "select",
+          {
+            value: mode,
+            disabled: busy,
+            onChange: (event: Event) =>
+              setMode((event.target as HTMLSelectElement).value as OCRMode),
+          },
+          e("option", { value: "auto" }, "Авто"),
+          e("option", { value: "printed" }, "Печатный"),
+          e("option", { value: "handwriting" }, "Рукописный"),
+        ),
+      ),
+      e(
+        "label",
+        { class: "editor-label" },
+        "Язык",
+        e(
+          "select",
+          {
+            value: language,
+            disabled: busy,
+            onChange: (event: Event) =>
+              setLanguage(
+                (event.target as HTMLSelectElement).value as OCRLanguage,
+              ),
+          },
+          e("option", { value: "ru+en" }, "Русский + English"),
+          e("option", { value: "ru" }, "Русский"),
+          e("option", { value: "en" }, "English"),
+        ),
+      ),
+      e(
+        "div",
+        { class: "editor-label" },
+        e("span", null, "Локальные OCR-модели"),
+        (() => {
+          const printed = modelState("printed-ru-en-v1");
+          return printed
+            ? e(
+                "p",
+                { class: "hint" },
+                `Печатный RU + EN · ${printed.installed ? "установлен" : "загружается с приложением"} · ${formatModelBytes(printed.bytes)}`,
+              )
+            : e("p", { class: "hint" }, "Проверяем базовую PP-OCRv5 модель…");
+        })(),
+        ...([
+          ["handwriting-ru-v1", "Рукописный русский"],
+          ["handwriting-en-v1", "Рукописный English"],
+        ] as Array<[OCRModelPackageId, string]>).map(([id, label]) => {
+          const state = modelState(id);
+          const installing = modelBusy === id;
+          return e(
+            "div",
+            { class: "onboarding-actions", key: id },
+            e(
+              "span",
+              { class: "hint" },
+              state
+                ? `${label} · ${state.installed ? "установлен" : "не установлен"} · ${formatModelBytes(state.bytes)}`
+                : `${label} · проверяем…`,
+            ),
+            state &&
+              e(
+                "button",
+                {
+                  type: "button",
+                  class: "secondary-button",
+                  disabled: busy || Boolean(modelBusy),
+                  onClick: () =>
+                    void (state.installed
+                      ? removeModel(id)
+                      : installModel(id)),
+                },
+                installing
+                  ? "Подождите…"
+                  : state.installed
+                    ? "Удалить"
+                    : "Скачать",
+              ),
+          );
+        }),
+        modelProgress &&
+          e(
+            "p",
+            { class: "hint", role: "status", "aria-live": "polite" },
+            `Загрузка модели: ${formatModelBytes(modelProgress.loaded)} / ${formatModelBytes(modelProgress.total)}`,
+          ),
+      ),
+      e("input", {
+        ref: cameraInput,
+        type: "file",
+        accept: "image/*",
+        capture: "environment",
+        hidden: true,
+        onChange: selectFile,
+      }),
+      e("input", {
+        ref: fileInput,
+        type: "file",
+        accept: "image/*",
+        hidden: true,
+        onChange: selectFile,
+      }),
+      e(
+        "div",
+        { class: "onboarding-actions" },
+        e(
+          "button",
+          {
+            type: "button",
+            class: "secondary-button",
+            disabled: busy,
+            onClick: () => cameraInput.current?.click(),
+          },
+          e(UiIcon, { name: "image", size: 17 }),
+          "Сфотографировать",
+        ),
+        e(
+          "button",
+          {
+            type: "button",
+            class: "secondary-button",
+            disabled: busy,
+            onClick: () => fileInput.current?.click(),
+          },
+          e(UiIcon, { name: "upload", size: 17 }),
+          "Выбрать изображение",
+        ),
+        e(
+          "button",
+          {
+            type: "button",
+            class: "primary",
+            disabled: busy || !file,
+            onClick: () => void recognize(),
+          },
+          busy ? "Распознаём…" : "Распознать",
+        ),
+      ),
+      file &&
+        e(
+          "p",
+          { class: "hint" },
+          "Выбрано: ",
+          e("strong", null, file.name),
+        ),
+      progress &&
+        e(
+          "p",
+          { class: "hint", role: "status", "aria-live": "polite" },
+          progress.message,
+        ),
+      error && e("p", { class: "error", role: "alert" }, error),
+      lastResult &&
+        e(
+          "p",
+          { class: "hint" },
+          `${lastResult.modeUsed} · ${lastResult.backend} · ${lastResult.durationMs} мс · строк: ${lastResult.lines.length}`,
+        ),
+      lastResult &&
+        e(
+          "div",
+          { class: "editor-label" },
+          e("span", null, "Распознанный текст"),
+          e("textarea", {
+            value: ocrDraft,
+            disabled: busy,
+            rows: 8,
+            onInput: (event: Event) =>
+              setOcrDraft((event.target as HTMLTextAreaElement).value),
+          }),
+          e(
+            "div",
+            { class: "onboarding-actions" },
+            e(
+              "button",
+              {
+                type: "button",
+                class: "secondary-button",
+                disabled: busy,
+                onClick: cancelOcrDraft,
+              },
+              "Отмена",
+            ),
+            e(
+              "button",
+              {
+                type: "button",
+                class: "secondary-button",
+                disabled: busy || !ocrDraft.trim(),
+                onClick: insertOcrDraft,
+              },
+              "Вставить",
+            ),
+            e(
+              "button",
+              {
+                type: "button",
+                class: "primary",
+                disabled: busy || !ocrDraft.trim(),
+                onClick: replaceWithOcrDraft,
+              },
+              "Заменить",
+            ),
+          ),
+        ),
+      !capabilities.worker &&
+        e("p", { class: "error" }, "Web Worker недоступен в этом браузере."),
+    ),
+    e("label", { class: "editor-label sr-only" }, "Текст заметки"),
+    e(RichTextEditor, {
+      key: editorKey,
+      html,
+      text,
+      onChange: (nextHtml: string, nextText: string) => {
+        setHtml(nextHtml);
+        setText(nextText);
+      },
+      onError: setError,
+    }),
+  );
+}

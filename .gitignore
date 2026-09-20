@@ -10,3 +10,10 @@ certs/*.pem
 certs/*.cer
 docs/
 TODO.md
+
+# OCR: source/download artifacts not needed on another device
+public/ocr-tesseract/
+public/ocr-models/paddle/*/inference.onnx
+public/ocr-models/paddle/*/inference.yml
+public/ocr-models/paddle/source/
+public/ocr-models/htr/*/quantize_config.json

@@ -4201,6 +4201,7 @@ export function Planner({
         moveTargets: readOnly ? [] : viewingMoveTargets(),
         viewMode: true,
         loadPreview: (item) => attachmentPreviewBlob(user, viewing.vault, item),
+        loadFullImage: (item) => attachmentBlob(user, viewing.vault, item),
         onDownload: (item) =>
           void run(() => downloadAttachment(item, viewing.vault)),
         onSetCover: readOnly

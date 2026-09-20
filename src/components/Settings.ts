@@ -4,7 +4,7 @@ import type { User } from '../types/auth.ts';
 import { readThemePreference,setThemePreference,type ThemePreference } from '../preferences.ts';
 import { Chevron,InfoTip,PageHeader,UiIcon,type UiIconName } from './ui.ts';
 
-export type SettingsPage='account'|'appearance'|'notifications'|'devices'|'passkeys'|'collaboration'|'data'|'diagnostics'|'password'|'users'|'archive'|'trash'|'about';
+export type SettingsPage='account'|'appearance'|'notifications'|'devices'|'passkeys'|'collaboration'|'data'|'diagnostics'|'password'|'users'|'ocr-test'|'archive'|'trash'|'about';
 
 interface SettingsItem{
   id:SettingsPage;title:string;description:string;admin?:boolean;keywords:string;icon:UiIconName;group:'Основное'|'Данные и доступ'|'Система';
@@ -21,6 +21,7 @@ const items:SettingsItem[]=[
   {id:'data',title:'Данные и резервные копии',description:'Импорт, экспорт и зашифрованные резервные копии',keywords:'данные импорт экспорт резервные копии',icon:'database',group:'Данные и доступ'},
   {id:'diagnostics',title:'Диагностика',description:'Сервер, PWA, Web Crypto и локальное хранилище',keywords:'диагностика сервер pwa crypto',icon:'diagnostics',group:'Система'},
   {id:'users',title:'Пользователи',description:'Аккаунты и временные пароли',keywords:'пользователи админ временный пароль',icon:'users',group:'Система',admin:true},
+  {id:'ocr-test',title:'OCR · тестовая страница',description:'Локальное распознавание текста в тестовой заметке',keywords:'ocr htr распознавание изображение рукописный печатный тест',icon:'image',group:'Система',admin:true},
   {id:'about',title:'О приложении',description:'Версия, режим запуска и часовой пояс',keywords:'версия приложение timezone часовой пояс',icon:'info',group:'Система'},
 ];
 

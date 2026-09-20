@@ -1,0 +1,108 @@
+{
+  "version": 1,
+  "packages": {
+    "printed-ru-en-v1": {
+      "kind": "printed",
+      "required": true,
+      "bytes": 12724224,
+      "assets": [
+        {
+          "url": "/ocr-models/paddle/det/model.tar",
+          "bytes": 4829696
+        },
+        {
+          "url": "/ocr-models/paddle/rec/model.tar",
+          "bytes": 7894528
+        }
+      ]
+    },
+    "handwriting-ru-v1": {
+      "kind": "handwriting",
+      "language": "ru",
+      "required": false,
+      "bytes": 392881303,
+      "assets": [
+        {
+          "url": "/ocr-models/htr/ru/config.json",
+          "bytes": 4947
+        },
+        {
+          "url": "/ocr-models/htr/ru/generation_config.json",
+          "bytes": 273
+        },
+        {
+          "url": "/ocr-models/htr/ru/merges.txt",
+          "bytes": 456318
+        },
+        {
+          "url": "/ocr-models/htr/ru/onnx/decoder_model_quantized.onnx",
+          "bytes": 300116959
+        },
+        {
+          "url": "/ocr-models/htr/ru/onnx/encoder_model_quantized.onnx",
+          "bytes": 87942969
+        },
+        {
+          "url": "/ocr-models/htr/ru/preprocessor_config.json",
+          "bytes": 390
+        },
+        {
+          "url": "/ocr-models/htr/ru/special_tokens_map.json",
+          "bytes": 957
+        },
+        {
+          "url": "/ocr-models/htr/ru/tokenizer.json",
+          "bytes": 3558809
+        },
+        {
+          "url": "/ocr-models/htr/ru/tokenizer_config.json",
+          "bytes": 1388
+        },
+        {
+          "url": "/ocr-models/htr/ru/vocab.json",
+          "bytes": 798293
+        }
+      ]
+    },
+    "handwriting-en-v1": {
+      "kind": "handwriting",
+      "language": "en",
+      "required": false,
+      "bytes": 67743488,
+      "assets": [
+        {
+          "url": "/ocr-models/htr/en/config.json",
+          "bytes": 4515
+        },
+        {
+          "url": "/ocr-models/htr/en/generation_config.json",
+          "bytes": 185
+        },
+        {
+          "url": "/ocr-models/htr/en/onnx/decoder_model_quantized.onnx",
+          "bytes": 40159904
+        },
+        {
+          "url": "/ocr-models/htr/en/onnx/encoder_model_quantized.onnx",
+          "bytes": 23082942
+        },
+        {
+          "url": "/ocr-models/htr/en/preprocessor_config.json",
+          "bytes": 465
+        },
+        {
+          "url": "/ocr-models/htr/en/special_tokens_map.json",
+          "bytes": 279
+        },
+        {
+          "url": "/ocr-models/htr/en/tokenizer.json",
+          "bytes": 4494727
+        },
+        {
+          "url": "/ocr-models/htr/en/tokenizer_config.json",
+          "bytes": 471
+        }
+      ]
+    }
+  }
+}

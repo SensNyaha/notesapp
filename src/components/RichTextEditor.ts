@@ -170,6 +170,175 @@ function AsyncPreview({
       })
     : null;
 }
+
+function ImageGallery({
+  items,
+  activeId,
+  load,
+  onSelect,
+  onClose,
+}: {
+  items: NoteAttachment[];
+  activeId: string;
+  load?: (item: NoteAttachment) => Promise<Blob | null>;
+  onSelect: (id: string) => void;
+  onClose: () => void;
+}) {
+  const item = items.find((current) => current.id === activeId) ?? items[0];
+  const index = Math.max(0, items.findIndex((current) => current.id === item.id));
+  const [url, setUrl] = useState("");
+  const [loading, setLoading] = useState(true);
+  const [failed, setFailed] = useState(false);
+  const closeButton = useRef<HTMLButtonElement>(null);
+  const selectOffset = (offset: number) => {
+    const next = (index + offset + items.length) % items.length;
+    onSelect(items[next].id);
+  };
+
+  useEffect(() => {
+    let active = true;
+    let current = "";
+    const inline = imageUrl(item);
+    setUrl(inline);
+    setLoading(!inline);
+    setFailed(false);
+    if (!inline) {
+      if (!load) {
+        setLoading(false);
+        setFailed(true);
+      } else {
+        void load(item)
+          .then((blob) => {
+            if (!active) return;
+            if (!blob) {
+              setFailed(true);
+              return;
+            }
+            current = URL.createObjectURL(blob);
+            setUrl(current);
+          })
+          .catch(() => active && setFailed(true))
+          .finally(() => active && setLoading(false));
+      }
+    }
+    return () => {
+      active = false;
+      if (current) URL.revokeObjectURL(current);
+    };
+  }, [item.id]);
+
+  useEffect(() => {
+    const previousOverflow = document.body.style.overflow;
+    document.body.style.overflow = "hidden";
+    closeButton.current?.focus();
+    const onKeyDown = (event: KeyboardEvent) => {
+      if (event.key === "Escape") onClose();
+      else if (items.length > 1 && event.key === "ArrowLeft") {
+        event.preventDefault();
+        selectOffset(-1);
+      } else if (items.length > 1 && event.key === "ArrowRight") {
+        event.preventDefault();
+        selectOffset(1);
+      }
+    };
+    window.addEventListener("keydown", onKeyDown);
+    return () => {
+      document.body.style.overflow = previousOverflow;
+      window.removeEventListener("keydown", onKeyDown);
+    };
+  }, [index, items.length]);
+
+  return e(
+    "div",
+    {
+      class: "image-gallery-backdrop",
+      role: "presentation",
+      onMouseDown: (event: MouseEvent) => {
+        if (event.target === event.currentTarget) onClose();
+      },
+    },
+    e(
+      "section",
+      {
+        class: "image-gallery",
+        role: "dialog",
+        "aria-modal": "true",
+        "aria-label": "Просмотр изображения " + item.name,
+      },
+      e(
+        "div",
+        { class: "image-gallery-header" },
+        e("strong", { title: item.name }, item.name),
+        e("span", null, index + 1 + " / " + items.length),
+        e(
+          "button",
+          {
+            ref: closeButton,
+            type: "button",
+            class: "image-gallery-close",
+            onClick: onClose,
+            "aria-label": "Закрыть галерею",
+            title: "Закрыть",
+          },
+          "×",
+        ),
+      ),
+      e(
+        "div",
+        {
+          class: "image-gallery-stage",
+          onMouseDown: (event: MouseEvent) => {
+            if (event.target === event.currentTarget) onClose();
+          },
+        },
+        loading && e("p", { class: "image-gallery-message" }, "Загрузка…"),
+        failed &&
+          e(
+            "p",
+            { class: "image-gallery-message error" },
+            "Не удалось открыть изображение.",
+          ),
+        url &&
+          !failed &&
+          e("img", {
+            src: url,
+            alt: item.name,
+            draggable: false,
+            onLoad: () => setLoading(false),
+            onError: () => {
+              setLoading(false);
+              setFailed(true);
+            },
+          }),
+        items.length > 1 &&
+          e(
+            "button",
+            {
+              type: "button",
+              class: "image-gallery-nav previous",
+              onClick: () => selectOffset(-1),
+              "aria-label": "Предыдущее изображение",
+              title: "Предыдущее изображение",
+            },
+            e(UiIcon, { name: "back", size: 24 }),
+          ),
+        items.length > 1 &&
+          e(
+            "button",
+            {
+              type: "button",
+              class: "image-gallery-nav next",
+              onClick: () => selectOffset(1),
+              "aria-label": "Следующее изображение",
+              title: "Следующее изображение",
+            },
+            e(UiIcon, { name: "chevron-right", size: 24 }),
+          ),
+      ),
+    ),
+  );
+}
+
 export function Attachments({
   items,
   onRemove,
@@ -179,6 +348,7 @@ export function Attachments({
   onMove,
   coverId,
   loadPreview,
+  loadFullImage,
   moveTargets = [],
   viewMode = false,
 }: {
@@ -190,9 +360,15 @@ export function Attachments({
   onMove?: (item: NoteAttachment, objectId: string) => void;
   coverId?: string;
   loadPreview?: (item: NoteAttachment) => Promise<Blob | null>;
+  loadFullImage?: (item: NoteAttachment) => Promise<Blob | null>;
   moveTargets?: { id: string; title: string }[];
   viewMode?: boolean;
 }) {
+  const [galleryId, setGalleryId] = useState<string | null>(null);
+  const galleryItems = items.filter((item) => item.type.startsWith("image/"));
+  const galleryItem = galleryId
+    ? galleryItems.find((item) => item.id === galleryId)
+    : undefined;
   if (!items.length) return null;
   return e(
     "section",
@@ -228,8 +404,20 @@ export function Attachments({
             key: item.id,
           },
           e(
-            "div",
-            { class: "attachment-preview" },
+            viewMode && image ? "button" : "div",
+            {
+              class:
+                "attachment-preview" +
+                (viewMode && image ? " attachment-preview-button" : ""),
+              ...(viewMode && image
+                ? {
+                    type: "button",
+                    onClick: () => setGalleryId(item.id),
+                    "aria-label": "Открыть изображение " + item.name,
+                    title: "Открыть изображение",
+                  }
+                : {}),
+            },
             image
               ? e(AsyncPreview, { item, load: loadPreview })
               : e(
@@ -365,6 +553,15 @@ export function Attachments({
         );
       }),
     ),
+    viewMode &&
+      galleryItem &&
+      e(ImageGallery, {
+        items: galleryItems,
+        activeId: galleryItem.id,
+        load: loadFullImage ?? loadPreview,
+        onSelect: setGalleryId,
+        onClose: () => setGalleryId(null),
+      }),
   );
 }
 function formatBytes(value: number) {

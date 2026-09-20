@@ -4,6 +4,7 @@ WORKDIR /app
 COPY package.docker.json package-lock.json ./
 RUN mv package.docker.json package.json
 RUN --mount=type=secret,id=npm_ca,required=false \
+    export ONNXRUNTIME_NODE_INSTALL=skip; \
     if [ -s /run/secrets/npm_ca ]; then \
       NODE_EXTRA_CA_CERTS=/run/secrets/npm_ca npm ci; \
     else \

@@ -1,4 +1,4 @@
-import { readdir, readFile, writeFile } from 'node:fs/promises';
+import { readdir, readFile, stat, writeFile } from 'node:fs/promises';
 import { createHash } from 'node:crypto';
 import { resolve, relative } from 'node:path';
 
@@ -16,7 +16,21 @@ const paths = await list(root);
 const hash = createHash('sha256');
 for (const path of paths) { hash.update(relative(root, path)); hash.update(await readFile(path)); }
 const version = hash.digest('hex').slice(0, 16);
-const assets = paths.map(path => '/' + relative(root, path).replaceAll('\\', '/'));
+const shellPaths = [];
+for (const path of paths) {
+  const rel = relative(root, path).replaceAll('\\', '/');
+  const size = (await stat(path)).size;
+  const largeHtrModel = rel.startsWith('ocr-models/htr/');
+  const rawPaddleSource =
+    rel.startsWith('ocr-models/paddle/') &&
+    /\/(?:inference\.onnx|inference\.yml)$/.test(rel);
+  const deferredOcrBundle =
+    /(?:htr\.worker-|worker-entry-|ort\.bundle\.min-)/.test(rel) ||
+    (rel.startsWith('assets/dist-') && size > 5_000_000);
+  if (!largeHtrModel && !rawPaddleSource && !deferredOcrBundle)
+    shellPaths.push(path);
+}
+const assets = shellPaths.map(path => '/' + relative(root, path).replaceAll('\\', '/'));
 const template = await readFile('scripts/sw-template.js', 'utf8');
 await writeFile(resolve(root, 'sw.js'), template.replace('__CACHE__', JSON.stringify(`tasks-shell-${version}`)).replace('__ASSETS__', JSON.stringify(assets)));
 console.log(`Service Worker: ${assets.length} public assets, version ${version}`);
