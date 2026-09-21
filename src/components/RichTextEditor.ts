@@ -2,6 +2,7 @@ import { h as e } from "preact";
 import { useEffect, useRef, useState } from "preact/hooks";
 import type { NoteAttachment } from "../planner";
 import { UiIcon } from "./ui.ts";
+import { LoadingImage } from "./LoadingImage.ts";
 
 const allowedTags = new Set([
   "A",
@@ -141,34 +142,14 @@ function AsyncPreview({
   item: NoteAttachment;
   load?: (item: NoteAttachment) => Promise<Blob | null>;
 }) {
-  const [url, setUrl] = useState(""),
-    [failed, setFailed] = useState(false);
-  useEffect(() => {
-    let active = true,
-      current = "";
-    setFailed(false);
-    if (load && item.type.startsWith("image/"))
-      void load(item)
-        .then((blob) => {
-          if (!active || !blob) return;
-          current = URL.createObjectURL(blob);
-          setUrl(current);
-        })
-        .catch(() => {});
-    return () => {
-      active = false;
-      if (current) URL.revokeObjectURL(current);
-    };
-  }, [item.id]);
   const inline = imageUrl(item);
-  return (inline || url) && !failed
-    ? e("img", {
-        src: inline || url,
-        alt: item.name,
-        loading: "lazy",
-        onError: () => setFailed(true),
-      })
-    : null;
+  return e(LoadingImage, {
+    src: inline,
+    load: !inline && load ? () => load(item) : undefined,
+    cacheKey: item.id,
+    alt: item.name,
+    frameClassName: "attachment-preview-image-frame",
+  });
 }
 
 function ImageGallery({
@@ -294,7 +275,11 @@ function ImageGallery({
             if (event.target === event.currentTarget) onClose();
           },
         },
-        loading && e("p", { class: "image-gallery-message" }, "Загрузка…"),
+        loading && e("div", {
+          class: "image-gallery-loading image-loading-skeleton",
+          role: "status",
+          "aria-label": "Изображение загружается",
+        }, e("span", { class: "sync-spinner" })),
         failed &&
           e(
             "p",

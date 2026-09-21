@@ -14,9 +14,12 @@ import type {
   OCRMode,
   OCRProgress,
   OCRResult,
+  OCRSelectionMask,
 } from "../ocr/types.ts";
 import { RichTextEditor } from "./RichTextEditor.ts";
+import { OCRRegionSelector } from "./OCRRegionSelector.ts";
 import { UiIcon } from "./ui.ts";
+import { appConfirm } from "./AppDialog.ts";
 
 function escapeHtml(value: string) {
   return value
@@ -65,8 +68,17 @@ const OCR_MODEL_PACKAGES: Array<{
 
 type OCRModelInstallChoice = OCRModelPackageId | "all";
 
-export function OcrTestScreen({ onBack }: { onBack: () => void }) {
+export function OcrTestScreen({
+  onBack,
+  onNavigationGuardChange,
+}: {
+  onBack: () => void;
+  onNavigationGuardChange?: (
+    guard: (() => Promise<boolean>) | null,
+  ) => void;
+}) {
   const service = useRef<LocalOCRService | null>(null);
+  const ocrAbort = useRef<AbortController | null>(null);
   const modelAbort = useRef<AbortController | null>(null);
   const modelManager = useRef(new OCRModelManager()).current;
   const fileInput = useRef<HTMLInputElement>(null);
@@ -74,12 +86,17 @@ export function OcrTestScreen({ onBack }: { onBack: () => void }) {
   const [html, setHtml] = useState("");
   const [text, setText] = useState("");
   const [editorKey, setEditorKey] = useState(0);
+  const [ocrExpanded, setOcrExpanded] = useState(false);
   const [file, setFile] = useState<File | null>(null);
+  const [selection, setSelection] = useState<OCRSelectionMask>({ strokes: [] });
   const [mode, setMode] = useState<OCRMode>("auto");
   const [language, setLanguage] = useState<OCRLanguage>("ru+en");
   const [progress, setProgress] = useState<OCRProgress | null>(null);
   const [lastResult, setLastResult] = useState<OCRResult | null>(null);
   const [ocrDraft, setOcrDraft] = useState("");
+  const [ocrDraftHtml, setOcrDraftHtml] = useState("");
+  const [ocrDraftEditorKey, setOcrDraftEditorKey] = useState(0);
+  const [resultOpen, setResultOpen] = useState(false);
   const [error, setError] = useState("");
   const [busy, setBusy] = useState(false);
   const [modelStates, setModelStates] = useState<OCRModelState[]>([]);
@@ -104,10 +121,55 @@ export function OcrTestScreen({ onBack }: { onBack: () => void }) {
   useEffect(() => {
     void refreshModelStates();
     return () => {
+      ocrAbort.current?.abort();
       modelAbort.current?.abort();
       void service.current?.dispose();
     };
   }, []);
+
+  useEffect(() => {
+    const pending = busy || Boolean(lastResult);
+    const guard = async () => {
+      if (!pending) return true;
+      const discard = await appConfirm(
+        busy
+          ? "Распознавание ещё не завершено. При выходе текущий прогресс OCR будет сброшен."
+          : "Распознанный текст ещё не принят и не добавлен в заметку. При выходе он будет сброшен.",
+        {
+          title: "Сбросить прогресс OCR?",
+          confirmLabel: "Сбросить прогресс",
+          cancelLabel: "Отмена",
+          danger: true,
+        },
+      );
+      if (discard) {
+        ocrAbort.current?.abort();
+        void service.current?.dispose();
+        service.current = null;
+      }
+      return discard;
+    };
+    onNavigationGuardChange?.(guard);
+    const beforeUnload = (event: BeforeUnloadEvent) => {
+      if (!pending) return;
+      event.preventDefault();
+      event.returnValue = "";
+    };
+    window.addEventListener("beforeunload", beforeUnload);
+    return () => {
+      onNavigationGuardChange?.(null);
+      window.removeEventListener("beforeunload", beforeUnload);
+    };
+  }, [busy, lastResult, onNavigationGuardChange]);
+
+  useEffect(() => {
+    if (!resultOpen) return;
+    const previousOverflow = document.body.style.overflow;
+    document.body.style.overflow = "hidden";
+    return () => {
+      document.body.style.overflow = previousOverflow;
+    };
+  }, [resultOpen]);
   const selectFile = (event: Event) => {
     const input = event.target as HTMLInputElement;
     const selected = input.files?.[0] ?? null;
@@ -118,10 +180,13 @@ export function OcrTestScreen({ onBack }: { onBack: () => void }) {
       return;
     }
     setFile(selected);
+    setSelection({ strokes: [] });
     setError("");
     setProgress(null);
     setLastResult(null);
     setOcrDraft("");
+    setOcrDraftHtml("");
+    setResultOpen(false);
   };
 
   const openImagePicker = (capture: boolean) => {
@@ -134,7 +199,7 @@ export function OcrTestScreen({ onBack }: { onBack: () => void }) {
 
   const insertOcrDraft = () => {
     const normalized = normalizeOcrText(ocrDraft);
-    const fragment = ocrFragment(normalized);
+    const fragment = ocrDraftHtml.trim() || ocrFragment(normalized);
     if (!fragment) return;
     setHtml((current) => current + fragment);
     setText((current) =>
@@ -143,21 +208,19 @@ export function OcrTestScreen({ onBack }: { onBack: () => void }) {
     setEditorKey((value) => value + 1);
     setLastResult(null);
     setOcrDraft("");
-  };
-
-  const replaceWithOcrDraft = () => {
-    const normalized = normalizeOcrText(ocrDraft);
-    if (!normalized) return;
-    setHtml(ocrFragment(normalized));
-    setText(normalized);
-    setEditorKey((value) => value + 1);
-    setLastResult(null);
-    setOcrDraft("");
+    setOcrDraftHtml("");
+    setResultOpen(false);
+    setFile(null);
+    setSelection({ strokes: [] });
   };
 
   const cancelOcrDraft = () => {
     setLastResult(null);
     setOcrDraft("");
+    setOcrDraftHtml("");
+    setResultOpen(false);
+    setFile(null);
+    setSelection({ strokes: [] });
   };
 
   const modelState = (id: OCRModelPackageId) =>
@@ -316,31 +379,44 @@ export function OcrTestScreen({ onBack }: { onBack: () => void }) {
       return;
     }
     setBusy(true);
+    setOcrExpanded(false);
     setError("");
     setLastResult(null);
     setOcrDraft("");
     setProgress({ phase: "preparing", message: "Подготавливаем OCR…" });
     try {
+      const controller = new AbortController();
+      ocrAbort.current = controller;
       const ocr = service.current ?? new LocalOCRService();
       service.current = ocr;
       const result = await ocr.recognize(
         file,
-        { mode, languages: language },
+        {
+          mode,
+          languages: language,
+          selection: selection.strokes.length ? selection : undefined,
+        },
         setProgress,
+        controller.signal,
       );
       if (!result.text.trim()) {
         setError("Текст на изображении не распознан.");
         return;
       }
       setLastResult(result);
-      setOcrDraft(normalizeOcrText(result.text));
+      const recognized = normalizeOcrText(result.text);
+      setOcrDraft(recognized);
+      setOcrDraftHtml(ocrFragment(recognized));
+      setOcrDraftEditorKey((value) => value + 1);
     } catch (caught) {
+      setOcrExpanded(true);
       setError(
         caught instanceof Error
           ? caught.message
           : "Не удалось выполнить локальный OCR.",
       );
     } finally {
+      ocrAbort.current = null;
       setBusy(false);
     }
   };
@@ -384,7 +460,6 @@ export function OcrTestScreen({ onBack }: { onBack: () => void }) {
         "button",
         {
           class: "ui-back",
-          disabled: busy,
           onClick: onBack,
           "aria-label": "Назад",
           title: "Назад",
@@ -398,7 +473,7 @@ export function OcrTestScreen({ onBack }: { onBack: () => void }) {
       ),
       e(
         "button",
-        { class: "primary", disabled: busy, onClick: onBack },
+        { class: "primary", onClick: onBack },
         "Готово",
       ),
     ),
@@ -417,41 +492,58 @@ export function OcrTestScreen({ onBack }: { onBack: () => void }) {
     ),
     e(
       "section",
-      { class: "reminder-card ocr-workbench" },
+      { class: `reminder-card ocr-workbench${ocrExpanded ? " is-open" : ""}` },
       e(
         "div",
-        { class: "section-heading" },
-        e("div", null,
-          e("h2", null, "Распознать текст"),
-          e("p", { class: "hint" }, "Добавьте изображение и вставьте результат в заметку"),
-        ),
-      ),
-      e(
-        "p",
-        { class: "hint ocr-privacy-note" },
-        "Изображение и распознанный текст обрабатываются только на этом устройстве.",
-      ),
-      e(
-        "p",
-        {
-          class: `${printedInstalled ? "hint" : "error"} ocr-access-status`,
-          role: "status",
-          "aria-live": "polite",
-        },
-        accessStatus,
-      ),
-      e(
-        "details",
-        {
-          class: "ocr-model-manager",
-          open: !printedInstalled || Boolean(modelBusy),
-        },
+        { class: "ocr-launch-row" },
         e(
-          "summary",
-          { class: "ocr-model-summary" },
-          e("span", null, "Модели OCR"),
-          e("small", null, allModelsInstalled ? "Все установлены" : "Настроить"),
+          "button",
+          {
+            type: "button",
+            class: ocrExpanded ? "primary ocr-launch-button" : "secondary-button ocr-launch-button",
+            disabled: busy,
+            onClick: () => setOcrExpanded((current) => !current),
+            "aria-expanded": ocrExpanded,
+          },
+          e(UiIcon, { name: "image", size: 18 }),
+          "Добавить текст с картинки",
         ),
+        e(
+          "details",
+          { class: "ocr-settings-menu" },
+          e(
+            "summary",
+            {
+              class: "icon-button",
+              "aria-label": "Настройки распознавания",
+              title: "Настройки распознавания",
+            },
+            e(UiIcon, { name: "settings", size: 19 }),
+          ),
+          e(
+            "div",
+            { class: "ocr-settings-menu-panel" },
+            e(
+              "p",
+              {
+                class: `${printedInstalled ? "hint" : "error"} ocr-access-status`,
+                role: "status",
+                "aria-live": "polite",
+              },
+              accessStatus,
+            ),
+            e(
+              "details",
+              {
+                class: "ocr-model-manager",
+                open: !printedInstalled || Boolean(modelBusy),
+              },
+              e(
+                "summary",
+                { class: "ocr-model-summary" },
+                e("span", null, "Модели OCR"),
+                e("small", null, allModelsInstalled ? "Все установлены" : "Настроить"),
+              ),
         e(
           "p",
           { class: "hint ocr-model-intro" },
@@ -651,6 +743,17 @@ export function OcrTestScreen({ onBack }: { onBack: () => void }) {
           ),
         ),
       ),
+          ),
+        ),
+      ),
+      ocrExpanded && e(
+        "div",
+        { class: "ocr-tool-body" },
+        e(
+          "p",
+          { class: "hint ocr-privacy-note" },
+          "Изображение и распознанный текст обрабатываются только на этом устройстве.",
+        ),
       e("input", {
         ref: fileInput,
         type: "file",
@@ -684,16 +787,6 @@ export function OcrTestScreen({ onBack }: { onBack: () => void }) {
           e(UiIcon, { name: "upload", size: 17 }),
           capabilities.touch ? "Из галереи" : "Выбрать изображение",
         ),
-        e(
-          "button",
-          {
-            type: "button",
-            class: "primary",
-            disabled: !canRunOCR,
-            onClick: () => void recognize(),
-          },
-          busy ? "Распознаём…" : "Распознать",
-        ),
       ),
       file &&
         e(
@@ -708,73 +801,33 @@ export function OcrTestScreen({ onBack }: { onBack: () => void }) {
             type: "button",
             class: "icon-button",
             disabled: busy,
-            onClick: () => setFile(null),
+            onClick: () => {
+              setFile(null);
+              setSelection({ strokes: [] });
+              setLastResult(null);
+              setOcrDraft("");
+            },
             "aria-label": "Убрать изображение",
             title: "Убрать изображение",
           }, e(UiIcon, { name: "trash", size: 16 })),
         ),
-      progress &&
-        e(
-          "p",
-          { class: "hint ocr-progress-status", role: "status", "aria-live": "polite" },
-          progress.message,
-        ),
+      file && e(OCRRegionSelector, {
+        file,
+        value: selection,
+        disabled: busy,
+        canRecognize: canRunOCR,
+        onRecognize: () => void recognize(),
+        onChange: (next: OCRSelectionMask) => {
+          setSelection(next);
+          setLastResult(null);
+          setOcrDraft("");
+          setOcrDraftHtml("");
+        },
+      }),
       error && e("p", { class: "error", role: "alert" }, error),
-      lastResult &&
-        e(
-          "p",
-          { class: "hint ocr-result-meta" },
-          `${lastResult.modeUsed} · ${lastResult.backend} · ${lastResult.durationMs} мс · строк: ${lastResult.lines.length}`,
-        ),
-      lastResult &&
-        e(
-          "div",
-          { class: "editor-label ocr-result-editor" },
-          e("span", null, "Распознанный текст"),
-          e("textarea", {
-            value: ocrDraft,
-            disabled: busy,
-            rows: 8,
-            onInput: (event: Event) =>
-              setOcrDraft((event.target as HTMLTextAreaElement).value),
-          }),
-          e(
-            "div",
-            { class: "onboarding-actions" },
-            e(
-              "button",
-              {
-                type: "button",
-                class: "secondary-button",
-                disabled: busy,
-                onClick: cancelOcrDraft,
-              },
-              "Отмена",
-            ),
-            e(
-              "button",
-              {
-                type: "button",
-                class: "secondary-button",
-                disabled: busy || !ocrDraft.trim(),
-                onClick: insertOcrDraft,
-              },
-              "Вставить",
-            ),
-            e(
-              "button",
-              {
-                type: "button",
-                class: "primary",
-                disabled: busy || !ocrDraft.trim(),
-                onClick: replaceWithOcrDraft,
-              },
-              "Заменить",
-            ),
-          ),
-        ),
       !capabilities.worker &&
         e("p", { class: "error" }, "Web Worker недоступен в этом браузере."),
+      ),
     ),
     e("label", { class: "editor-label sr-only" }, "Текст заметки"),
     e(RichTextEditor, {
@@ -787,5 +840,74 @@ export function OcrTestScreen({ onBack }: { onBack: () => void }) {
       },
       onError: setError,
     }),
+    busy && e(
+      "div",
+      {
+        class: "ocr-floating-status is-busy",
+        role: "status",
+        "aria-live": "polite",
+        title: progress?.message ?? "Распознаём текст",
+      },
+      e("span", { class: "sync-spinner" }),
+      e("span", { class: "sr-only" }, progress?.message ?? "Распознаём текст"),
+    ),
+    !busy && lastResult && e(
+      "button",
+      {
+        type: "button",
+        class: "ocr-floating-status is-ready",
+        onClick: () => setResultOpen(true),
+        "aria-label": "Открыть распознанный текст",
+        title: "Распознавание завершено — проверить текст",
+      },
+      e(UiIcon, { name: "check", size: 23 }),
+    ),
+    resultOpen && lastResult && e(
+      "div",
+      { class: "ocr-result-backdrop", role: "presentation" },
+      e(
+        "section",
+        {
+          class: "ocr-result-dialog",
+          role: "dialog",
+          "aria-modal": "true",
+          "aria-labelledby": "ocr-result-title",
+          "data-swipe-lock": "true",
+        },
+        e(
+          "div",
+          { class: "ocr-result-dialog-heading" },
+          e("div", null,
+            e("h2", { id: "ocr-result-title" }, "Проверьте распознанный текст"),
+            e("p", { class: "hint" }, `${lastResult.modeUsed} · ${lastResult.durationMs} мс · строк: ${lastResult.lines.length}`)),
+        ),
+        e(RichTextEditor, {
+          key: ocrDraftEditorKey,
+          html: ocrDraftHtml,
+          text: ocrDraft,
+          variant: "comment",
+          onChange: (nextHtml: string, nextText: string) => {
+            setOcrDraftHtml(nextHtml);
+            setOcrDraft(nextText);
+          },
+          onError: setError,
+        }),
+        e(
+          "div",
+          { class: "ocr-result-actions" },
+          e("button", {
+            type: "button",
+            class: "secondary-button",
+            onClick: cancelOcrDraft,
+          }, "Отмена"),
+          e("button", {
+            type: "button",
+            class: "primary",
+            disabled: !ocrDraft.trim(),
+            onClick: insertOcrDraft,
+          }, "Добавить в заметку"),
+        ),
+      ),
+    ),
   );
 }

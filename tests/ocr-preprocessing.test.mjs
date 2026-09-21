@@ -4,6 +4,7 @@ import { resolveOCRDeviceProfile } from '../src/ocr/deviceProfile.ts';
 import {
   fitOCRImageSize,
   normalizeOCRPixels,
+  validOCRSelectionStrokes,
 } from '../src/ocr/imagePreprocessing.ts';
 
 test('OCR device profile limits weak devices without disabling OCR', () => {
@@ -75,4 +76,18 @@ test('OCR grayscale keeps alpha and contrast expands the useful range', () => {
   assert.equal(pixels[3], 70);
   assert.equal(pixels[7], 255);
   assert.ok(pixels[0] < pixels[4]);
+});
+
+test('OCR selection keeps valid marker strokes and ignores malformed ones', () => {
+  const valid = { width: 0.12, points: [{ x: 0.2, y: 0.3 }] };
+  const result = validOCRSelectionStrokes({
+    strokes: [
+      valid,
+      { width: 0, points: [{ x: 0.2, y: 0.3 }] },
+      { width: 0.1, points: [{ x: Number.NaN, y: 0.3 }] },
+      { width: 0.1, points: [] },
+    ],
+  });
+  assert.deepEqual(result, [valid]);
+  assert.deepEqual(validOCRSelectionStrokes(), []);
 });

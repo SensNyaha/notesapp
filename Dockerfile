@@ -1,7 +1,9 @@
 # syntax=docker/dockerfile:1.7
 FROM node:24-bookworm-slim AS build
 WORKDIR /app
-COPY package.docker.json package-lock.docker.json ./
+COPY package.json package-lock.json ./
+COPY scripts/write-docker-package.mjs ./scripts/
+RUN node scripts/write-docker-package.mjs
 RUN mv package.docker.json package.json && mv package-lock.docker.json package-lock.json
 RUN --mount=type=secret,id=npm_ca,required=false \
     export ONNXRUNTIME_NODE_INSTALL=skip; \

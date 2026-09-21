@@ -269,6 +269,7 @@ export class LocalOCRService {
       profile: detectOCRDeviceProfile(),
       grayscale: options.preprocessing?.grayscale,
       normalizeContrast: options.preprocessing?.normalizeContrast,
+      selection: options.selection,
       signal,
     });
     onProgress?.({

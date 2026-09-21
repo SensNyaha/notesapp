@@ -1,5 +1,6 @@
 import { OCRError, throwIfOCRAborted } from "./errors.ts";
 import type { OCRDeviceProfile } from "./deviceProfile.ts";
+import type { OCRSelectionMask, OCRSelectionStroke } from "./types.ts";
 
 export interface OCRImageSize {
   width: number;
@@ -10,6 +11,7 @@ export interface OCRImagePreprocessingOptions {
   profile: OCRDeviceProfile;
   grayscale?: boolean;
   normalizeContrast?: boolean;
+  selection?: OCRSelectionMask;
   signal?: AbortSignal;
 }
 
@@ -172,6 +174,79 @@ function createCanvas(width: number, height: number): OCRCanvas {
   return canvas;
 }
 
+export function validOCRSelectionStrokes(selection?: OCRSelectionMask) {
+  return (selection?.strokes ?? []).filter((stroke) =>
+    Number.isFinite(stroke.width)
+    && stroke.width > 0
+    && stroke.points.some((point) =>
+      Number.isFinite(point.x) && Number.isFinite(point.y)
+    )
+  );
+}
+
+function drawSelectionStroke(
+  context: OCRCanvasContext,
+  stroke: OCRSelectionStroke,
+  width: number,
+  height: number,
+) {
+  const points = stroke.points.filter((point) =>
+    Number.isFinite(point.x) && Number.isFinite(point.y)
+  );
+  if (!points.length) return;
+  const x = (value: number) => Math.max(0, Math.min(width, value * width));
+  const y = (value: number) => Math.max(0, Math.min(height, value * height));
+  const lineWidth = Math.max(
+    1,
+    Math.min(width, height) * Math.min(1, stroke.width),
+  );
+  context.lineCap = "round";
+  context.lineJoin = "round";
+  context.lineWidth = lineWidth;
+  context.strokeStyle = "#fff";
+  context.fillStyle = "#fff";
+  if (points.length === 1) {
+    context.beginPath();
+    context.arc(x(points[0].x), y(points[0].y), lineWidth / 2, 0, Math.PI * 2);
+    context.fill();
+    return;
+  }
+  context.beginPath();
+  context.moveTo(x(points[0].x), y(points[0].y));
+  for (const point of points.slice(1)) context.lineTo(x(point.x), y(point.y));
+  context.stroke();
+}
+
+function applySelectionMask(
+  canvas: OCRCanvas,
+  context: OCRCanvasContext,
+  strokes: OCRSelectionStroke[],
+) {
+  if (!strokes.length) return;
+  const mask = createCanvas(canvas.width, canvas.height);
+  try {
+    const maskContext = mask.getContext("2d") as OCRCanvasContext | null;
+    if (!maskContext) {
+      throw new OCRError(
+        "image-processing-failed",
+        "Не удалось создать маску выбранных областей.",
+      );
+    }
+    for (const stroke of strokes) {
+      drawSelectionStroke(maskContext, stroke, canvas.width, canvas.height);
+    }
+    context.globalCompositeOperation = "destination-in";
+    context.drawImage(mask, 0, 0);
+    context.globalCompositeOperation = "destination-over";
+    context.fillStyle = "#fff";
+    context.fillRect(0, 0, canvas.width, canvas.height);
+    context.globalCompositeOperation = "source-over";
+  } finally {
+    mask.width = 1;
+    mask.height = 1;
+  }
+}
+
 async function canvasToBlob(canvas: OCRCanvas, type: string, quality: number) {
   if (typeof OffscreenCanvas !== "undefined" && canvas instanceof OffscreenCanvas) {
     return canvas.convertToBlob({ type, quality });
@@ -207,9 +282,10 @@ export async function prepareOCRImage(
       options.profile.maxImageSide,
       options.profile.maxImagePixels,
     );
+    const selectionStrokes = validOCRSelectionStrokes(options.selection);
     canvas = createCanvas(size.width, size.height);
     const context = canvas.getContext("2d", {
-      alpha: false,
+      alpha: selectionStrokes.length > 0,
       willReadFrequently: Boolean(
         options.grayscale || options.normalizeContrast,
       ),
@@ -233,6 +309,7 @@ export async function prepareOCRImage(
       );
       context.putImageData(imageData, 0, 0);
     }
+    applySelectionMask(canvas, context, selectionStrokes);
     throwIfOCRAborted(options.signal);
 
     const outputType = file.type === "image/png" ? "image/png" : "image/jpeg";

@@ -14,6 +14,7 @@ import type { ReminderPlan } from '../../shared/reminders.mjs';
 import { appConfirm } from './AppDialog.ts';
 import { TagPicker } from './TagPicker.ts';
 import type { ShellVaultContext } from './AppShell.ts';
+import { LoadingImage } from './LoadingImage.ts';
 
 type ProjectFilter='active'|'all'|'favorite'|'archive';
 type ProjectTab='overview'|'tasks'|'notes'|'files';
@@ -400,7 +401,7 @@ export function ProjectsScreen({user,onBack,onVaultContextChange}:{user:User;onB
       e('p',{class:'hint'},'Вложения из заметок и задач этого проекта.'),
       !files.length&&e('p',{class:'muted'},'В этом проекте пока нет вложений.'),
       files.map(({file,owner,objectId})=>e('article',{class:'attachment-card',key:objectId+'.'+file.id},
-        file.type.startsWith('image/')&&e('img',{src:file.data,alt:''}),
+        file.type.startsWith('image/')&&e(LoadingImage,{src:file.data,alt:file.name,frameClassName:'project-file-image-frame'}),
         e('div',null,e('strong',null,file.name),e('small',null,owner+' · '+Math.ceil(file.size/1024)+' КБ')),
         e('a',{href:file.data,download:file.name},'Сохранить'))))
       :null;

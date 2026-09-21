@@ -8,8 +8,12 @@ test('offline shell works; API and non-public paths bypass the Service Worker ca
   const handlers = {};
   const stores = new Map([['other-app', new Map()], ['tasks-shell-old', new Map()]]);
   let publicAssets = [];
+  const initialCacheMessages = [];
   let activationRequests = 0;
-  let windows = [{ id: 'current' }, { id: 'draft-tab' }];
+  let windows = [
+    { id: 'current', postMessage: message => initialCacheMessages.push(message) },
+    { id: 'draft-tab', postMessage: message => initialCacheMessages.push(message) },
+  ];
   const notifications=[];let opened,focused=0,closed=0,navigated;
   const cacheApi = {
     async open(key) {
@@ -21,6 +25,11 @@ test('offline shell works; API and non-public paths bypass the Service Worker ca
           for (const path of paths) { await access('dist' + path); entries.set(path, 'cached:' + path); }
         },
         async match(path) { return entries.get(path); },
+        async put(path) {
+          await access('dist' + path);
+          if (!publicAssets.includes(path)) publicAssets.push(path);
+          entries.set(path, 'cached:' + path);
+        },
       };
     },
     async keys() { return [...stores.keys()]; },
@@ -28,7 +37,7 @@ test('offline shell works; API and non-public paths bypass the Service Worker ca
   };
   vm.runInNewContext(code, {
     URL, caches: cacheApi,
-    fetch: async () => { throw new Error('offline'); },
+    fetch: async path => ({ ok: true, path, clone() { return this; } }),
     self: { location: { origin: 'http://localhost:3100' }, registration:{showNotification:async(...args)=>notifications.push(args)},
       clients: { claim: async () => {}, matchAll: async () => windows,openWindow:async path=>{opened=path;} },
       addEventListener: (name, fn) => { handlers[name] = fn; }, skipWaiting: async () => { activationRequests++; } },
@@ -36,6 +45,10 @@ test('offline shell works; API and non-public paths bypass the Service Worker ca
   let pending;
   handlers.install({ waitUntil(promise) { pending = promise; } });
   await pending;
+  assert.equal(initialCacheMessages[0].type, 'INITIAL_CACHE_PROGRESS');
+  assert.equal(initialCacheMessages[0].loaded, 0);
+  assert.equal(initialCacheMessages.at(-1).type, 'INITIAL_CACHE_READY');
+  assert.equal(initialCacheMessages.at(-1).loaded, initialCacheMessages.at(-1).total);
   assert(publicAssets.includes('/index.html'));
   assert(publicAssets.some(path => path.endsWith('.js')));
   assert(publicAssets.some(path => /^\/assets\/.+\.css$/.test(path)));

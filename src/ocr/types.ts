@@ -34,10 +34,26 @@ export interface OCRResult {
 export interface OCRRecognizeOptions {
   mode: OCRMode;
   languages: OCRLanguage;
+  selection?: OCRSelectionMask;
   preprocessing?: {
     grayscale?: boolean;
     normalizeContrast?: boolean;
   };
+}
+
+export interface OCRSelectionPoint {
+  x: number;
+  y: number;
+}
+
+export interface OCRSelectionStroke {
+  points: OCRSelectionPoint[];
+  /** Width relative to the image's shorter side, from 0 to 1. */
+  width: number;
+}
+
+export interface OCRSelectionMask {
+  strokes: OCRSelectionStroke[];
 }
 
 export interface OCRProgress {

@@ -102,9 +102,9 @@ export function AboutSettings({onBack}:{onBack:()=>void}){
   const standalone=matchMedia('(display-mode: standalone)').matches||Boolean((navigator as Navigator&{standalone?:boolean}).standalone);
   return e('main',{class:'settings-screen about-screen'},
     e(PageHeader,{eyebrow:'О приложении',title:'Tasks',back:onBack}),
-    e('section',{class:'about-hero'},e('img',{src:'/icon.svg',width:64,height:64,alt:''}),e('div',null,e('strong',null,'Tasks'),e('span',null,'Версия 0.20.10'))),
+    e('section',{class:'about-hero'},e('img',{src:'/icon.svg',width:64,height:64,alt:''}),e('div',null,e('strong',null,'Tasks'),e('span',null,'Версия 0.20.15'))),
     e('section',{class:'about-grid card'},
-      e('div',null,e('span',null,'Версия'),e('strong',null,'0.20.10')),
+      e('div',null,e('span',null,'Версия'),e('strong',null,'0.20.15')),
       e('div',null,e('span',null,'Режим'),e('strong',null,standalone?'Установленная PWA':'Браузер')),
       e('div',null,e('span',null,'Часовой пояс'),e('strong',null,zone))),
     e(InfoTip,{label:'О часовом поясе'},'Часовой пояс аккаунта обновляется из текущего часового пояса устройства при работе онлайн.'));

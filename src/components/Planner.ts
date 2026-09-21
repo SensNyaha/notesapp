@@ -115,6 +115,7 @@ import {
 import type { ShellVaultContext } from "./AppShell.ts";
 import { appConfirm, appPrompt } from "./AppDialog.ts";
 import { TagPicker } from "./TagPicker.ts";
+import { LoadingImage } from "./LoadingImage.ts";
 
 interface Draft extends Note {
   vault: string;
@@ -148,34 +149,15 @@ function BlobImage({
   className: string;
   cacheKey: string;
 }) {
-  const [url, setUrl] = useState(""),
-    [failed, setFailed] = useState(false);
-  useEffect(() => {
-    let active = true,
-      current = "";
-    setUrl("");
-    setFailed(false);
-    void load()
-      .then((blob) => {
-        if (!active || !blob) return;
-        current = URL.createObjectURL(blob);
-        setUrl(current);
-      })
-      .catch(() => {});
-    return () => {
-      active = false;
-      if (current) URL.revokeObjectURL(current);
-    };
-  }, [cacheKey]);
-  return url && !failed
-    ? e("img", {
-        src: url,
-        alt,
-        class: className,
-        loading: "lazy",
-        onError: () => setFailed(true),
-      })
-    : null;
+  return e(LoadingImage, {
+    load,
+    cacheKey,
+    alt,
+    className,
+    frameClassName: className === "note-cover"
+      ? "note-cover-image-frame"
+      : "note-list-cover-image-frame",
+  });
 }
 export function Planner({
   user,

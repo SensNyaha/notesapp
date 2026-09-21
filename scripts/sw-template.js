@@ -25,6 +25,31 @@ async function downloadShell(report) {
     throw error;
   }
 }
+async function broadcast(message) {
+  const clients = await self.clients.matchAll({ type: 'window', includeUncontrolled: true });
+  for (const client of clients) client.postMessage?.(message);
+}
+async function downloadMissingInitialShell() {
+  const cache = await caches.open(CACHE);
+  const missing = [];
+  for (const path of ASSETS) if (!await cache.match(path)) missing.push(path);
+  if (!missing.length) return;
+  await broadcast({ type: 'INITIAL_CACHE_PROGRESS', loaded: 0, total: missing.length });
+  try {
+    for (let index = 0; index < missing.length; index++) {
+      const path = missing[index];
+      const response = await fetch(path, { cache: 'no-store' });
+      if (!response || response.ok === false) throw new Error(`Unable to download ${path}`);
+      await cache.put(path, response.clone ? response.clone() : response);
+      await broadcast({ type: 'INITIAL_CACHE_PROGRESS', loaded: index + 1, total: missing.length });
+    }
+    await broadcast({ type: 'INITIAL_CACHE_READY', loaded: missing.length, total: missing.length });
+  } catch (error) {
+    await caches.delete(CACHE);
+    await broadcast({ type: 'INITIAL_CACHE_ERROR' });
+    throw error;
+  }
+}
 self.addEventListener('install', event => {
   event.waitUntil((async () => {
     // One-time migration from the broken OCR shell that precached ORT runtime
@@ -42,9 +67,11 @@ self.addEventListener('install', event => {
     }
     // On a normal update only this small worker is installed. The application
     // shell is downloaded later, after the user presses the update button.
-    if (!self.registration.active || migrateLegacyOcrShell) {
+    if (migrateLegacyOcrShell) {
       const cache = await caches.open(CACHE);
       await cache.addAll(ASSETS);
+    } else if (!self.registration.active) {
+      await downloadMissingInitialShell();
     }
     if (migrateLegacyOcrShell) await self.skipWaiting();
   })());

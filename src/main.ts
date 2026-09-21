@@ -36,6 +36,7 @@ applyTheme();
 
 type DefinitionRow = [term: string, value: string, wide?: boolean];
 type UpdatePhase = 'available' | 'downloading' | 'ready' | 'error';
+type InitialCacheProgress = { loaded: number; total: number };
 function initialReminderTarget():ReminderTarget|undefined{
   const match=location.hash.match(/^#reminder=([0-9a-f.-]+)$/),parts=match?.[1].split('.');
   const uuid=/^[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}$/;
@@ -57,6 +58,27 @@ function DefinitionList({ rows }: { rows: DefinitionRow[] }) {
       e('dd', { class: term === 'Идентификатор установки' ? 'mono' : '' }, value),
     )
   ));
+}
+
+function InitialCacheScreen({ loaded, total }: InitialCacheProgress) {
+  const progress = total > 0 ? Math.max(0, Math.min(1, loaded / total)) : 0;
+  const percent = Math.round(progress * 100);
+  return e('main', {
+    class: 'initial-cache-screen',
+    role: 'status',
+    'aria-live': 'polite',
+    'aria-label': `Подготовка к работе без сети: ${percent}%`,
+  },
+    e('div', { class: 'initial-cache-brand' },
+      e('span', { class: 'initial-cache-logo' }, e('img', { src: '/icon.svg', alt: '' })),
+      e('strong', null, 'Tasks'),
+      e('span', null, 'Подготавливаем приложение к работе без сети')),
+    e('div', { class: 'initial-cache-progress-wrap' },
+      e('div', { class: 'initial-cache-progress-copy' },
+        e('span', null, 'Загрузка файлов'),
+        e('strong', null, percent + '%')),
+      e('progress', { max: 1, value: progress }, percent + '%')),
+  );
 }
 
 function App() {
@@ -92,6 +114,7 @@ function App() {
   const [waiting, setWaiting] = useState<ServiceWorker | null>(null);
   const [updatePhase, setUpdatePhase] = useState<UpdatePhase>('available');
   const [updateProgress, setUpdateProgress] = useState(0);
+  const [initialCacheProgress, setInitialCacheProgress] = useState<InitialCacheProgress | null>(null);
   const [vaultContext,setVaultContext]=useState<ShellVaultContext|null>(null);
   const secure = window.isSecureContext;
   const cryptoAvailable = secure && Boolean(window.crypto?.subtle);
@@ -209,7 +232,25 @@ function App() {
     }
     let alive = true;
     let updateTimer: number | undefined;
+    let initialCacheTimer: number | undefined;
     let checkForUpdate: (() => void) | undefined;
+    const receiveServiceWorkerMessage = (event: MessageEvent) => {
+      const data = event.data;
+      if (data?.type === 'INITIAL_CACHE_PROGRESS') {
+        const total = Number(data.total);
+        const loaded = Number(data.loaded);
+        if (total > 0) setInitialCacheProgress({ loaded: Math.max(0, Math.min(total, loaded)), total });
+      } else if (data?.type === 'INITIAL_CACHE_READY') {
+        const total = Number(data.total);
+        if (total > 0) setInitialCacheProgress({ loaded: total, total });
+        initialCacheTimer = window.setTimeout(() => alive && setInitialCacheProgress(null), 350);
+      } else if (data?.type === 'INITIAL_CACHE_ERROR') {
+        setInitialCacheProgress(null);
+        setShell('Не подготовлена');
+        setSwError('Не удалось сохранить файлы для работы без сети.');
+      }
+    };
+    navigator.serviceWorker.addEventListener('message', receiveServiceWorkerMessage);
     navigator.serviceWorker.register('/sw.js', { updateViaCache: 'none' }).then(async registration => {
       if (!alive) return;
       const offerUpdate = (worker: ServiceWorker) => {
@@ -245,6 +286,8 @@ function App() {
         window.removeEventListener('online', checkForUpdate);
       }
       if (updateTimer !== undefined) window.clearInterval(updateTimer);
+      if (initialCacheTimer !== undefined) window.clearTimeout(initialCacheTimer);
+      navigator.serviceWorker.removeEventListener('message', receiveServiceWorkerMessage);
     };
   }, []);
 
@@ -333,6 +376,7 @@ function App() {
       style: `--update-progress:${Math.round(updateProgress * 100)}%`,
       onClick: updatePhase === 'ready' ? restartAfterUpdate : downloadUpdate,
     }, updateButtonLabel));
+  if (initialCacheProgress) return e(InitialCacheScreen, initialCacheProgress);
   if (authLoading) return e('main', { class: 'auth-screen', role: 'status' }, 'Проверяем вход…');
   if (!user) return e('div', {class:'logged-out-shell'},
     updateNotice && e('div', { class: 'auth-status' }, updateNotice),
@@ -351,6 +395,8 @@ function App() {
     e(PasswordScreen, { key: user.id, user, onBack: () => setPage('home'), onLogout: logout, onRefresh: checkSession,
       onDone: (result) => { authGeneration.current++;void requireOutboxReview(result).catch(()=>{}).finally(()=>{userRef.current=result;setUser(result);setPage('home');setAuthError('');setNotice('Пароль изменён.');}); } }));
   async function navigate(next:typeof page){
+    const guard=logoNavigationGuard.current;
+    if(next!==page&&page==='ocr-test'&&guard&&!await guard())return;
     try{await flushDraft();if(next!==page&&!gestureBackInProgress.current){pageHistory.current.push(page);if(pageHistory.current.length>15)pageHistory.current.shift();}gestureBackInProgress.current=false;setAuthError('');setPage(next);}
     catch{setAuthError('Сначала сохраните черновик.');}
   }
@@ -434,7 +480,7 @@ function App() {
   else if(page==='password')content=e(PasswordScreen,{key:user.id,user,onBack:()=>void navigate('settings'),onLogout:logout,onRefresh:checkSession,
     onDone:(result:User)=>{authGeneration.current++;void requireOutboxReview(result).catch(()=>{}).finally(()=>{userRef.current=result;setUser(result);setPage('settings');setAuthError('');setNotice('Пароль изменён.');});}});
   else if(page==='users'&&user.role==='admin')content=e(UsersScreen,{key:user.id,onBack:()=>void navigate('settings'),onRefresh:checkSession});
-  else if(page==='ocr-test'&&user.role==='admin')content=e(Suspense,{fallback:e('div',{class:'settings-detail'},'Загрузка OCR…')},e(OcrTestScreen,{onBack:()=>void navigate('settings')}));
+  else if(page==='ocr-test'&&user.role==='admin')content=e(Suspense,{fallback:e('div',{class:'settings-detail'},'Загрузка OCR…')},e(OcrTestScreen,{onBack:()=>void navigate('settings'),onNavigationGuardChange:registerLogoNavigationGuard}));
   else if(page==='diagnostics')content=diagnostics;
   else content=e(SettingsHub,{user,onOpen:openSetting,onLogout:logout,loggingOut});
   const shellNotice=reminderTarget&&reminderTarget.accountId!==user.id?'Уведомление относится к другому аккаунту. Войдите в нужный аккаунт, чтобы открыть заметку.':notice;
