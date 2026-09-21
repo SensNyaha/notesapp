@@ -37,6 +37,7 @@ applyTheme();
 type DefinitionRow = [term: string, value: string, wide?: boolean];
 type UpdatePhase = 'available' | 'downloading' | 'ready' | 'error';
 type InitialCacheProgress = { loaded: number; total: number };
+const vaultWorkspacePages = new Set(['today', 'projects', 'archive', 'trash']);
 function initialReminderTarget():ReminderTarget|undefined{
   const match=location.hash.match(/^#reminder=([0-9a-f.-]+)$/),parts=match?.[1].split('.');
   const uuid=/^[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}$/;
@@ -116,6 +117,7 @@ function App() {
   const [updateProgress, setUpdateProgress] = useState(0);
   const [initialCacheProgress, setInitialCacheProgress] = useState<InitialCacheProgress | null>(null);
   const [vaultContext,setVaultContext]=useState<ShellVaultContext|null>(null);
+  const [workspaceAccess,setWorkspaceAccess]=useState<{userId:string;ready:boolean}|null>(null);
   const secure = window.isSecureContext;
   const cryptoAvailable = secure && Boolean(window.crypto?.subtle);
 
@@ -179,6 +181,27 @@ function App() {
     changes?.addEventListener('message', receive); window.addEventListener('tasks-data', receive);
     return () => { changes?.removeEventListener('message', receive); window.removeEventListener('tasks-data', receive); };
   }, []);
+  useEffect(()=>{
+    if(!user){setWorkspaceAccess(null);return;}
+    let alive=true;
+    setWorkspaceAccess(null);
+    const refresh=()=>void readState(user.id).then(state=>{
+      if(!alive)return;
+      const selected=state?.lastVaultId;
+      const ready=Boolean(selected&&state?.vaults.some(v=>v.header.id===selected&&!v.deleted&&!v.transfer&&Boolean(v.key)));
+      setWorkspaceAccess({userId:user.id,ready});
+    }).catch(()=>{});
+    refresh();
+    changes?.addEventListener('message',refresh);
+    window.addEventListener('tasks-data',refresh);
+    return()=>{alive=false;changes?.removeEventListener('message',refresh);window.removeEventListener('tasks-data',refresh);};
+  },[user?.id]);
+  useEffect(()=>{
+    if(user&&workspaceAccess?.userId===user.id&&!workspaceAccess.ready&&vaultWorkspacePages.has(page)){
+      pageHistory.current=[];
+      setPage('home');
+    }
+  },[user?.id,workspaceAccess?.userId,workspaceAccess?.ready,page]);
 
   async function logout() {
     setLoggingOut(true); authGeneration.current++;
@@ -394,7 +417,10 @@ function App() {
     authError && e('p', { class: 'auth-status error', role: 'alert' }, authError),
     e(PasswordScreen, { key: user.id, user, onBack: () => setPage('home'), onLogout: logout, onRefresh: checkSession,
       onDone: (result) => { authGeneration.current++;void requireOutboxReview(result).catch(()=>{}).finally(()=>{userRef.current=result;setUser(result);setPage('home');setAuthError('');setNotice('Пароль изменён.');}); } }));
+  const workspaceReady=workspaceAccess?.userId===user.id&&workspaceAccess.ready;
+  const visiblePage=!workspaceReady&&vaultWorkspacePages.has(page)?'home':page;
   async function navigate(next:typeof page){
+    if(!workspaceReady&&vaultWorkspacePages.has(next)){setPage('home');return;}
     const guard=logoNavigationGuard.current;
     if(next!==page&&page==='ocr-test'&&guard&&!await guard())return;
     try{await flushDraft();if(next!==page&&!gestureBackInProgress.current){pageHistory.current.push(page);if(pageHistory.current.length>15)pageHistory.current.shift();}gestureBackInProgress.current=false;setAuthError('');setPage(next);}
@@ -414,10 +440,11 @@ function App() {
     if(back){gestureBackInProgress.current=true;back.click();window.setTimeout(()=>{gestureBackInProgress.current=false;},1200);return;}
     let previous=pageHistory.current.pop();
     while(previous===page)previous=pageHistory.current.pop();
+    while(previous&&workspaceAccess?.userId===user.id&&!workspaceAccess.ready&&vaultWorkspacePages.has(previous))previous=pageHistory.current.pop();
     if(previous){setAuthError('');setPage(previous);}
     else if(page!=='home'){setAuthError('');setPage('home');}
-  },[page]);
-  const shellActive:ShellSection=page==='home'?'notes':page==='today'?'today':page==='projects'?'projects':'settings';
+  },[page,user.id,workspaceAccess?.userId,workspaceAccess?.ready]);
+  const shellActive:ShellSection=visiblePage==='home'?'notes':visiblePage==='today'?'today':visiblePage==='projects'?'projects':'settings';
   const navigateSection=(section:ShellSection)=>{
     if(section==='settings'){
       if(shellActive==='settings')void navigate(previousWorkspacePage.current);
@@ -466,26 +493,26 @@ function App() {
       user.role==='admin'&&e(ServerStorage,{key:user.id}),
       e(CryptoCheck,{key:user.id})));
   let content;
-  if(page==='home'||page==='today'||page==='archive'||page==='trash')content=e(Planner,{user,key:user.id+':'+page+':'+(page==='home'?notesHomeVersion:0),section:page==='today'?'today':'notes',initialScreen:page==='archive'?'archive':page==='trash'?'trash':'list',reminderTarget,onReminderHandled:()=>setReminderTarget(undefined),onSyncState:syncCallback,onOpenProjects:()=>void navigate('projects'),onVaultContextChange:setVaultContext,onNavigationGuardChange:registerLogoNavigationGuard});
-  else if(page==='projects')content=e(ProjectsScreen,{user,key:user.id,onBack:()=>void navigate('home'),onVaultContextChange:setVaultContext});
-  else if(page==='settings')content=e(SettingsHub,{user,onOpen:openSetting,onLogout:logout,loggingOut});
-  else if(page==='account')content=e(AccountOverview,{user,onOpen:openSetting,onLogout:logout,loggingOut,onBack:()=>void navigate('settings')});
-  else if(page==='appearance')content=e(AppearanceSettings,{onBack:()=>void navigate('settings')});
-  else if(page==='about')content=e(AboutSettings,{onBack:()=>void navigate('settings')});
-  else if(page==='notifications')content=e(Notifications,{user,key:user.id,onBack:()=>void navigate('settings')});
-  else if(page==='devices')content=e(DevicesScreen,{user,onBack:()=>void navigate('settings'),onAuthLost:checkSession});
-  else if(page==='passkeys')content=e(PasskeysScreen,{user,onBack:()=>void navigate('settings')});
-  else if(page==='collaboration')content=e(CollaborationScreen,{user,key:user.id,onBack:()=>void navigate('settings')});
-  else if(page==='data')content=e(DataTransfer,{user,key:user.id,onBack:()=>void navigate('settings')});
-  else if(page==='password')content=e(PasswordScreen,{key:user.id,user,onBack:()=>void navigate('settings'),onLogout:logout,onRefresh:checkSession,
+  if(visiblePage==='home'||visiblePage==='today'||visiblePage==='archive'||visiblePage==='trash')content=e(Planner,{user,key:user.id+':'+visiblePage+':'+(visiblePage==='home'?notesHomeVersion:0),section:visiblePage==='today'?'today':'notes',initialScreen:visiblePage==='archive'?'archive':visiblePage==='trash'?'trash':'list',reminderTarget,onReminderHandled:()=>setReminderTarget(undefined),onSyncState:syncCallback,onOpenProjects:()=>void navigate('projects'),onVaultContextChange:setVaultContext,onNavigationGuardChange:registerLogoNavigationGuard});
+  else if(visiblePage==='projects')content=e(ProjectsScreen,{user,key:user.id,onBack:()=>void navigate('home'),onVaultContextChange:setVaultContext});
+  else if(visiblePage==='settings')content=e(SettingsHub,{user,onOpen:openSetting,onLogout:logout,loggingOut});
+  else if(visiblePage==='account')content=e(AccountOverview,{user,onOpen:openSetting,onLogout:logout,loggingOut,onBack:()=>void navigate('settings')});
+  else if(visiblePage==='appearance')content=e(AppearanceSettings,{onBack:()=>void navigate('settings')});
+  else if(visiblePage==='about')content=e(AboutSettings,{onBack:()=>void navigate('settings')});
+  else if(visiblePage==='notifications')content=e(Notifications,{user,key:user.id,onBack:()=>void navigate('settings')});
+  else if(visiblePage==='devices')content=e(DevicesScreen,{user,onBack:()=>void navigate('settings'),onAuthLost:checkSession});
+  else if(visiblePage==='passkeys')content=e(PasskeysScreen,{user,onBack:()=>void navigate('settings')});
+  else if(visiblePage==='collaboration')content=e(CollaborationScreen,{user,key:user.id,onBack:()=>void navigate('settings')});
+  else if(visiblePage==='data')content=e(DataTransfer,{user,key:user.id,onBack:()=>void navigate('settings')});
+  else if(visiblePage==='password')content=e(PasswordScreen,{key:user.id,user,onBack:()=>void navigate('settings'),onLogout:logout,onRefresh:checkSession,
     onDone:(result:User)=>{authGeneration.current++;void requireOutboxReview(result).catch(()=>{}).finally(()=>{userRef.current=result;setUser(result);setPage('settings');setAuthError('');setNotice('Пароль изменён.');});}});
-  else if(page==='users'&&user.role==='admin')content=e(UsersScreen,{key:user.id,onBack:()=>void navigate('settings'),onRefresh:checkSession});
-  else if(page==='ocr-test'&&user.role==='admin')content=e(Suspense,{fallback:e('div',{class:'settings-detail'},'Загрузка OCR…')},e(OcrTestScreen,{onBack:()=>void navigate('settings'),onNavigationGuardChange:registerLogoNavigationGuard}));
-  else if(page==='diagnostics')content=diagnostics;
+  else if(visiblePage==='users'&&user.role==='admin')content=e(UsersScreen,{key:user.id,onBack:()=>void navigate('settings'),onRefresh:checkSession});
+  else if(visiblePage==='ocr-test'&&user.role==='admin')content=e(Suspense,{fallback:e('div',{class:'settings-detail'},'Загрузка OCR…')},e(OcrTestScreen,{onBack:()=>void navigate('settings'),onNavigationGuardChange:registerLogoNavigationGuard}));
+  else if(visiblePage==='diagnostics')content=diagnostics;
   else content=e(SettingsHub,{user,onOpen:openSetting,onLogout:logout,loggingOut});
   const shellNotice=reminderTarget&&reminderTarget.accountId!==user.id?'Уведомление относится к другому аккаунту. Войдите в нужный аккаунт, чтобы открыть заметку.':notice;
   return e(AppShell,{user,active:shellActive,onNavigate:navigateSection,onHome:()=>void navigateHomeFromLogo(),onBackGesture:navigateBackFromGesture,syncing,connection,loggingOut,onLogout:logout,
-    notice:shellNotice,error:authError,updateNotice,vaultContext},content);
+    notice:shellNotice,error:authError,updateNotice,vaultContext,workspaceReady},content);
 }
 
 const root = document.getElementById('app');

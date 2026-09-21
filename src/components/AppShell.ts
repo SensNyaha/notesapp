@@ -67,11 +67,11 @@ function restoreScreen(root:HTMLElement,memory:ScreenMemory){
   window.scrollTo(0,memory.windowY);
 }
 
-export function AppShell({user,active,onNavigate,onHome,onBackGesture,syncing,connection,loggingOut,onLogout,children,notice,error,updateNotice,vaultContext}:{
+export function AppShell({user,active,onNavigate,onHome,onBackGesture,syncing,connection,loggingOut,onLogout,children,notice,error,updateNotice,vaultContext,workspaceReady}:{
   user:User;active:ShellSection;onNavigate:(section:ShellSection)=>void;syncing:boolean;connection:'checking'|'online'|'offline'|'auth'|'error';
   onHome:()=>void;
   onBackGesture:()=>void;
-  loggingOut:boolean;onLogout:()=>void;children?:ComponentChildren;notice?:string;error?:string;updateNotice?:ComponentChildren;vaultContext?:ShellVaultContext|null;
+  loggingOut:boolean;onLogout:()=>void;children?:ComponentChildren;notice?:string;error?:string;updateNotice?:ComponentChildren;vaultContext?:ShellVaultContext|null;workspaceReady:boolean;
 }){
   const contentRef=useRef<HTMLDivElement>(null),backGestureRef=useRef(onBackGesture),memories=useRef(new Map<string,ScreenMemory>()),[swipeProgress,setSwipeProgress]=useState(0);
   backGestureRef.current=onBackGesture;
@@ -100,13 +100,13 @@ export function AppShell({user,active,onNavigate,onHome,onBackGesture,syncing,co
   const status=syncing?'Синхронизация…':connection==='checking'?'Проверяем связь…':connection==='offline'?'Офлайн':connection==='error'?'Ошибка связи':connection==='auth'?'Нужен вход':'Синхронизировано';
   const statusVisible=syncing||connection!=='online';
   const tone=connection==='offline'?'warning':connection==='error'||connection==='auth'?'danger':syncing||connection==='checking'?'accent':'success';
-  const rootNav=nav;
+  const rootNav=workspaceReady?nav:nav.filter(([id])=>id==='notes'||id==='settings');
   return e('div',{class:'app-shell'},
     e('aside',{class:'app-sidebar','aria-label':'Основная навигация'},
       e('button',{class:'shell-brand',onClick:onHome,'aria-label':'Tasks · заметки'},
         e('span',{class:'shell-brand-mark'},e('img',{src:'/icon.svg',width:34,height:34,alt:''})),
         e('span',{class:'shell-brand-copy'},e('strong',null,'Tasks'),e('small',null,'Workspace'))),
-      e('nav',{class:'shell-nav'},nav.map(([id,label,icon])=>
+      e('nav',{class:'shell-nav'},rootNav.map(([id,label,icon])=>
         e('button',{key:id,class:active===id?'active':'','aria-current':active===id?'page':undefined,onClick:()=>onNavigate(id),title:label},
           e(UiIcon,{name:icon}),e('span',null,label)))),
       e('div',{class:'sidebar-sync '+(syncing?'syncing':''),title:status,'aria-label':status},e(StatusDot,{tone}),statusVisible&&e('span',null,status)),
@@ -119,7 +119,7 @@ export function AppShell({user,active,onNavigate,onHome,onBackGesture,syncing,co
       e('header',{class:'mobile-shell-header'},
         e('button',{class:'mobile-brand',onClick:onHome,'aria-label':'Tasks'},
           e('img',{src:'/icon.svg',width:30,height:30,alt:''}),e('strong',null,'Tasks')),
-        e('div',{class:'mobile-shell-context'},vaultContext&&
+        e('div',{class:'mobile-shell-context'},workspaceReady&&vaultContext&&
           e('label',{class:'mobile-vault-context'},
             e(UiIcon,{name:'database',size:16}),
             e('select',{value:vaultContext.value,'aria-label':'Текущее хранилище',onChange:(event:Event)=>vaultContext.onChange((event.target as HTMLSelectElement).value)},

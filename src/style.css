@@ -9297,6 +9297,9 @@
   background: var(--surface-raised);
   box-shadow: var(--shadow-float);
 }
+.ocr-settings-mobile-header {
+  display: none;
+}
 .ocr-settings-menu-panel > .ocr-access-status,
 .ocr-settings-menu-panel > .ocr-model-manager,
 .ocr-settings-menu-panel > .ocr-options-title {
@@ -9843,6 +9846,38 @@
     left: max(8px, env(safe-area-inset-left));
     width: auto;
     max-height: calc(100dvh - 138px - env(safe-area-inset-bottom));
+  }
+  .ocr-settings-mobile-header {
+    position: sticky;
+    z-index: 2;
+    top: -14px;
+    grid-column: 1 / -1;
+    display: grid;
+    grid-template-columns: 1fr auto 1fr;
+    align-items: center;
+    min-height: 52px;
+    margin: -14px -14px 0;
+    padding: 4px 10px;
+    border-bottom: 1px solid var(--border);
+    background: var(--surface-raised);
+  }
+  .ocr-settings-mobile-header > strong {
+    grid-column: 2;
+    white-space: nowrap;
+  }
+  .ocr-settings-back {
+    grid-column: 1;
+    grid-row: 1;
+    justify-self: start;
+    display: inline-flex;
+    align-items: center;
+    gap: 4px;
+    min-height: 44px;
+    padding: 6px 8px 6px 4px;
+    border-color: transparent;
+    background: transparent;
+    color: var(--accent);
+    box-shadow: none;
   }
   .ocr-workbench .hint {
     display: block;

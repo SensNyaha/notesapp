@@ -502,7 +502,10 @@ export function Planner({
     if (!selectionInitialized.current) {
       selectionInitialized.current = true;
       const available = s.vaults.filter((v) => !v.deleted && !v.transfer),
-        initial = available.find((v) => v.header.id === s.lastVaultId);
+        openedAvailable = available.filter((v) => Boolean(v.key)),
+        initial =
+          openedAvailable.find((v) => v.header.id === s.lastVaultId) ??
+          openedAvailable[0];
       if (initial) {
         setSelected(initial.header.id);
         queueMicrotask(() => void activateVault(initial.header.id));
@@ -1147,6 +1150,21 @@ export function Planner({
               ? "Через 30 минут"
               : "Через 1 час";
   const opened = active.filter((v) => v.key && !v.transfer);
+  const selectedVaultOpen = Boolean(v?.key && !v.deleted && !v.transfer);
+  useEffect(() => {
+    if (
+      !state ||
+      selectedVaultOpen ||
+      !["list", "schedule", "archive", "trash"].includes(screen)
+    )
+      return;
+    showDraft(null);
+    showViewing(null);
+    setSelected("");
+    setSelectedTags([]);
+    setQuickFilter("all");
+    setScreen("choose-vault");
+  }, [state, screen, selectedVaultOpen]);
   function form(next: typeof screen, vid = "") {
     automaticCreateScreen.current = false;
     showViewing(null);
