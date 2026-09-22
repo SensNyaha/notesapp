@@ -159,6 +159,153 @@ function BlobImage({
       : "note-list-cover-image-frame",
   });
 }
+
+function formatNoteReminder(local: string) {
+  const match = /^(\d{4})-(\d{2})-(\d{2})T(\d{2}):(\d{2})/.exec(local);
+  return match
+    ? `${match[3]}.${match[2]}.${match[1].slice(2)} ${match[4]}:${match[5]}`
+    : local;
+}
+
+function NoteTagSummary({
+  tags,
+}: {
+  tags: TagDefinition[];
+}) {
+  const root = useRef<HTMLSpanElement>(null);
+  const measure = useRef<HTMLSpanElement>(null);
+  const [visibleCount, setVisibleCount] = useState(tags.length);
+  const [open, setOpen] = useState(false);
+
+  useEffect(() => {
+    const element = root.current,
+      measurements = measure.current;
+    if (!element || !measurements) return;
+    const calculate = () => {
+      const available = element.clientWidth,
+        chips = Array.from(
+          measurements.querySelectorAll<HTMLElement>(".tag-chip"),
+        ),
+        overflow = measurements.querySelector<HTMLElement>(
+          ".tag-overflow-count",
+        ),
+        gap = 4;
+      if (!available || chips.length !== tags.length || !overflow) return;
+      const widths = chips.map((chip) => chip.getBoundingClientRect().width);
+      let next = 0;
+      for (let count = tags.length; count >= 0; count--) {
+        const hidden = tags.length - count;
+        overflow.textContent = "+" + hidden;
+        const used = widths.slice(0, count).reduce((sum, width) => sum + width, 0) +
+          Math.max(0, count - 1) * gap +
+          (hidden ? overflow.getBoundingClientRect().width + (count ? gap : 0) : 0);
+        if (used <= available) {
+          next = count;
+          break;
+        }
+      }
+      setVisibleCount((current) => current === next ? current : next);
+    };
+    calculate();
+    const observer = new ResizeObserver(calculate);
+    observer.observe(element);
+    return () => observer.disconnect();
+  }, [tags]);
+
+  useEffect(() => {
+    if (!open) return;
+    const closeOutside = (event: PointerEvent) => {
+      if (!root.current?.contains(event.target as Node)) setOpen(false);
+    };
+    const closeOnScroll = () => setOpen(false);
+    document.addEventListener("pointerdown", closeOutside);
+    window.addEventListener("scroll", closeOnScroll, true);
+    return () => {
+      document.removeEventListener("pointerdown", closeOutside);
+      window.removeEventListener("scroll", closeOnScroll, true);
+    };
+  }, [open]);
+
+  if (!tags.length) return null;
+  const hidden = tags.length - visibleCount;
+  return e(
+    "span",
+    {
+      ref: root,
+      class: "note-tag-summary" + (open ? " open" : ""),
+      role: "button",
+      tabIndex: 0,
+      "aria-expanded": open,
+      "aria-label": "Показать все теги заметки",
+      onClick: (event: MouseEvent) => {
+        event.stopPropagation();
+        setOpen((value) => !value);
+      },
+      onKeyDown: (event: KeyboardEvent) => {
+        if (event.key !== "Enter" && event.key !== " ") return;
+        event.preventDefault();
+        event.stopPropagation();
+        setOpen((value) => !value);
+      },
+    },
+    e(
+      "span",
+      { class: "note-tag-visible" },
+      tags.slice(0, visibleCount).map((tag) =>
+        e(
+          "span",
+          {
+            class: "tag-chip",
+            style: { "--tag-color": tag.color },
+            key: tag.id,
+          },
+          tag.name,
+        ),
+      ),
+      hidden > 0 &&
+        e(
+          "span",
+          {
+            class: "tag-overflow-count",
+            "aria-label": "Ещё тегов: " + hidden,
+          },
+          "+" + hidden,
+        ),
+    ),
+    e(
+      "span",
+      { class: "note-tag-measure", ref: measure, "aria-hidden": "true" },
+      tags.map((tag) =>
+        e(
+          "span",
+          {
+            class: "tag-chip",
+            style: { "--tag-color": tag.color },
+            key: tag.id,
+          },
+          tag.name,
+        ),
+      ),
+      e("span", { class: "tag-overflow-count" }, "+" + tags.length),
+    ),
+    open &&
+      e(
+        "span",
+        { class: "note-tag-popover", role: "tooltip" },
+        tags.map((tag) =>
+          e(
+            "span",
+            {
+              class: "tag-chip",
+              style: { "--tag-color": tag.color },
+              key: tag.id,
+            },
+            tag.name,
+          ),
+        ),
+      ),
+  );
+}
 export function Planner({
   user,
   section = "notes",
@@ -298,6 +445,7 @@ export function Planner({
     [snoozeLocal, setSnoozeLocal] = useState("");
   const [todayMenuOpen, setTodayMenuOpen] = useState(false),
     [todayPickOpen, setTodayPickOpen] = useState(false),
+    [todayOptionsOpen, setTodayOptionsOpen] = useState(false),
     [showReminderHistory, setShowReminderHistory] = useState(false);
   const [query, setQuery] = useState(""),
     [selectedTags, setSelectedTags] = useState<string[]>([]);
@@ -352,8 +500,15 @@ export function Planner({
     id: string;
     offset: number;
   } | null>(null);
-  const reminderTouchX = useRef<number | null>(null);
-  const [reminderSwipeOffset, setReminderSwipeOffset] = useState(0);
+  const reminderTouchX = useRef<number | null>(null),
+    reminderSwipeWidth = useRef(0),
+    reminderSwipeOffset = useRef(0),
+    reminderSwipeStartOffset = useRef(0),
+    reminderSwipeMoved = useRef(false);
+  const [reminderSwipe, setReminderSwipe] = useState<{
+    offset: number;
+    dragging: boolean;
+  } | null>(null);
   const lifecycleTouchX = useRef<number | null>(null);
   const lifecycleSwipeWidth = useRef(0),
     lifecycleSwipeOffset = useRef(0),
@@ -383,6 +538,7 @@ export function Planner({
     setSelectedOccurrence("");
     setTodayMenuOpen(false);
     setTodayPickOpen(false);
+    setTodayOptionsOpen(false);
     showDraft(null);
     showViewing(null);
   }, [section, initialScreen]);
@@ -436,8 +592,12 @@ export function Planner({
         setLifecycleSwipe(null);
       if (checklistSwipe && checklistId !== checklistSwipe.id)
         setChecklistSwipe(null);
-      if (reminderSwipeOffset && !target?.closest(".reminder-swipe-shell"))
-        setReminderSwipeOffset(0);
+      if (
+        reminderSwipe &&
+        !reminderSwipe.dragging &&
+        !target?.closest(".reminder-swipe-shell")
+      )
+        setReminderSwipe(null);
     };
     document.addEventListener("pointerdown", closeSwipe);
     return () => document.removeEventListener("pointerdown", closeSwipe);
@@ -447,7 +607,8 @@ export function Planner({
     lifecycleSwipe?.id,
     lifecycleSwipe?.dragging,
     checklistSwipe?.id,
-    reminderSwipeOffset,
+    reminderSwipe?.offset,
+    reminderSwipe?.dragging,
   ]);
   function keepOnlyPopover(event: Event) {
     const current = event.currentTarget as HTMLDetailsElement;
@@ -3193,7 +3354,7 @@ export function Planner({
         title: draft.reminder
           ? "Редактирование напоминания"
           : "Новое напоминание",
-        description: "Одно расписание на заметку · часовой пояс " + zone,
+        description: "Часовой пояс · " + zone,
         back: () => setScreen("list"),
       }),
       e(
@@ -3271,12 +3432,16 @@ export function Planner({
           },
         },
         e(
-          "div",
-          { class: "reminder-fields reminder-wide" },
+          "section",
+          { class: "reminder-schedule-card reminder-wide" },
+          e("h2", null, "Расписание"),
+          e(
+            "div",
+            { class: "reminder-fields" },
           e(
             "label",
             null,
-            "Дата первого срабатывания",
+            "Дата",
             e("input", {
               type: "date",
               required: true,
@@ -3300,26 +3465,26 @@ export function Planner({
                 setReminderClock((ev.target as HTMLInputElement).value),
             }),
           ),
-        ),
-        e(
-          "label",
-          { class: "check-row reminder-all-day reminder-wide" },
-          e("input", {
-            type: "checkbox",
-            checked: reminderAllDay,
-            onChange: (ev: Event) =>
-              setReminderAllDay((ev.target as HTMLInputElement).checked),
-          }),
-          "Весь день · push в " + reminderSettings.all_day_time,
-        ),
-        e(
-          "fieldset",
-          { class: "reminder-repeat reminder-wide" },
-          e("legend", null, "Повтор"),
+          ),
           e(
             "label",
-            null,
-            "Расписание",
+            { class: "check-row reminder-all-day" },
+            e("input", {
+              type: "checkbox",
+              checked: reminderAllDay,
+              onChange: (ev: Event) =>
+                setReminderAllDay((ev.target as HTMLInputElement).checked),
+            }),
+            "Весь день · push в " + reminderSettings.all_day_time,
+          ),
+          e(
+            "fieldset",
+            { class: "reminder-repeat" },
+            e("legend", null, "Повтор"),
+            e(
+              "label",
+              null,
+              e("span", { class: "sr-only" }, "Расписание повторов"),
             e(
               "select",
               {
@@ -3356,7 +3521,7 @@ export function Planner({
               e("option", { value: "interval" }, "Каждые N дней"),
               e("option", { value: "monthly" }, "Каждый месяц"),
             ),
-          ),
+            ),
           reminderRepeat.type === "weekly" &&
             e(
               "div",
@@ -3511,52 +3676,58 @@ export function Planner({
                   }),
                 ),
             ),
+          ),
         ),
         e(
-          "label",
-          { class: "check-row important-control" },
-          e("input", {
-            type: "checkbox",
-            checked: reminderImportant,
-            onChange: (ev: Event) =>
-              setReminderImportant((ev.target as HTMLInputElement).checked),
-          }),
-          "Важное напоминание",
-        ),
-        e(
-          "label",
-          { class: "reminder-push-default" },
-          "Режим push для хранилища",
+          "section",
+          { class: "reminder-delivery reminder-wide" },
+          e("h2", null, "Доставка"),
           e(
-            "select",
-            {
-              value: pushDefaults[draft.vault] ?? "neutral",
-              disabled: busy,
-              onChange: async (ev: Event) => {
-                const mode = (ev.target as HTMLSelectElement)
-                  .value as VaultPushMode;
-                if (
-                  mode === "title" &&
-                  !(await appConfirm(
-                    "Заголовки будущих напоминаний будут передаваться серверу и push-службе без шифрования.",
-                    {
-                      title: "Использовать заголовок в уведомлениях?",
-                      confirmLabel: "Использовать",
-                    },
-                  ))
-                )
-                  return;
-                void run(async () => {
-                  await setVaultPushMode(user, draft.vault, mode);
-                  setPushDefaults((current) => ({
-                    ...current,
-                    [draft.vault]: mode,
-                  }));
-                });
+            "label",
+            { class: "check-row important-control" },
+            e("input", {
+              type: "checkbox",
+              checked: reminderImportant,
+              onChange: (ev: Event) =>
+                setReminderImportant((ev.target as HTMLInputElement).checked),
+            }),
+            e("span", null, "Важное напоминание"),
+          ),
+          e(
+            "label",
+            { class: "reminder-push-default" },
+            "Режим push для хранилища",
+            e(
+              "select",
+              {
+                value: pushDefaults[draft.vault] ?? "neutral",
+                disabled: busy,
+                onChange: async (ev: Event) => {
+                  const mode = (ev.target as HTMLSelectElement)
+                    .value as VaultPushMode;
+                  if (
+                    mode === "title" &&
+                    !(await appConfirm(
+                      "Заголовки будущих напоминаний будут передаваться серверу и push-службе без шифрования.",
+                      {
+                        title: "Использовать заголовок в уведомлениях?",
+                        confirmLabel: "Использовать",
+                      },
+                    ))
+                  )
+                    return;
+                  void run(async () => {
+                    await setVaultPushMode(user, draft.vault, mode);
+                    setPushDefaults((current) => ({
+                      ...current,
+                      [draft.vault]: mode,
+                    }));
+                  });
+                },
               },
-            },
-            e("option", { value: "neutral" }, "Нейтральный"),
-            e("option", { value: "title" }, "Заголовок заметки"),
+              e("option", { value: "neutral" }, "Нейтральный"),
+              e("option", { value: "title" }, "Заголовок заметки"),
+            ),
           ),
         ),
         e(
@@ -3564,48 +3735,41 @@ export function Planner({
           { class: "reminder-copy-options reminder-wide" },
           e("legend", null, "Текст уведомления"),
           e(
-            "label",
-            { class: "check-row" },
-            e("input", {
-              type: "radio",
-              name: "reminder-mode",
-              checked: reminderMode === "neutral",
-              onChange: () => setReminderMode("neutral"),
-            }),
-            "Нейтральный: «У вас запланировано напоминание»",
-          ),
-          e(
-            "label",
-            { class: "check-row" },
-            e("input", {
-              type: "radio",
-              name: "reminder-mode",
-              checked: reminderMode === "custom",
-              onChange: () => setReminderMode("custom"),
-            }),
-            "Свой текст",
-          ),
-          e(
-            "button",
-            {
-              type: "button",
-              class:
-                reminderMode === "title"
-                  ? "title-push-button selected"
-                  : "title-push-button",
-              "aria-pressed": reminderMode === "title",
-              onClick: () => {
-                setReminderMode("title");
-                setReminderText("");
-              },
-            },
-            "Взять заголовок как текст сообщения",
-          ),
-        ),
-        reminderMode === "custom" &&
-          e(
             "div",
-            null,
+            { class: "reminder-mode-options" },
+            (
+              [
+                ["neutral", "Нейтральный текст"],
+                ["custom", "Свой текст"],
+                ["title", "Заголовок заметки"],
+              ] as const
+            ).map(([value, label]) =>
+              e(
+                "label",
+                { class: "check-row", key: value },
+                e("input", {
+                  type: "radio",
+                  name: "reminder-mode",
+                  checked: reminderMode === value,
+                  onChange: () => {
+                    setReminderMode(value);
+                    if (value === "title") setReminderText("");
+                  },
+                }),
+                e("span", null, label),
+              ),
+            ),
+          ),
+          reminderMode === "neutral" &&
+            e(
+              "p",
+              { class: "reminder-neutral-copy" },
+              "В уведомлении будет: «У вас запланировано напоминание»",
+            ),
+          reminderMode === "custom" &&
+            e(
+              "div",
+              { class: "reminder-custom-text" },
             e(
               "label",
               null,
@@ -3621,37 +3785,42 @@ export function Planner({
             ),
             e("small", null, Array.from(reminderText).length + " / 200"),
           ),
-        reminderMode === "title" &&
-          e(
-            "div",
-            { class: "title-push-value" },
-            e("strong", null, "Текущий текст push"),
+          reminderMode === "title" &&
             e(
-              "p",
-              null,
-              Array.from(draft.title).slice(0, 200).join("") ||
-                "Сначала укажите заголовок заметки",
-            ),
-            Array.from(draft.title).length > 200 &&
+              "div",
+              { class: "title-push-value" },
+              e("strong", null, "Текущий текст push"),
               e(
-                "small",
+                "p",
                 null,
-                "В push попадут первые 200 символов. Текст будет обновляться вместе с заголовком.",
+                Array.from(draft.title).slice(0, 200).join("") ||
+                  "Сначала укажите заголовок заметки",
               ),
-          ),
-        reminderMode !== "neutral" &&
-          e(
-            "label",
-            { class: "check-row" },
-            e("input", {
-              type: "checkbox",
-              checked: reminderConsent,
-              required: true,
-              onChange: (ev: Event) =>
-                setReminderConsent((ev.target as HTMLInputElement).checked),
-            }),
-            "Разрешаю передать этот текст серверу и push-службе. Он не будет защищён ключом хранилища.",
-          ),
+              Array.from(draft.title).length > 200 &&
+                e(
+                  "small",
+                  null,
+                  "В push попадут первые 200 символов. Текст будет обновляться вместе с заголовком.",
+                ),
+            ),
+          reminderMode !== "neutral" &&
+            e(
+              "label",
+              { class: "check-row reminder-consent" },
+              e("input", {
+                type: "checkbox",
+                checked: reminderConsent,
+                required: true,
+                onChange: (ev: Event) =>
+                  setReminderConsent((ev.target as HTMLInputElement).checked),
+              }),
+              e(
+                "span",
+                null,
+                "Разрешаю передать этот текст серверу и push-службе. Он не будет защищён ключом хранилища.",
+              ),
+            ),
+        ),
         e(
           "details",
           { class: "reminder-preview-disclosure reminder-wide" },
@@ -4714,14 +4883,22 @@ export function Planner({
         draft.reminder &&
           e(
             "div",
-            { class: "reminder-swipe-shell", "data-swipe-id": "reminder" },
+            {
+              class:
+                "reminder-swipe-shell" +
+                (reminderSwipe?.dragging ? " dragging" : ""),
+              "data-swipe-id": "reminder",
+              style: {
+                "--swipe-reveal": (reminderSwipe?.offset ?? 0) + "px",
+              },
+            },
             e(
               "button",
               {
                 class: "reminder-swipe-delete",
                 "aria-label": "Удалить напоминание",
                 onClick: () => {
-                  setReminderSwipeOffset(0);
+                  setReminderSwipe(null);
                   changeReminder(undefined);
                 },
               },
@@ -4731,22 +4908,75 @@ export function Planner({
               "div",
               {
                 class: "reminder-swipe-content",
-                style: { transform: `translateX(-${reminderSwipeOffset}px)` },
+                style: {
+                  transform: `translateX(-${reminderSwipe?.offset ?? 0}px)`,
+                },
                 onTouchStart: (ev: TouchEvent) => {
+                  const element = ev.currentTarget as HTMLElement,
+                    existing = reminderSwipe?.offset ?? 0;
                   reminderTouchX.current = ev.touches[0]?.clientX ?? null;
-                  setReminderSwipeOffset(0);
+                  reminderSwipeWidth.current =
+                    element.getBoundingClientRect().width;
+                  reminderSwipeStartOffset.current = existing;
+                  reminderSwipeOffset.current = existing;
+                  reminderSwipeMoved.current = false;
+                  setReminderSwipe({ offset: existing, dragging: true });
                 },
                 onTouchMove: (ev: TouchEvent) => {
                   const start = reminderTouchX.current,
                     current = ev.touches[0]?.clientX;
-                  if (start !== null && current !== undefined)
-                    setReminderSwipeOffset(
-                      Math.max(0, Math.min(82, start - current)),
-                    );
+                  if (start !== null && current !== undefined) {
+                    const delta = start - current,
+                      activation = window.innerWidth * 0.05,
+                      distance = Math.abs(delta),
+                      drag =
+                        distance >= activation
+                          ? Math.sign(delta) * (distance - activation)
+                          : 0,
+                      offset = Math.max(
+                        0,
+                        Math.min(
+                          reminderSwipeWidth.current,
+                          reminderSwipeStartOffset.current + drag,
+                        ),
+                      );
+                    reminderSwipeOffset.current = offset;
+                    if (distance >= activation) reminderSwipeMoved.current = true;
+                    setReminderSwipe({ offset, dragging: true });
+                  }
                 },
                 onTouchEnd: () => {
-                  setReminderSwipeOffset((current) => (current > 46 ? 82 : 0));
+                  const offset = reminderSwipeOffset.current,
+                    width = reminderSwipeWidth.current;
                   reminderTouchX.current = null;
+                  if (offset >= Math.max(140, width * 0.55)) {
+                    setReminderSwipe({ offset: width, dragging: false });
+                    window.setTimeout(() => {
+                      changeReminder(undefined);
+                      setReminderSwipe(null);
+                    }, 180);
+                  } else if (offset > 46)
+                    setReminderSwipe({ offset: 82, dragging: false });
+                  else setReminderSwipe(null);
+                },
+                onTouchCancel: () => {
+                  reminderTouchX.current = null;
+                  reminderSwipeOffset.current =
+                    reminderSwipeStartOffset.current;
+                  setReminderSwipe(
+                    reminderSwipeStartOffset.current
+                      ? {
+                          offset: reminderSwipeStartOffset.current,
+                          dragging: false,
+                        }
+                      : null,
+                  );
+                },
+                onClickCapture: (event: MouseEvent) => {
+                  if (!reminderSwipeMoved.current) return;
+                  reminderSwipeMoved.current = false;
+                  event.preventDefault();
+                  event.stopPropagation();
                 },
               },
               e(
@@ -5650,14 +5880,41 @@ export function Planner({
         actions: e(
           "button",
           {
-            class: "primary today-add",
-            onClick: () => setTodayMenuOpen(!todayMenuOpen),
-            "aria-expanded": todayMenuOpen,
+            class: "icon-button today-filter-button",
+            onClick: () => setTodayOptionsOpen(!todayOptionsOpen),
+            "aria-expanded": todayOptionsOpen,
+            "aria-label": "Параметры",
+            title: "Параметры",
           },
-          e(UiIcon, { name: "plus", size: 17 }),
-          "Добавить",
+          e(UiIcon, { name: "filter-dropdown", size: 20 }),
+          Boolean(selectedTags.length || showReminderHistory) &&
+            e("span", { class: "mobile-control-dot", "aria-hidden": "true" }),
         ),
       }),
+      todayOptionsOpen &&
+        e(
+          "div",
+          { class: "today-options-panel" },
+          v?.key &&
+            e(TagPicker, {
+              tags: activeTags(v.header.id),
+              selectedIds: selectedTags,
+              onChange: setSelectedTags,
+              onManage: () => openTagManager("schedule"),
+              mode: "inline",
+            }),
+          e(
+            "label",
+            { class: "check-row history-toggle" },
+            e("input", {
+              type: "checkbox",
+              checked: showReminderHistory,
+              onChange: (ev: Event) =>
+                setShowReminderHistory((ev.target as HTMLInputElement).checked),
+            }),
+            "Показать выполненное и пропущенное",
+          ),
+        ),
       e(
         "div",
         { class: "today-counters" },
@@ -5709,6 +5966,17 @@ export function Planner({
           e("span", null, "Выполнено"),
         ),
       ),
+      e(
+        "button",
+        {
+          class: "primary note-fab today-fab",
+          onClick: () => setTodayMenuOpen(!todayMenuOpen),
+          "aria-expanded": todayMenuOpen,
+          "aria-label": "Добавить",
+          title: "Добавить",
+        },
+        e(UiIcon, { name: "plus", size: 24 }),
+      ),
       todayMenuOpen &&
         e(
           "div",
@@ -5741,41 +6009,6 @@ export function Planner({
             ),
           ),
         ),
-      e(
-        "details",
-        { class: "today-options" },
-        e(
-          "summary",
-          null,
-          e(UiIcon, { name: "more", size: 18 }),
-          "Параметры",
-          Boolean(selectedTags.length || showReminderHistory) &&
-            e("span", { class: "mobile-control-dot", "aria-hidden": "true" }),
-        ),
-        e(
-          "div",
-          { class: "today-options-panel" },
-          v?.key &&
-            e(TagPicker, {
-              tags: activeTags(v.header.id),
-              selectedIds: selectedTags,
-              onChange: setSelectedTags,
-              onManage: () => openTagManager("schedule"),
-              mode: "inline",
-            }),
-          e(
-            "label",
-            { class: "check-row history-toggle" },
-            e("input", {
-              type: "checkbox",
-              checked: showReminderHistory,
-              onChange: (ev: Event) =>
-                setShowReminderHistory((ev.target as HTMLInputElement).checked),
-            }),
-            "Показать выполненное и пропущенное",
-          ),
-        ),
-      ),
       !visible.length &&
         !taskItems.some(activeTask) &&
         e(
@@ -6790,7 +7023,6 @@ export function Planner({
                   [
                     ["all", "Все"],
                     ["pinned", "Закреплённые"],
-                    ["untagged", "Без тегов"],
                     ["reminder", "С напоминанием"],
                   ] as const
                 ).map(([value, label]) =>
@@ -6811,9 +7043,20 @@ export function Planner({
               e(TagPicker, {
                 tags: activeTags(v.header.id),
                 selectedIds: selectedTags,
-                onChange: setSelectedTags,
+                onChange: (ids) => {
+                  setSelectedTags(ids);
+                  if (ids.length && quickFilter === "untagged")
+                    setQuickFilter("all");
+                },
                 onManage: () => openTagManager("list"),
                 mode: "inline",
+                untagged: {
+                  selected: quickFilter === "untagged",
+                  onChange: (checked) => {
+                    setQuickFilter(checked ? "untagged" : "all");
+                    if (checked) setSelectedTags([]);
+                  },
+                },
               }),
             ),
         ),
@@ -7206,7 +7449,6 @@ export function Planner({
                 [
                   ["all", "Все"],
                   ["pinned", "Закреплённые"],
-                  ["untagged", "Без тегов"],
                   ["reminder", "С напоминанием"],
                 ] as const
               ).map(([value, label]) =>
@@ -7226,9 +7468,20 @@ export function Planner({
             e(TagPicker, {
               tags: activeTags(v.header.id),
               selectedIds: selectedTags,
-              onChange: setSelectedTags,
+              onChange: (ids) => {
+                setSelectedTags(ids);
+                if (ids.length && quickFilter === "untagged")
+                  setQuickFilter("all");
+              },
               onManage: () => openTagManager("list"),
               mode: "inline",
+              untagged: {
+                selected: quickFilter === "untagged",
+                onChange: (checked) => {
+                  setQuickFilter(checked ? "untagged" : "all");
+                  if (checked) setSelectedTags([]);
+                },
+              },
             }),
           ),
         ),
@@ -7682,33 +7935,17 @@ export function Planner({
               ),
             visibleItems.map(({ current, revision: r, note }) => {
               const allChips = tagChips(current.header.id, note!.tagIds),
-                chips = allChips.slice(0, 2),
-                hiddenTagCount = Math.max(0, allChips.length - chips.length),
                 attachments = note!.attachments ?? [],
                 coverItem = note!.cover
                   ? attachments.find(
                       (item) => item.id === note!.cover!.attachmentId,
                     )
                   : undefined,
-                metadata = [
-                  note!.checklist?.length
-                    ? note!.checklist.filter((item) => item.done).length +
-                      " / " +
-                      note!.checklist.length
-                    : null,
-                  note!.reminder
-                    ? new Date(note!.reminder.local + "Z").toLocaleString(
-                        "ru-RU",
-                        {
-                          timeZone: "UTC",
-                          day: "numeric",
-                          month: "short",
-                          hour: "2-digit",
-                          minute: "2-digit",
-                        },
-                      )
-                    : null,
-                ].filter(Boolean),
+                checklistProgress = note!.checklist?.length
+                  ? note!.checklist.filter((item) => item.done).length +
+                    " / " +
+                    note!.checklist.length
+                  : null,
                 swipeId = current.header.id + "." + r.id,
                 canSwipeDelete =
                   !current.transfer &&
@@ -7884,52 +8121,44 @@ export function Planner({
                       { class: "note-preview" },
                       note!.text.slice(0, 140),
                     ),
-                    (chips.length > 0 ||
+                    (allChips.length > 0 ||
                       attachments.length > 0 ||
-                      metadata.length > 0) &&
+                      checklistProgress ||
+                      note!.reminder) &&
                       e(
                         "span",
                         { class: "note-meta-line" },
-                        chips.map((tag) =>
-                          e(
-                            "span",
-                            {
-                              class: "tag-chip",
-                              style: { "--tag-color": tag.color },
-                              key: tag.id,
-                            },
-                            tag.name,
-                          ),
-                        ),
-                        hiddenTagCount > 0 &&
-                          e(
-                            "span",
-                            {
-                              class: "tag-overflow-count",
-                              "aria-label": "Ещё тегов: " + hiddenTagCount,
-                              title: "Ещё тегов: " + hiddenTagCount,
-                            },
-                            "+" + hiddenTagCount,
-                          ),
-                        attachments.length > 0 &&
-                          e(
-                            "span",
-                            {
-                              class: "note-attachment-count",
-                              "aria-label":
-                                "Прикреплено файлов: " + attachments.length,
-                              title:
-                                "Прикреплено файлов: " + attachments.length,
-                            },
-                            e(UiIcon, { name: "paperclip", size: 14 }),
-                            String(attachments.length),
-                          ),
-                        metadata.map((value, index) =>
-                          e(
-                            "span",
-                            { class: "note-meta", key: "meta-" + index },
-                            value,
-                          ),
+                        e(NoteTagSummary, { tags: allChips }),
+                        e(
+                          "span",
+                          { class: "note-meta-utilities" },
+                          checklistProgress &&
+                            e("span", { class: "note-meta" }, checklistProgress),
+                          note!.reminder &&
+                            e(
+                              "span",
+                              {
+                                class: "note-reminder-meta",
+                                "aria-label":
+                                  "Напоминание: " +
+                                  formatNoteReminder(note!.reminder.local),
+                              },
+                              e(UiIcon, { name: "bell", size: 14 }),
+                              formatNoteReminder(note!.reminder.local),
+                            ),
+                          attachments.length > 0 &&
+                            e(
+                              "span",
+                              {
+                                class: "note-attachment-count",
+                                "aria-label":
+                                  "Прикреплено файлов: " + attachments.length,
+                                title:
+                                  "Прикреплено файлов: " + attachments.length,
+                              },
+                              e(UiIcon, { name: "paperclip", size: 14 }),
+                              String(attachments.length),
+                            ),
                         ),
                       ),
                     heads(current).filter((x) => x.objectId === r.objectId)

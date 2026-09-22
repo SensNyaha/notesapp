@@ -86,7 +86,6 @@ function App() {
   const [user, setUser] = useState<User | null>(null);
   const userRef = useRef<User | null>(null); userRef.current = user;
   const [page, setPage] = useState<'home'|'today'|'projects'|'settings'|'account'|'appearance'|'password'|'users'|'ocr-test'|'devices'|'passkeys'|'diagnostics'|'notifications'|'data'|'collaboration'|'archive'|'trash'|'about'>('home');
-  const previousWorkspacePage = useRef<'home'|'today'|'projects'>('home');
   const pageHistory=useRef<Array<typeof page>>([]),gestureBackInProgress=useRef(false);
   const logoNavigationGuard = useRef<(() => Promise<boolean>) | null>(null);
   const [notesHomeVersion,setNotesHomeVersion]=useState(0);
@@ -446,15 +445,8 @@ function App() {
   },[page,user.id,workspaceAccess?.userId,workspaceAccess?.ready]);
   const shellActive:ShellSection=visiblePage==='home'?'notes':visiblePage==='today'?'today':visiblePage==='projects'?'projects':'settings';
   const navigateSection=(section:ShellSection)=>{
-    if(section==='settings'){
-      if(shellActive==='settings')void navigate(previousWorkspacePage.current);
-      else{
-        previousWorkspacePage.current=page as 'home'|'today'|'projects';
-        void navigate('settings');
-      }
-      return;
-    }
     const next=section==='notes'?'home':section==='today'?'today':section==='projects'?'projects':'settings';
+    if(next===page)return;
     void navigate(next);
   };
   const openSetting=(next:SettingsPage)=>void navigate(next);

@@ -10419,3 +10419,420 @@
   transform: translate(calc(var(--swipe-progress) * 22px), -50%)
     scale(calc(0.82 + var(--swipe-progress) * 0.18));
 }
+
+/* Compact tag filters and responsive metadata on note previews. */
+.unified-tag-picker > summary.unified-tag-trigger {
+  min-height: 40px;
+  padding: 7px 11px;
+  border-color: var(--border);
+  background: transparent;
+  color: var(--text-secondary);
+}
+.unified-tag-picker[open] > summary.unified-tag-trigger,
+.unified-tag-picker > summary.unified-tag-trigger.selected {
+  border-color: color-mix(in srgb, var(--accent) 30%, var(--border));
+  background: var(--accent-soft);
+  color: var(--accent);
+}
+.unified-untagged-option > span {
+  color: var(--text-primary);
+  font-size: 13px;
+  font-weight: 650;
+}
+.note-meta-line {
+  position: relative;
+  display: flex;
+  align-items: center;
+  gap: 7px;
+  min-width: 0;
+}
+.note-tag-summary {
+  position: relative;
+  flex: 1 1 auto;
+  min-width: 32px;
+  overflow: hidden;
+  cursor: pointer;
+}
+.note-tag-visible,
+.note-tag-measure {
+  display: flex;
+  align-items: center;
+  gap: 4px;
+  white-space: nowrap;
+}
+.note-tag-visible {
+  min-width: 0;
+  overflow: hidden;
+}
+.note-tag-visible > .tag-chip,
+.note-tag-measure > .tag-chip {
+  flex: 0 0 auto;
+  min-height: 22px;
+  padding: 2px 6px;
+  font-size: 12px;
+  line-height: 16px;
+}
+.note-tag-measure {
+  position: absolute;
+  visibility: hidden;
+  width: max-content;
+  pointer-events: none;
+}
+.note-tag-summary.open,
+.note-list-item:has(.note-tag-summary.open),
+.note-list-item:has(.note-tag-summary.open) .note-meta-line {
+  overflow: visible;
+}
+.note-tag-popover {
+  position: absolute;
+  z-index: 110;
+  right: 0;
+  bottom: calc(100% + 6px);
+  display: flex;
+  flex-wrap: wrap;
+  gap: 5px;
+  width: max-content;
+  max-width: min(300px, calc(100vw - 32px));
+  max-height: 150px;
+  padding: 8px;
+  overflow: auto;
+  border: 1px solid var(--border);
+  border-radius: 11px;
+  background: var(--surface-raised);
+  box-shadow: var(--shadow-float);
+  white-space: normal;
+}
+.note-tag-popover > .tag-chip {
+  min-height: 24px;
+  padding: 3px 7px;
+  font-size: 12px;
+}
+.note-meta-utilities {
+  display: inline-flex;
+  flex: 0 0 auto;
+  align-items: center;
+  gap: 8px;
+  margin-left: auto;
+  white-space: nowrap;
+}
+.note-reminder-meta,
+.note-attachment-count {
+  display: inline-flex;
+  align-items: center;
+  gap: 3px;
+  margin-left: 0;
+  color: var(--text-secondary);
+  font-variant-numeric: tabular-nums;
+  white-space: nowrap;
+}
+
+/* Today uses the same compact header and floating create action as Notes. */
+.today-filter-button {
+  position: relative;
+}
+.today-filter-button[aria-expanded="true"] {
+  background: var(--accent-soft);
+  color: var(--accent);
+}
+.today-options-panel {
+  margin: 0 0 12px;
+}
+.today-options-panel .history-toggle {
+  align-items: center;
+  line-height: 20px;
+}
+.today-options-panel .history-toggle input {
+  margin-top: 0;
+}
+.today-add-menu {
+  position: fixed;
+  z-index: 45;
+  right: 24px;
+  bottom: 88px;
+  width: min(320px, calc(100vw - 32px));
+  margin: 0;
+}
+
+@media (max-width: 760px) {
+  .mobile-filter-groups .unified-tag-picker > summary.unified-tag-trigger {
+    min-height: 44px;
+    padding: 9px 8px;
+    border: 0;
+    border-radius: 8px;
+    background: transparent;
+    font-size: 13px;
+  }
+  .mobile-filter-groups .unified-tag-picker[open] > summary.unified-tag-trigger,
+  .mobile-filter-groups .unified-tag-picker > summary.unified-tag-trigger.selected {
+    background: var(--accent-soft);
+    color: var(--accent);
+  }
+  .today-screen > .ui-page-header {
+    align-items: center;
+    margin: 0 0 8px;
+  }
+  .today-screen > .ui-page-header .eyebrow {
+    display: none;
+  }
+  .today-screen > .ui-page-header .ui-page-heading h1 {
+    font-size: 28px;
+    line-height: 34px;
+  }
+  .today-screen > .ui-page-header .ui-page-actions {
+    grid-column: 2;
+    grid-row: 1;
+  }
+  .today-options-panel {
+    padding: 8px 10px;
+    background: var(--surface-subtle);
+  }
+  .today-add-menu {
+    right: max(14px, env(safe-area-inset-right));
+    bottom: calc(var(--mobile-nav) + 68px + env(safe-area-inset-bottom));
+  }
+  .note-list-item .note-meta-line {
+    overflow: visible;
+  }
+  .note-meta-utilities {
+    gap: 6px;
+  }
+  .note-reminder-meta,
+  .note-attachment-count {
+    font-size: 11px;
+  }
+}
+
+/* Reminder editor follows the same flat cards and controls as the updated pages. */
+.reminder-form {
+  width: min(720px, 100%);
+  padding: 0;
+}
+.reminder-form > .ui-page-header {
+  margin-bottom: 14px;
+}
+.reminder-form > .ui-page-header .ui-page-description {
+  margin-top: 4px;
+  font-size: 13px;
+}
+.reminder-form > form {
+  display: grid;
+  grid-template-columns: minmax(0, 1fr);
+  gap: 12px;
+  padding: 0;
+  border: 0;
+  background: transparent;
+}
+.reminder-form .reminder-wide,
+.reminder-form .planner-feedback {
+  grid-column: 1;
+}
+.reminder-schedule-card,
+.reminder-delivery,
+.reminder-copy-options {
+  min-width: 0;
+  margin: 0;
+  padding: 14px;
+  border: 1px solid var(--border);
+  border-radius: 14px;
+  background: var(--surface);
+}
+.reminder-schedule-card > h2,
+.reminder-delivery > h2 {
+  margin: 0;
+  font-size: 15px;
+  line-height: 20px;
+}
+.reminder-schedule-card > .reminder-fields {
+  margin-top: 12px;
+}
+.reminder-fields {
+  grid-template-columns: repeat(2, minmax(0, 1fr));
+  gap: 10px;
+}
+.reminder-form label {
+  margin: 0;
+}
+.reminder-form select,
+.reminder-form input,
+.reminder-form textarea {
+  margin-top: 5px;
+}
+.reminder-form .reminder-all-day {
+  align-items: center;
+  margin-top: 12px;
+  padding: 0;
+  color: var(--text-secondary);
+}
+.reminder-form .reminder-all-day input,
+.reminder-form .important-control input,
+.reminder-form .reminder-mode-options input,
+.reminder-form .reminder-consent input {
+  margin-top: 0;
+}
+.reminder-form fieldset.reminder-repeat {
+  margin: 13px 0 0;
+  padding: 13px 0 0;
+  border: 0;
+  border-top: 1px solid var(--border);
+  border-radius: 0;
+}
+.reminder-form fieldset.reminder-repeat > legend {
+  padding: 0 8px 0 0;
+  color: var(--text-secondary);
+  font-size: 13px;
+}
+.reminder-delivery {
+  display: grid;
+  grid-template-columns: repeat(2, minmax(0, 1fr));
+  align-items: end;
+  gap: 12px;
+}
+.reminder-delivery > h2 {
+  grid-column: 1/-1;
+}
+.reminder-form .important-control {
+  align-items: center;
+  align-self: stretch;
+  min-height: 46px;
+  padding: 10px 12px;
+  border: 1px solid var(--border);
+  border-radius: var(--r-control);
+  background: var(--surface-subtle);
+  color: var(--text-primary);
+}
+.reminder-push-default {
+  min-width: 0;
+}
+.reminder-copy-options {
+  display: block;
+}
+.reminder-copy-options > legend {
+  padding: 0 6px;
+  font-size: 15px;
+  font-weight: 750;
+}
+.reminder-mode-options {
+  display: grid;
+  grid-template-columns: repeat(3, minmax(0, 1fr));
+  gap: 7px;
+}
+.reminder-mode-options > .check-row {
+  align-items: center;
+  min-width: 0;
+  min-height: 44px;
+  padding: 9px 10px;
+  border: 1px solid var(--border);
+  border-radius: 10px;
+  background: var(--surface-subtle);
+  font-size: 13px;
+  line-height: 18px;
+}
+.reminder-mode-options > .check-row:has(input:checked) {
+  border-color: color-mix(in srgb, var(--accent) 38%, var(--border));
+  background: var(--accent-soft);
+  color: var(--accent);
+}
+.reminder-neutral-copy {
+  margin: 10px 1px 0;
+  color: var(--text-secondary);
+  font-size: 13px;
+}
+.reminder-custom-text,
+.title-push-value {
+  margin-top: 12px;
+}
+.reminder-custom-text textarea {
+  min-height: 96px;
+}
+.reminder-custom-text > small {
+  display: block;
+  margin-top: 4px;
+  color: var(--text-tertiary);
+  text-align: right;
+}
+.reminder-form .reminder-consent {
+  align-items: flex-start;
+  margin-top: 10px;
+  padding: 10px 11px;
+  border-radius: 10px;
+  background: var(--surface-subtle);
+  color: var(--text-secondary);
+  font-size: 12px;
+  line-height: 17px;
+}
+.reminder-preview-disclosure {
+  border-top: 1px solid var(--border);
+  border-bottom: 1px solid var(--border);
+}
+.reminder-preview-disclosure > summary {
+  min-height: 44px;
+  padding-inline: 2px;
+}
+.reminder-submit {
+  min-height: 48px;
+}
+
+@media (max-width: 760px) {
+  .reminder-form > .ui-page-header {
+    margin-bottom: 12px;
+  }
+  .reminder-form > .ui-page-header .ui-page-heading h1 {
+    font-size: 24px;
+    line-height: 30px;
+  }
+  .reminder-form > form {
+    grid-template-columns: minmax(0, 1fr);
+    gap: 10px;
+    padding: 0;
+  }
+  .reminder-schedule-card,
+  .reminder-delivery,
+  .reminder-copy-options {
+    padding: 12px;
+    border-radius: 12px;
+  }
+  .reminder-delivery,
+  .reminder-mode-options {
+    grid-template-columns: minmax(0, 1fr);
+    gap: 8px;
+  }
+  .reminder-delivery > h2 {
+    grid-column: 1;
+  }
+  .reminder-form .important-control {
+    min-height: 44px;
+  }
+  .reminder-swipe-shell {
+    position: relative;
+    display: block;
+    overflow: hidden;
+  }
+  .reminder-swipe-delete {
+    position: absolute;
+    z-index: 1;
+    top: 0;
+    right: 0;
+    bottom: 0;
+    display: grid;
+    place-items: center;
+    width: max(0px, calc(var(--swipe-reveal, 0px) - 4px));
+    padding: 0;
+    border: 0;
+    border-radius: 0;
+    background: var(--danger);
+    color: #fff;
+    transition: width 0.22s cubic-bezier(0.22, 0.8, 0.3, 1);
+  }
+  .reminder-swipe-content {
+    position: relative;
+    z-index: 2;
+    width: 100%;
+    background: var(--bg);
+    touch-action: pan-y;
+    transition: transform 0.22s cubic-bezier(0.22, 0.8, 0.3, 1);
+  }
+  .reminder-swipe-shell.dragging > .reminder-swipe-content,
+  .reminder-swipe-shell.dragging > .reminder-swipe-delete {
+    transition: none;
+  }
+}
