@@ -1,4 +1,5 @@
 import { h as e } from "preact";
+import { createPortal } from "preact/compat";
 import { useEffect, useRef, useState } from "preact/hooks";
 import type { User } from "../types/auth";
 import { readState, changes, type State, type Revision } from "../storage";
@@ -80,6 +81,8 @@ import {
 import {
   Attachments,
   plainToHtml,
+  removeAttachmentReferences,
+  renameAttachmentReferences,
   RichTextEditor,
   sanitizeNoteHtml,
 } from "./RichTextEditor";
@@ -134,7 +137,8 @@ interface OpenedNote extends Note {
 interface HistoryState {
   vault: string;
   objectId: string;
-  back: "list" | "archive" | "trash";
+  back: "view" | "list" | "archive" | "trash";
+  viewing?: OpenedNote;
   selected: string;
   entries: { revision: Revision; note: Note }[];
 }
@@ -143,20 +147,24 @@ function BlobImage({
   alt,
   className,
   cacheKey,
+  onLoad,
 }: {
   load: () => Promise<Blob | null>;
   alt: string;
   className: string;
   cacheKey: string;
+  onLoad?: (event: Event) => void;
 }) {
   return e(LoadingImage, {
     load,
     cacheKey,
     alt,
     className,
-    frameClassName: className === "note-cover"
-      ? "note-cover-image-frame"
-      : "note-list-cover-image-frame",
+    onLoad,
+    frameClassName:
+      className === "note-cover"
+        ? "note-cover-image-frame"
+        : "note-list-cover-image-frame",
   });
 }
 
@@ -167,15 +175,23 @@ function formatNoteReminder(local: string) {
     : local;
 }
 
-function NoteTagSummary({
-  tags,
-}: {
-  tags: TagDefinition[];
-}) {
+function NoteTagSummary({ tags }: { tags: TagDefinition[] }) {
   const root = useRef<HTMLSpanElement>(null);
   const measure = useRef<HTMLSpanElement>(null);
+  const popover = useRef<HTMLSpanElement>(null);
+  const tagTouchX = useRef<number | null>(null);
+  const tagTouchMoved = useRef(false);
   const [visibleCount, setVisibleCount] = useState(tags.length);
   const [open, setOpen] = useState(false);
+  const [popoverPosition, setPopoverPosition] = useState<{
+    left: string;
+    top?: string;
+    bottom?: string;
+    maxHeight: string;
+  } | null>(null);
+  const tagSignature = tags
+    .map((tag) => `${tag.id}\u0000${tag.name}\u0000${tag.color}`)
+    .join("\u0001");
 
   useEffect(() => {
     const element = root.current,
@@ -196,26 +212,34 @@ function NoteTagSummary({
       for (let count = tags.length; count >= 0; count--) {
         const hidden = tags.length - count;
         overflow.textContent = "+" + hidden;
-        const used = widths.slice(0, count).reduce((sum, width) => sum + width, 0) +
+        const used =
+          widths.slice(0, count).reduce((sum, width) => sum + width, 0) +
           Math.max(0, count - 1) * gap +
-          (hidden ? overflow.getBoundingClientRect().width + (count ? gap : 0) : 0);
+          (hidden
+            ? overflow.getBoundingClientRect().width + (count ? gap : 0)
+            : 0);
         if (used <= available) {
           next = count;
           break;
         }
       }
-      setVisibleCount((current) => current === next ? current : next);
+      setVisibleCount((current) => (current === next ? current : next));
     };
     calculate();
     const observer = new ResizeObserver(calculate);
     observer.observe(element);
     return () => observer.disconnect();
-  }, [tags]);
+  }, [tagSignature]);
 
   useEffect(() => {
     if (!open) return;
     const closeOutside = (event: PointerEvent) => {
-      if (!root.current?.contains(event.target as Node)) setOpen(false);
+      const target = event.target as Node;
+      if (
+        !root.current?.contains(target) &&
+        !popover.current?.contains(target)
+      )
+        setOpen(false);
     };
     const closeOnScroll = () => setOpen(false);
     document.addEventListener("pointerdown", closeOutside);
@@ -225,6 +249,35 @@ function NoteTagSummary({
       window.removeEventListener("scroll", closeOnScroll, true);
     };
   }, [open]);
+
+  const togglePopover = () => {
+    if (open) {
+      setOpen(false);
+      return;
+    }
+    const anchor = root.current;
+    if (!anchor) return;
+    const margin = 12,
+      gap = 7,
+      rect = anchor.getBoundingClientRect(),
+      maximumWidth = Math.min(300, window.innerWidth - margin * 2),
+      left = Math.max(
+        margin,
+        Math.min(rect.left, window.innerWidth - maximumWidth - margin),
+      ),
+      aboveSpace = rect.top - gap - margin,
+      belowSpace = window.innerHeight - rect.bottom - gap - margin,
+      above = aboveSpace > belowSpace,
+      availableHeight = Math.max(0, above ? aboveSpace : belowSpace);
+    setPopoverPosition({
+      left: left + "px",
+      ...(above
+        ? { bottom: window.innerHeight - rect.top + gap + "px" }
+        : { top: rect.bottom + gap + "px" }),
+      maxHeight: Math.min(150, availableHeight) + "px",
+    });
+    setOpen(true);
+  };
 
   if (!tags.length) return null;
   const hidden = tags.length - visibleCount;
@@ -238,14 +291,33 @@ function NoteTagSummary({
       "aria-expanded": open,
       "aria-label": "Показать все теги заметки",
       onClick: (event: MouseEvent) => {
+        if (tagTouchMoved.current) {
+          tagTouchMoved.current = false;
+          event.preventDefault();
+          return;
+        }
         event.stopPropagation();
-        setOpen((value) => !value);
+        togglePopover();
+      },
+      onTouchStart: (event: TouchEvent) => {
+        tagTouchX.current = event.touches[0]?.clientX ?? null;
+        tagTouchMoved.current = false;
+      },
+      onTouchMove: (event: TouchEvent) => {
+        const start = tagTouchX.current,
+          current = event.touches[0]?.clientX;
+        if (
+          start !== null &&
+          current !== undefined &&
+          Math.abs(current - start) >= window.innerWidth * 0.05
+        )
+          tagTouchMoved.current = true;
       },
       onKeyDown: (event: KeyboardEvent) => {
         if (event.key !== "Enter" && event.key !== " ") return;
         event.preventDefault();
         event.stopPropagation();
-        setOpen((value) => !value);
+        togglePopover();
       },
     },
     e(
@@ -289,20 +361,33 @@ function NoteTagSummary({
       e("span", { class: "tag-overflow-count" }, "+" + tags.length),
     ),
     open &&
-      e(
-        "span",
-        { class: "note-tag-popover", role: "tooltip" },
-        tags.map((tag) =>
-          e(
-            "span",
-            {
-              class: "tag-chip",
-              style: { "--tag-color": tag.color },
-              key: tag.id,
+      popoverPosition &&
+      createPortal(
+        e(
+          "span",
+          {
+            class: "note-tag-popover",
+            role: "tooltip",
+            ref: popover,
+            style: popoverPosition,
+            onClick: (event: MouseEvent) => {
+              event.stopPropagation();
+              setOpen(false);
             },
-            tag.name,
+          },
+          tags.map((tag) =>
+            e(
+              "span",
+              {
+                class: "tag-chip",
+                style: { "--tag-color": tag.color },
+                key: tag.id,
+              },
+              tag.name,
+            ),
           ),
         ),
+        document.body,
       ),
   );
 }
@@ -324,9 +409,7 @@ export function Planner({
   onReminderHandled: () => void;
   onOpenProjects?: () => void;
   onVaultContextChange?: (context: ShellVaultContext | null) => void;
-  onNavigationGuardChange?: (
-    guard: (() => Promise<boolean>) | null,
-  ) => void;
+  onNavigationGuardChange?: (guard: (() => Promise<boolean>) | null) => void;
   onSyncState: (
     state: "syncing" | "online" | "offline" | "auth" | "error" | "idle",
   ) => void;
@@ -412,6 +495,10 @@ export function Planner({
     "list",
   );
   const [viewing, setViewing] = useState<OpenedNote | null>(null);
+  const [viewingCoverLayout, setViewingCoverLayout] = useState<{
+    id: string;
+    portrait: boolean;
+  } | null>(null);
   const viewingRef = useRef<OpenedNote | null>(null);
   const zone = Intl.DateTimeFormat().resolvedOptions().timeZone || "UTC";
   const localDateAfter = (days: number) =>
@@ -543,7 +630,6 @@ export function Planner({
     showViewing(null);
   }, [section, initialScreen]);
   useEffect(() => {
-    if (section !== "today") return;
     let active = true;
     void reminderRequest(user, "")
       .then((value) => {
@@ -558,9 +644,7 @@ export function Planner({
     };
   }, [section, user.id]);
   useEffect(() => {
-    const close = (event: PointerEvent) => {
-      const target = event.target as Element | null;
-      if (target?.closest("details.app-popover")) return;
+    const closeAll = () => {
       setDesktopMenu(null);
       document
         .querySelectorAll<HTMLDetailsElement>("details.app-popover[open]")
@@ -568,9 +652,36 @@ export function Planner({
           item.open = false;
         });
     };
+    const close = (event: PointerEvent) => {
+      const target = event.target as Element | null;
+      if (target?.closest("details.app-popover")) return;
+      closeAll();
+    };
+    const closeAfterAction = (event: MouseEvent) => {
+      const target = event.target as Element | null,
+        action = target?.closest("button, a[href]");
+      if (!action || action.closest("summary")) return;
+      const popover = action.closest<HTMLDetailsElement>(
+        "details.app-popover",
+      );
+      if (popover) closeAll();
+    };
     document.addEventListener("pointerdown", close);
-    return () => document.removeEventListener("pointerdown", close);
+    document.addEventListener("click", closeAfterAction);
+    return () => {
+      document.removeEventListener("pointerdown", close);
+      document.removeEventListener("click", closeAfterAction);
+    };
   }, []);
+  useEffect(() => {
+    setDesktopMenu(null);
+    setMenuOpen(false);
+    document
+      .querySelectorAll<HTMLDetailsElement>("details.app-popover[open]")
+      .forEach((item) => {
+        item.open = false;
+      });
+  }, [screen]);
   useEffect(() => {
     const closeSwipe = (event: PointerEvent) => {
       const target = event.target as Element | null;
@@ -1495,12 +1606,23 @@ export function Planner({
       revision: revision.id,
       key: current.key,
     });
-    if (value.reminder)
+    if (value.reminder) {
+      setServerReminders((items) =>
+        items.map((item) =>
+          item.vault_id === current.header.id &&
+          item.object_id === revision.objectId &&
+          item.config_id === value.reminder!.id &&
+          item.occurrence_status === "fired"
+            ? { ...item, occurrence_status: "seen" as const }
+            : item,
+        ),
+      );
       void acknowledgeReminder(user, {
         vaultId: current.header.id,
         objectId: revision.objectId,
         configId: value.reminder.id,
       });
+    }
   }
   function editRevision(
     current: NonNullable<State["vaults"][number]>,
@@ -1677,8 +1799,9 @@ export function Planner({
   async function openHistory(
     current: NonNullable<State["vaults"][number]>,
     objectId: string,
-    back: "list" | "archive" | "trash",
+    back: "view" | "list" | "archive" | "trash",
   ) {
+    const returnViewing = back === "view" ? viewingRef.current : null;
     const entries = (await noteHistory(user.id, current, objectId)).sort(
       (a, b) => (b.note.author?.time ?? 0) - (a.note.author?.time ?? 0),
     );
@@ -1692,6 +1815,7 @@ export function Planner({
       vault: current.header.id,
       objectId,
       back,
+      ...(returnViewing ? { viewing: returnViewing } : {}),
       selected: currentRevision,
       entries,
     });
@@ -1765,6 +1889,25 @@ export function Planner({
     }
     await run(() => trashCurrent(current, objectId));
     setNoteSwipe(null);
+  }
+  async function toggleMainNotePinned(
+    current: NonNullable<State["vaults"][number]>,
+    revision: Revision,
+    note: Note,
+  ) {
+    if (!current.key) return;
+    await saveNote(
+      user,
+      current.header.id,
+      revision.objectId,
+      revision.id,
+      { ...note, pinned: !note.pinned },
+      current.key,
+    );
+    setNoteSwipe(null);
+    setStatus(note.pinned ? "Заметка откреплена." : "Заметка закреплена.");
+    await load();
+    void sync();
   }
   async function restoreTrash(
     current: NonNullable<State["vaults"][number]>,
@@ -1890,8 +2033,15 @@ export function Planner({
       return;
     const next = (current.attachments ?? []).filter((x) => x.id !== item.id),
       cover =
-        current.cover?.attachmentId === item.id ? undefined : current.cover;
-    showDraft({ ...current, attachments: next, cover, dirty: true });
+        current.cover?.attachmentId === item.id ? undefined : current.cover,
+      content = removeAttachmentReferences(current.html, current.text, item.id);
+    showDraft({
+      ...current,
+      ...content,
+      attachments: next,
+      cover,
+      dirty: true,
+    });
     await flush();
     setStatus("Вложение удалено из текущей версии. История заметки сохранена.");
   }
@@ -1904,8 +2054,15 @@ export function Planner({
       setError("Имя файла должно быть не длиннее 200 символов.");
       return;
     }
+    const content = renameAttachmentReferences(
+      current.html,
+      current.text,
+      item.id,
+      name,
+    );
     showDraft({
       ...current,
+      ...content,
       attachments: (current.attachments ?? []).map((x) =>
         x.id === item.id ? { ...x, name } : x,
       ),
@@ -1942,7 +2099,13 @@ export function Planner({
       },
       current.key,
     );
+    const content = removeAttachmentReferences(
+      source.html,
+      source.text,
+      item.id,
+    );
     await updateViewing({
+      ...content,
       attachments: (source.attachments ?? []).filter((x) => x.id !== item.id),
       ...(source.cover?.attachmentId === item.id ? { cover: undefined } : {}),
     });
@@ -3438,33 +3601,33 @@ export function Planner({
           e(
             "div",
             { class: "reminder-fields" },
-          e(
-            "label",
-            null,
-            "Дата",
-            e("input", {
-              type: "date",
-              required: true,
-              value: reminderDate,
-              onInput: (ev: Event) =>
-                setReminderDate((ev.target as HTMLInputElement).value),
-            }),
-          ),
-          e(
-            "label",
-            null,
-            "Время",
-            e("input", {
-              type: "time",
-              required: !reminderAllDay,
-              disabled: reminderAllDay,
-              value: reminderAllDay
-                ? reminderSettings.all_day_time
-                : reminderClock,
-              onInput: (ev: Event) =>
-                setReminderClock((ev.target as HTMLInputElement).value),
-            }),
-          ),
+            e(
+              "label",
+              null,
+              "Дата",
+              e("input", {
+                type: "date",
+                required: true,
+                value: reminderDate,
+                onInput: (ev: Event) =>
+                  setReminderDate((ev.target as HTMLInputElement).value),
+              }),
+            ),
+            e(
+              "label",
+              null,
+              "Время",
+              e("input", {
+                type: "time",
+                required: !reminderAllDay,
+                disabled: reminderAllDay,
+                value: reminderAllDay
+                  ? reminderSettings.all_day_time
+                  : reminderClock,
+                onInput: (ev: Event) =>
+                  setReminderClock((ev.target as HTMLInputElement).value),
+              }),
+            ),
           ),
           e(
             "label",
@@ -3485,197 +3648,197 @@ export function Planner({
               "label",
               null,
               e("span", { class: "sr-only" }, "Расписание повторов"),
-            e(
-              "select",
-              {
-                value: reminderRepeat.type,
-                onChange: (ev: Event) => {
-                  const type = (ev.target as HTMLSelectElement).value;
-                  setReminderRepeat(
-                    type === "daily"
-                      ? { type: "daily" }
-                      : type === "weekly"
-                        ? {
-                            type: "weekly",
-                            days: [
-                              new Date(
-                                (reminderDate || "2026-01-05") + "T00:00:00Z",
-                              ).getUTCDay() || 7,
-                            ],
-                          }
-                        : type === "interval"
-                          ? { type: "interval", days: 2 }
-                          : type === "monthly"
-                            ? {
-                                type: "monthly",
-                                day: Number(reminderDate.slice(8, 10)) || 1,
-                                shortMonth: "last",
-                              }
-                            : { type: "once" },
-                  );
+              e(
+                "select",
+                {
+                  value: reminderRepeat.type,
+                  onChange: (ev: Event) => {
+                    const type = (ev.target as HTMLSelectElement).value;
+                    setReminderRepeat(
+                      type === "daily"
+                        ? { type: "daily" }
+                        : type === "weekly"
+                          ? {
+                              type: "weekly",
+                              days: [
+                                new Date(
+                                  (reminderDate || "2026-01-05") + "T00:00:00Z",
+                                ).getUTCDay() || 7,
+                              ],
+                            }
+                          : type === "interval"
+                            ? { type: "interval", days: 2 }
+                            : type === "monthly"
+                              ? {
+                                  type: "monthly",
+                                  day: Number(reminderDate.slice(8, 10)) || 1,
+                                  shortMonth: "last",
+                                }
+                              : { type: "once" },
+                    );
+                  },
                 },
-              },
-              e("option", { value: "once" }, "Один раз"),
-              e("option", { value: "daily" }, "Каждый день"),
-              e("option", { value: "weekly" }, "По дням недели"),
-              e("option", { value: "interval" }, "Каждые N дней"),
-              e("option", { value: "monthly" }, "Каждый месяц"),
-            ),
-            ),
-          reminderRepeat.type === "weekly" &&
-            e(
-              "div",
-              { class: "weekday-picker" },
-              ["Пн", "Вт", "Ср", "Чт", "Пт", "Сб", "Вс"].map((label, index) =>
-                e(
-                  "label",
-                  { class: "check-row", key: label },
-                  e("input", {
-                    type: "checkbox",
-                    checked: reminderRepeat.days.includes(index + 1),
-                    onChange: (ev: Event) => {
-                      const checked = (ev.target as HTMLInputElement).checked,
-                        days = checked
-                          ? [...reminderRepeat.days, index + 1]
-                          : reminderRepeat.days.filter(
-                              (day) => day !== index + 1,
-                            );
-                      if (days.length)
-                        setReminderRepeat({
-                          type: "weekly",
-                          days: days.sort(),
-                        });
-                    },
-                  }),
-                  label,
-                ),
+                e("option", { value: "once" }, "Один раз"),
+                e("option", { value: "daily" }, "Каждый день"),
+                e("option", { value: "weekly" }, "По дням недели"),
+                e("option", { value: "interval" }, "Каждые N дней"),
+                e("option", { value: "monthly" }, "Каждый месяц"),
               ),
             ),
-          reminderRepeat.type === "interval" &&
-            e(
-              "label",
-              null,
-              "Интервал, дней",
-              e("input", {
-                type: "number",
-                min: 2,
-                max: 365,
-                value: reminderRepeat.days,
-                onInput: (ev: Event) =>
-                  setReminderRepeat({
-                    type: "interval",
-                    days: Number((ev.target as HTMLInputElement).value),
-                  }),
-              }),
-            ),
-          reminderRepeat.type === "monthly" &&
-            e(
-              "div",
-              null,
+            reminderRepeat.type === "weekly" &&
               e(
-                "label",
-                null,
-                "День месяца",
-                e("input", {
-                  type: "number",
-                  min: 1,
-                  max: 31,
-                  value: reminderRepeat.day,
-                  onInput: (ev: Event) =>
-                    setReminderRepeat({
-                      ...reminderRepeat,
-                      day: Number((ev.target as HTMLInputElement).value),
-                    }),
-                }),
-              ),
-              e(
-                "label",
-                null,
-                "Если такого дня нет",
-                e(
-                  "select",
-                  {
-                    value: reminderRepeat.shortMonth,
-                    onChange: (ev: Event) =>
-                      setReminderRepeat({
-                        ...reminderRepeat,
-                        shortMonth: (ev.target as HTMLSelectElement).value as
-                          | "last"
-                          | "skip",
-                      }),
-                  },
-                  e("option", { value: "last" }, "В последний день месяца"),
-                  e("option", { value: "skip" }, "Пропустить месяц"),
-                ),
-              ),
-            ),
-          reminderRepeat.type !== "once" &&
-            e(
-              "div",
-              null,
-              e(
-                "label",
-                null,
-                "Окончание",
-                e(
-                  "select",
-                  {
-                    value: reminderEnd.type,
-                    onChange: (ev: Event) => {
-                      const type = (ev.target as HTMLSelectElement).value;
-                      setReminderEnd(
-                        type === "date"
-                          ? { type: "date", date: reminderDate }
-                          : type === "count"
-                            ? { type: "count", count: 10 }
-                            : { type: "never" },
-                      );
-                    },
-                  },
-                  e("option", { value: "never" }, "Без окончания"),
-                  e("option", { value: "date" }, "По дату включительно"),
+                "div",
+                { class: "weekday-picker" },
+                ["Пн", "Вт", "Ср", "Чт", "Пт", "Сб", "Вс"].map((label, index) =>
                   e(
-                    "option",
-                    { value: "count" },
-                    "После количества срабатываний",
+                    "label",
+                    { class: "check-row", key: label },
+                    e("input", {
+                      type: "checkbox",
+                      checked: reminderRepeat.days.includes(index + 1),
+                      onChange: (ev: Event) => {
+                        const checked = (ev.target as HTMLInputElement).checked,
+                          days = checked
+                            ? [...reminderRepeat.days, index + 1]
+                            : reminderRepeat.days.filter(
+                                (day) => day !== index + 1,
+                              );
+                        if (days.length)
+                          setReminderRepeat({
+                            type: "weekly",
+                            days: days.sort(),
+                          });
+                      },
+                    }),
+                    label,
                   ),
                 ),
               ),
-              reminderEnd.type === "date" &&
+            reminderRepeat.type === "interval" &&
+              e(
+                "label",
+                null,
+                "Интервал, дней",
+                e("input", {
+                  type: "number",
+                  min: 2,
+                  max: 365,
+                  value: reminderRepeat.days,
+                  onInput: (ev: Event) =>
+                    setReminderRepeat({
+                      type: "interval",
+                      days: Number((ev.target as HTMLInputElement).value),
+                    }),
+                }),
+              ),
+            reminderRepeat.type === "monthly" &&
+              e(
+                "div",
+                null,
                 e(
                   "label",
                   null,
-                  "Последняя дата",
-                  e("input", {
-                    type: "date",
-                    required: true,
-                    value: reminderEnd.date,
-                    onInput: (ev: Event) =>
-                      setReminderEnd({
-                        type: "date",
-                        date: (ev.target as HTMLInputElement).value,
-                      }),
-                  }),
-                ),
-              reminderEnd.type === "count" &&
-                e(
-                  "label",
-                  null,
-                  "Количество, включая первое",
+                  "День месяца",
                   e("input", {
                     type: "number",
                     min: 1,
-                    max: 10000,
-                    required: true,
-                    value: reminderEnd.count,
+                    max: 31,
+                    value: reminderRepeat.day,
                     onInput: (ev: Event) =>
-                      setReminderEnd({
-                        type: "count",
-                        count: Number((ev.target as HTMLInputElement).value),
+                      setReminderRepeat({
+                        ...reminderRepeat,
+                        day: Number((ev.target as HTMLInputElement).value),
                       }),
                   }),
                 ),
-            ),
+                e(
+                  "label",
+                  null,
+                  "Если такого дня нет",
+                  e(
+                    "select",
+                    {
+                      value: reminderRepeat.shortMonth,
+                      onChange: (ev: Event) =>
+                        setReminderRepeat({
+                          ...reminderRepeat,
+                          shortMonth: (ev.target as HTMLSelectElement).value as
+                            | "last"
+                            | "skip",
+                        }),
+                    },
+                    e("option", { value: "last" }, "В последний день месяца"),
+                    e("option", { value: "skip" }, "Пропустить месяц"),
+                  ),
+                ),
+              ),
+            reminderRepeat.type !== "once" &&
+              e(
+                "div",
+                null,
+                e(
+                  "label",
+                  null,
+                  "Окончание",
+                  e(
+                    "select",
+                    {
+                      value: reminderEnd.type,
+                      onChange: (ev: Event) => {
+                        const type = (ev.target as HTMLSelectElement).value;
+                        setReminderEnd(
+                          type === "date"
+                            ? { type: "date", date: reminderDate }
+                            : type === "count"
+                              ? { type: "count", count: 10 }
+                              : { type: "never" },
+                        );
+                      },
+                    },
+                    e("option", { value: "never" }, "Без окончания"),
+                    e("option", { value: "date" }, "По дату включительно"),
+                    e(
+                      "option",
+                      { value: "count" },
+                      "После количества срабатываний",
+                    ),
+                  ),
+                ),
+                reminderEnd.type === "date" &&
+                  e(
+                    "label",
+                    null,
+                    "Последняя дата",
+                    e("input", {
+                      type: "date",
+                      required: true,
+                      value: reminderEnd.date,
+                      onInput: (ev: Event) =>
+                        setReminderEnd({
+                          type: "date",
+                          date: (ev.target as HTMLInputElement).value,
+                        }),
+                    }),
+                  ),
+                reminderEnd.type === "count" &&
+                  e(
+                    "label",
+                    null,
+                    "Количество, включая первое",
+                    e("input", {
+                      type: "number",
+                      min: 1,
+                      max: 10000,
+                      required: true,
+                      value: reminderEnd.count,
+                      onInput: (ev: Event) =>
+                        setReminderEnd({
+                          type: "count",
+                          count: Number((ev.target as HTMLInputElement).value),
+                        }),
+                    }),
+                  ),
+              ),
           ),
         ),
         e(
@@ -3770,21 +3933,21 @@ export function Planner({
             e(
               "div",
               { class: "reminder-custom-text" },
-            e(
-              "label",
-              null,
-              "Текст push",
-              e("textarea", {
-                rows: 3,
-                maxLength: 200,
-                required: true,
-                value: reminderText,
-                onInput: (ev: Event) =>
-                  setReminderText((ev.target as HTMLTextAreaElement).value),
-              }),
+              e(
+                "label",
+                null,
+                "Текст push",
+                e("textarea", {
+                  rows: 3,
+                  maxLength: 200,
+                  required: true,
+                  value: reminderText,
+                  onInput: (ev: Event) =>
+                    setReminderText((ev.target as HTMLTextAreaElement).value),
+                }),
+              ),
+              e("small", null, Array.from(reminderText).length + " / 200"),
             ),
-            e("small", null, Array.from(reminderText).length + " / 200"),
-          ),
           reminderMode === "title" &&
             e(
               "div",
@@ -3921,8 +4084,13 @@ export function Planner({
         description:
           "Все версии расшифровываются только на этом устройстве. Восстановление создаёт новую версию, не удаляя текущую.",
         back: () => {
+          const returnViewing = history.viewing;
           setHistory(null);
-          setScreen(history.back);
+          if (history.back === "view" && returnViewing) {
+            showViewing(returnViewing);
+            setScreen("list");
+          } else if (history.back !== "view") setScreen(history.back);
+          else setScreen("list");
         },
       }),
       e(
@@ -3996,7 +4164,7 @@ export function Planner({
                   );
                   const back = history.back;
                   setHistory(null);
-                  setScreen(back);
+                  setScreen(back === "view" ? "list" : back);
                   setStatus("Выбранная версия восстановлена как новая.");
                   void sync();
                 });
@@ -4022,6 +4190,16 @@ export function Planner({
         current?.membershipRevoked ||
         current?.role === "viewer" ||
         entityKind(viewing) !== "note",
+      ),
+      coverItem = viewing.cover
+        ? (viewing.attachments ?? []).find(
+            (item) => item.id === viewing.cover!.attachmentId,
+          )
+        : undefined,
+      portraitCover = Boolean(
+        coverItem &&
+          viewingCoverLayout?.id === coverItem.id &&
+          viewingCoverLayout.portrait,
       );
     return e(
       "section",
@@ -4145,11 +4323,7 @@ export function Planner({
                           openHistory(
                             current,
                             viewing.object,
-                            lifecycle === "archived"
-                              ? "archive"
-                              : lifecycle === "trashed"
-                                ? "trash"
-                                : "list",
+                            "view",
                           ),
                         ),
                     },
@@ -4300,46 +4474,69 @@ export function Planner({
               ? "Доступ отозван. Это только ранее загруженная локальная копия; изменения не отправляются на сервер."
               : "Роль «Просмотр»: содержимое заметки нельзя изменять. Комментарии разрешены отдельно.",
         ),
-      viewing.cover &&
-        (() => {
-          const item = (viewing.attachments ?? []).find(
-            (x) => x.id === viewing.cover!.attachmentId,
-          );
-          return item
-            ? e(BlobImage, {
-                key: item.id,
-                cacheKey: item.id,
-                alt: item.name,
-                className: "note-cover",
-                load: () => attachmentPreviewBlob(user, viewing.vault, item),
-              })
-            : null;
-        })(),
-      e("h1", null, viewing.title || "Без заголовка"),
-      tagChips(viewing.vault, viewing.tagIds).length > 0 &&
+      e(
+        "div",
+        {
+          class:
+            "note-view-main" +
+            (coverItem
+              ? portraitCover
+                ? " has-cover is-portrait-cover"
+                : " has-cover is-landscape-cover"
+              : ""),
+        },
+        coverItem &&
+          e(
+            "div",
+            { class: "note-view-cover-slot" },
+            e(BlobImage, {
+              key: coverItem.id,
+              cacheKey: coverItem.id,
+              alt: coverItem.name,
+              className: "note-cover",
+              load: () =>
+                attachmentPreviewBlob(user, viewing.vault, coverItem),
+              onLoad: (event: Event) => {
+                const image = event.currentTarget as HTMLImageElement;
+                setViewingCoverLayout({
+                  id: coverItem.id,
+                  portrait: image.naturalHeight > image.naturalWidth,
+                });
+              },
+            }),
+          ),
         e(
           "div",
-          { class: "tag-list" },
-          tagChips(viewing.vault, viewing.tagIds).map((tag) =>
+          { class: "note-view-copy" },
+          e("h1", null, viewing.title || "Без заголовка"),
+          tagChips(viewing.vault, viewing.tagIds).length > 0 &&
             e(
-              "span",
-              {
-                class: "tag-chip",
-                style: { "--tag-color": tag.color },
-                key: tag.id,
-              },
-              tag.name,
+              "div",
+              { class: "tag-list" },
+              tagChips(viewing.vault, viewing.tagIds).map((tag) =>
+                e(
+                  "span",
+                  {
+                    class: "tag-chip",
+                    style: { "--tag-color": tag.color },
+                    key: tag.id,
+                  },
+                  tag.name,
+                ),
+              ),
             ),
-          ),
+          viewing.html
+            ? e("div", {
+                class: "note-view-text rich-note-content",
+                dangerouslySetInnerHTML: {
+                  __html: sanitizeNoteHtml(viewing.html),
+                },
+              })
+            : viewing.text
+              ? e("div", { class: "note-view-text" }, viewing.text)
+              : e("p", { class: "muted" }, "В заметке пока нет текста."),
         ),
-      viewing.html
-        ? e("div", {
-            class: "note-view-text rich-note-content",
-            dangerouslySetInnerHTML: { __html: sanitizeNoteHtml(viewing.html) },
-          })
-        : viewing.text
-          ? e("div", { class: "note-view-text" }, viewing.text)
-          : e("p", { class: "muted" }, "В заметке пока нет текста."),
+      ),
       Boolean(viewing.checklist?.length) &&
         e(
           "section",
@@ -4403,11 +4600,11 @@ export function Planner({
           { class: "section-heading" },
           e(
             "div",
-            null,
+            { style: { gap: "16px" } },
             e("h2", null, "Комментарии"),
             e(
               "p",
-              { class: "muted" },
+              { class: "muted", style: { lineHeight: "24px" } },
               "Зашифрованное обсуждение внутри совместной заметки",
             ),
           ),
@@ -4721,7 +4918,7 @@ export function Planner({
                     openHistory(
                       current,
                       viewing.object,
-                      lifecycle === "archived" ? "archive" : "trash",
+                      "view",
                     ),
                   ),
               },
@@ -4941,7 +5138,8 @@ export function Planner({
                         ),
                       );
                     reminderSwipeOffset.current = offset;
-                    if (distance >= activation) reminderSwipeMoved.current = true;
+                    if (distance >= activation)
+                      reminderSwipeMoved.current = true;
                     setReminderSwipe({ offset, dragging: true });
                   }
                 },
@@ -5914,6 +6112,19 @@ export function Planner({
             }),
             "Показать выполненное и пропущенное",
           ),
+          e(
+            "button",
+            {
+              type: "button",
+              class: "secondary-button filter-reset-button",
+              disabled: !selectedTags.length && !showReminderHistory,
+              onClick: () => {
+                setSelectedTags([]);
+                setShowReminderHistory(false);
+              },
+            },
+            "Сбросить фильтры",
+          ),
         ),
       e(
         "div",
@@ -6382,13 +6593,21 @@ export function Planner({
       ),
       e(
         "details",
-        { class: "lifecycle-tool app-popover", onToggle: keepOnlyPopover },
+        {
+          key: "lifecycle-search-control",
+          class: "lifecycle-tool app-popover",
+          onToggle: keepOnlyPopover,
+        },
         e(
           "summary",
-          { class: "icon-button", "aria-label": "Поиск", title: "Поиск" },
+          {
+            class:
+              "icon-button notes-search-trigger" +
+              (normalized ? " search-active" : ""),
+            "aria-label": "Поиск",
+            title: "Поиск",
+          },
           e(UiIcon, { name: "search", size: 19 }),
-          normalized &&
-            e("span", { class: "mobile-control-dot", "aria-hidden": "true" }),
         ),
         e(
           "div",
@@ -6475,6 +6694,23 @@ export function Planner({
             onManage: () => openTagManager(screen),
             mode: "inline",
           }),
+          e(
+            "button",
+            {
+              type: "button",
+              class: "secondary-button filter-reset-button",
+              disabled:
+                !selectedTags.length &&
+                sort === "newest" &&
+                searchSort === "relevance",
+              onClick: () => {
+                setSelectedTags([]);
+                setSort("newest");
+                setSearchSort("relevance");
+              },
+            },
+            "Сбросить фильтры",
+          ),
         ),
       ),
       screen === "trash" &&
@@ -6893,6 +7129,12 @@ export function Planner({
               ? (a.note!.author?.time ?? 0) - (b.note!.author?.time ?? 0)
               : (b.note!.author?.time ?? 0) - (a.note!.author?.time ?? 0)),
     );
+  const hasActiveNoteFilters =
+    quickFilter !== "all" ||
+    selectedTags.length > 0 ||
+    (normalizedQuery
+      ? searchSort !== "relevance"
+      : sort !== "newest");
   return e(
     "section",
     { class: "planner planner-list-screen notes-workspace" },
@@ -6919,15 +7161,20 @@ export function Planner({
       e(
         "details",
         {
+          key: "notes-search-control",
           class: "notes-mobile-search-menu app-popover",
           onToggle: keepOnlyPopover,
         },
         e(
           "summary",
-          { class: "icon-button", "aria-label": "Поиск", title: "Поиск" },
+          {
+            class:
+              "icon-button notes-search-trigger" +
+              (normalizedQuery ? " search-active" : ""),
+            "aria-label": "Поиск",
+            title: "Поиск",
+          },
           e(UiIcon, { name: "search", size: 19 }),
-          Boolean(normalizedQuery) &&
-            e("span", { class: "mobile-control-dot", "aria-hidden": "true" }),
         ),
         e(
           "div",
@@ -6965,10 +7212,7 @@ export function Planner({
             title: "Фильтры и сортировка",
           },
           e(UiIcon, { name: "filter-dropdown", size: 20 }),
-          (quickFilter !== "all" ||
-            selectedTags.length > 0 ||
-            sort !== "newest" ||
-            searchSort !== "relevance") &&
+          hasActiveNoteFilters &&
             e("span", { class: "mobile-control-dot", "aria-hidden": "true" }),
         ),
         e(
@@ -7059,6 +7303,21 @@ export function Planner({
                 },
               }),
             ),
+          e(
+            "button",
+            {
+              type: "button",
+              class: "secondary-button filter-reset-button",
+              disabled: !hasActiveNoteFilters,
+              onClick: () => {
+                setQuickFilter("all");
+                setSelectedTags([]);
+                setSort("newest");
+                setSearchSort("relevance");
+              },
+            },
+            "Сбросить фильтры",
+          ),
         ),
       ),
       e(
@@ -7483,6 +7742,19 @@ export function Planner({
                 },
               },
             }),
+            e(
+              "button",
+              {
+                type: "button",
+                class: "secondary-button filter-reset-button",
+                disabled: quickFilter === "all" && !selectedTags.length,
+                onClick: () => {
+                  setQuickFilter("all");
+                  setSelectedTags([]);
+                },
+              },
+              "Сбросить фильтры",
+            ),
           ),
         ),
       e(
@@ -7946,13 +8218,26 @@ export function Planner({
                     " / " +
                     note!.checklist.length
                   : null,
+                reminderOverdue = Boolean(
+                  note!.reminder?.state === "active" &&
+                  serverReminders.some(
+                    (item) =>
+                      item.vault_id === current.header.id &&
+                      item.object_id === r.objectId &&
+                      item.config_id === note!.reminder!.id &&
+                      item.occurrence_status === "fired" &&
+                      (item.snooze_local ?? item.scheduled_local) <
+                        localTime(Date.now(), zone),
+                  ),
+                ),
                 swipeId = current.header.id + "." + r.id,
-                canSwipeDelete =
+                canSwipeActions =
                   !current.transfer &&
                   !current.membershipRevoked &&
                   current.role !== "viewer",
                 swipeOffset = noteSwipe?.id === swipeId ? noteSwipe.offset : 0;
               const finishSwipe = () => {
+                if (noteSwipeTouchX.current === null) return;
                 const offset = noteSwipeOffset.current,
                   width = noteSwipeWidth.current;
                 noteSwipeTouchX.current = null;
@@ -7967,8 +8252,17 @@ export function Planner({
                       ),
                     180,
                   );
+                } else if (offset <= -Math.max(140, width * 0.55)) {
+                  setNoteSwipe({ id: swipeId, offset: -width, dragging: false });
+                  window.setTimeout(
+                    () =>
+                      void run(() => toggleMainNotePinned(current, r, note!)),
+                    180,
+                  );
                 } else if (offset > 46)
                   setNoteSwipe({ id: swipeId, offset: 82, dragging: false });
+                else if (offset < -46)
+                  setNoteSwipe({ id: swipeId, offset: -82, dragging: false });
                 else setNoteSwipe(null);
               };
               return e(
@@ -7976,18 +8270,23 @@ export function Planner({
                 {
                   class:
                     "note-list-item main-note-swipe" +
+                    (swipeOffset > 46 ? " swipe-delete-revealed" : "") +
+                    (swipeOffset < -46 ? " swipe-pin-revealed" : "") +
                     (noteSwipe?.id === swipeId && noteSwipe.dragging
                       ? " dragging"
                       : ""),
                   key: swipeId,
                   "data-swipe-id": swipeId,
-                  style: { "--swipe-reveal": swipeOffset + "px" },
+                  style: {
+                    "--swipe-delete-reveal": Math.max(0, swipeOffset) + "px",
+                    "--swipe-pin-reveal": Math.max(0, -swipeOffset) + "px",
+                  },
                 },
-                canSwipeDelete &&
+                canSwipeActions &&
                   e(
                     "button",
                     {
-                      class: "main-note-swipe-action",
+                      class: "main-note-swipe-action delete",
                       "aria-label": "Переместить заметку в корзину",
                       onClick: () =>
                         void confirmMainNoteTrash(
@@ -7998,6 +8297,19 @@ export function Planner({
                     },
                     e(UiIcon, { name: "trash", size: 21 }),
                   ),
+                canSwipeActions &&
+                  e(
+                    "button",
+                    {
+                      class: "main-note-swipe-action pin",
+                      "aria-label": note!.pinned
+                        ? "Открепить заметку"
+                        : "Закрепить заметку",
+                      onClick: () =>
+                        void run(() => toggleMainNotePinned(current, r, note!)),
+                    },
+                    e(UiIcon, { name: "pin", size: 21 }),
+                  ),
                 e(
                   "button",
                   {
@@ -8006,10 +8318,11 @@ export function Planner({
                       (note!.pinned ? " pinned" : "") +
                       (coverItem ? " has-cover" : ""),
                     disabled: Boolean(current.transfer),
-                    style: canSwipeDelete
-                      ? { transform: `translateX(-${swipeOffset}px)` }
-                      : undefined,
-                    onTouchStart: canSwipeDelete
+                    style:
+                      canSwipeActions && swipeOffset
+                        ? { transform: `translateX(-${swipeOffset}px)` }
+                        : undefined,
+                    onTouchStart: canSwipeActions
                       ? (event: TouchEvent) => {
                           const element = event.currentTarget as HTMLElement,
                             existing =
@@ -8028,7 +8341,7 @@ export function Planner({
                           });
                         }
                       : undefined,
-                    onTouchMove: canSwipeDelete
+                    onTouchMove: canSwipeActions
                       ? (event: TouchEvent) => {
                           const start = noteSwipeTouchX.current,
                             currentX = event.touches[0]?.clientX;
@@ -8041,7 +8354,7 @@ export function Planner({
                                   ? Math.sign(delta) * (distance - activation)
                                   : 0,
                               offset = Math.max(
-                                0,
+                                -noteSwipeWidth.current,
                                 Math.min(
                                   noteSwipeWidth.current,
                                   noteSwipeStartOffset.current + drag,
@@ -8058,8 +8371,8 @@ export function Planner({
                           }
                         }
                       : undefined,
-                    onTouchEnd: canSwipeDelete ? finishSwipe : undefined,
-                    onTouchCancel: canSwipeDelete
+                    onTouchEnd: canSwipeActions ? finishSwipe : undefined,
+                    onTouchCancel: canSwipeActions
                       ? () => {
                           noteSwipeTouchX.current = null;
                           noteSwipeOffset.current =
@@ -8080,7 +8393,10 @@ export function Planner({
                         noteSwipeMoved.current = false;
                         return;
                       }
-                      if (noteSwipe?.id === swipeId && noteSwipe.offset > 0) {
+                      if (
+                        noteSwipe?.id === swipeId &&
+                        Math.abs(noteSwipe.offset) > 0
+                      ) {
                         setNoteSwipe(null);
                         return;
                       }
@@ -8133,15 +8449,26 @@ export function Planner({
                           "span",
                           { class: "note-meta-utilities" },
                           checklistProgress &&
-                            e("span", { class: "note-meta" }, checklistProgress),
+                            e(
+                              "span",
+                              { class: "note-meta" },
+                              checklistProgress,
+                            ),
                           note!.reminder &&
                             e(
                               "span",
                               {
-                                class: "note-reminder-meta",
+                                class:
+                                  "note-reminder-meta" +
+                                  (reminderOverdue ? " overdue" : ""),
                                 "aria-label":
-                                  "Напоминание: " +
+                                  (reminderOverdue
+                                    ? "Просроченное напоминание: "
+                                    : "Напоминание: ") +
                                   formatNoteReminder(note!.reminder.local),
+                                title: reminderOverdue
+                                  ? "Напоминание просрочено"
+                                  : undefined,
                               },
                               e(UiIcon, { name: "bell", size: 14 }),
                               formatNoteReminder(note!.reminder.local),

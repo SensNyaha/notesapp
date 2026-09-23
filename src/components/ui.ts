@@ -1,6 +1,6 @@
 import { h as e, type ComponentChildren } from 'preact';
 
-export type UiIconName='notes'|'today'|'projects'|'settings'|'logout'|'search'|'filter-dropdown'|'plus'|'sync'|'chevron-right'|'back'|'user'|'bell'|'devices'|'key'|'archive'|'trash'|'contacts'|'database'|'diagnostics'|'users'|'info'|'palette'|'lock'|'more'|'check'|'warning'|'wifi-off'|'folder'|'calendar'|'menu'|'file'|'paperclip'|'download'|'edit'|'image'|'upload'|'pin'|'copy'|'history'|'tag';
+export type UiIconName='notes'|'today'|'projects'|'settings'|'logout'|'search'|'filter-dropdown'|'plus'|'sync'|'chevron-right'|'back'|'user'|'bell'|'devices'|'key'|'archive'|'trash'|'contacts'|'database'|'diagnostics'|'users'|'info'|'palette'|'lock'|'more'|'check'|'warning'|'wifi-off'|'folder'|'calendar'|'menu'|'file'|'paperclip'|'download'|'edit'|'marker'|'move'|'image'|'upload'|'pin'|'copy'|'history'|'tag';
 
 export function UiIcon({name,size=20}:{name:UiIconName;size?:number}){
   const common={width:size,height:size,viewBox:'0 0 24 24',fill:'none',stroke:'currentColor','stroke-width':1.8,'stroke-linecap':'round','stroke-linejoin':'round','aria-hidden':'true'} as const;
@@ -39,6 +39,8 @@ export function UiIcon({name,size=20}:{name:UiIconName;size?:number}){
   if(name==='paperclip')return e('svg',common,p('m9.5 12.5 5.7-5.7a3 3 0 0 1 4.2 4.2l-7.8 7.8a5 5 0 0 1-7.1-7.1l7.6-7.6'),p('m8 15 7.7-7.7'));
   if(name==='download')return e('svg',common,p('M12 3v12M7 10l5 5 5-5'),p('M5 20h14'));
   if(name==='edit')return e('svg',common,p('M4 20h4l11-11-4-4L4 16z'),p('m13.5 6.5 4 4'));
+  if(name==='marker')return e('svg',common,p('M15 3l6 6-10 10H5v-6L15 3Z'),p('m12 6 6 6'),p('M3 21h10'));
+  if(name==='move')return e('svg',common,p('M12 2v20M2 12h20'),p('m8 6 4-4 4 4M8 18l4 4 4-4M6 8l-4 4 4 4M18 8l4 4-4 4'));
   if(name==='image')return e('svg',common,e('rect',{x:3.5,y:4,width:17,height:16,rx:2}),e('circle',{cx:9,cy:9,r:1.5}),p('m5 18 4.5-4.5 3 3 2-2 4.5 3.5'));
   if(name==='upload')return e('svg',common,p('M12 21V9M7 14l5-5 5 5'),p('M5 4h14'));
   if(name==='pin')return e('svg',common,p('M8 4h8l-1 5 3 3H6l3-3-1-5Z'),p('M12 12v9'));

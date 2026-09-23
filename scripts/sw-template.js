@@ -138,6 +138,11 @@ self.addEventListener('fetch', event => {
   const path = url.pathname;
   if (path === OCR_MANIFEST) {
     event.respondWith((async () => {
+      // The manifest names hashed OCR bundles. Always keep it paired with the
+      // currently active shell instead of mixing releases in the model cache.
+      const shellCache = await caches.open(CACHE);
+      const shellManifest = await shellCache.match(OCR_MANIFEST);
+      if (shellManifest) return shellManifest;
       const modelCache = await caches.open(OCR_MODEL_CACHE);
       try {
         const response = await fetch(event.request);

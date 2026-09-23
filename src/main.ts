@@ -37,6 +37,8 @@ applyTheme();
 type DefinitionRow = [term: string, value: string, wide?: boolean];
 type UpdatePhase = 'available' | 'downloading' | 'ready' | 'error';
 type InitialCacheProgress = { loaded: number; total: number };
+const CONNECTION_RETRY_MS = 10_000;
+const CONNECTION_ERROR_MS = 2_000;
 const vaultWorkspacePages = new Set(['today', 'projects', 'archive', 'trash']);
 function initialReminderTarget():ReminderTarget|undefined{
   const match=location.hash.match(/^#reminder=([0-9a-f.-]+)$/),parts=match?.[1].split('.');
@@ -156,6 +158,33 @@ function App() {
     window.addEventListener('online', wake);
     return () => { authGeneration.current++; document.removeEventListener('visibilitychange', wake); window.removeEventListener('online', wake); };
   }, []);
+  useEffect(() => {
+    const wentOnline=()=>setConnection('checking');
+    const wentOffline=()=>setConnection('offline');
+    window.addEventListener('online',wentOnline);
+    window.addEventListener('offline',wentOffline);
+    return()=>{window.removeEventListener('online',wentOnline);window.removeEventListener('offline',wentOffline);};
+  },[]);
+  useEffect(()=>{
+    if(connection==='error'){
+      const timer=window.setTimeout(()=>setConnection(current=>current==='error'?'offline':current),CONNECTION_ERROR_MS);
+      return()=>window.clearTimeout(timer);
+    }
+    if(connection==='offline'){
+      const timer=window.setTimeout(()=>setConnection(current=>current==='offline'?'checking':current),CONNECTION_RETRY_MS);
+      return()=>window.clearTimeout(timer);
+    }
+    return undefined;
+  },[connection]);
+  useEffect(()=>{
+    if(connection!=='checking')return undefined;
+    if(!navigator.onLine){setConnection('offline');return undefined;}
+    let active=true;
+    void fetch('/api/health',{cache:'no-store',signal:AbortSignal.timeout(CONNECTION_RETRY_MS)})
+      .then(response=>{if(!response.ok)throw new Error(`HTTP ${response.status}`);if(active)setConnection('online');})
+      .catch(()=>{if(active)setConnection('error');});
+    return()=>{active=false;};
+  },[connection]);
   useEffect(() => {
     if (!user || page === 'home' || user.mustChangePassword) return;
     let active=true,running=false;

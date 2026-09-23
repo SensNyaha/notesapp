@@ -55,8 +55,10 @@ test('offline shell works; API and non-public paths bypass the Service Worker ca
   assert(publicAssets.includes('/manifest.webmanifest'));
   assert(!publicAssets.some(path => /\.(?:ts|map)$/.test(path) || path.startsWith('/src/')));
   assert(!publicAssets.some(path => path.startsWith('/api/') || path.includes('sqlite')));
-  assert(!publicAssets.some(path => path.startsWith('/ocr-models/')),
-    'OCR manifests and model weights must not be precached in the shell');
+  assert(publicAssets.includes('/ocr-models/manifest.json'),
+    'the OCR manifest must stay version-locked to the active application shell');
+  assert(!publicAssets.some(path => path.startsWith('/ocr-models/') && path !== '/ocr-models/manifest.json'),
+    'OCR model weights must not be precached in the shell');
   assert(!publicAssets.some(path => path.startsWith('/ocr-runtime/')),
     'OCR runtime files must not be precached in the shell');
   assert.equal(activationRequests, 0, 'installation must wait for user action');

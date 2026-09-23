@@ -315,7 +315,8 @@ export function OCRRegionSelector({
   const hasSelection = value.strokes.length > 0;
   const strokeWidth = (stroke: OCRSelectionStroke) =>
     Math.max(1, stroke.width * Math.min(size.width, size.height));
-  const transform = `translate(calc(-50% + ${pan.x}px), calc(-50% + ${pan.y}px)) scale(${zoom})`;
+  const displayScale = fitScale * zoom;
+  const transform = `translate(calc(-50% + ${pan.x}px), calc(-50% + ${pan.y}px)) scale(${displayScale})`;
 
   const previewImage = () => e("img", {
     src: url,
@@ -386,13 +387,17 @@ export function OCRRegionSelector({
             class: tool === "marker" ? "primary compact" : "secondary-button compact",
             onClick: () => setTool("marker"),
             "aria-pressed": tool === "marker",
-          }, e(UiIcon, { name: "edit", size: 16 }), "Маркер"),
+            "aria-label": "Маркер",
+            title: "Маркер",
+          }, e(UiIcon, { name: "marker", size: 18 }), e("span", { class: "ocr-marker-tool-label" }, "Маркер")),
           e("button", {
             type: "button",
             class: tool === "pan" ? "primary compact" : "secondary-button compact",
             onClick: () => setTool("pan"),
             "aria-pressed": tool === "pan",
-          }, "Перемещение")),
+            "aria-label": "Перемещение",
+            title: "Перемещение",
+          }, e(UiIcon, { name: "move", size: 20 }), e("span", { class: "ocr-marker-tool-label" }, "Перемещение"))),
         e("label", { class: "ocr-marker-width" },
           e("span", null, "Ширина"),
           e("input", {
@@ -441,8 +446,8 @@ export function OCRRegionSelector({
         e("div", {
           class: "ocr-marker-media",
           style: {
-            width: `${fittedSize.width}px`,
-            height: `${fittedSize.height}px`,
+            width: `${size.width}px`,
+            height: `${size.height}px`,
             transform,
           },
         },

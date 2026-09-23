@@ -39,6 +39,19 @@ function median(values: number[]) {
     : (sorted[middle - 1] + sorted[middle]) / 2;
 }
 
+function medianDeviation(values: number[]) {
+  const finite = values.filter(Number.isFinite).sort((a, b) => a - b);
+  if (!finite.length) return 0;
+  const middle = Math.floor(finite.length / 2);
+  const center = finite.length % 2
+    ? finite[middle]
+    : (finite[middle - 1] + finite[middle]) / 2;
+  const deviations = finite.map((value) => Math.abs(value - center)).sort((a, b) => a - b);
+  return deviations.length % 2
+    ? deviations[middle]
+    : (deviations[middle - 1] + deviations[middle]) / 2;
+}
+
 function rowOrder(lines: OCRLine[]) {
   return [...lines].sort((a, b) => {
     const ab = ocrLineBounds(a);
@@ -47,6 +60,11 @@ function rowOrder(lines: OCRLine[]) {
     if (Math.abs(ab.top - bb.top) <= tolerance) return ab.left - bb.left;
     return ab.top - bb.top;
   });
+}
+
+function sameVisualRow(first: OCRLineBounds, second: OCRLineBounds) {
+  const overlap = Math.min(first.bottom, second.bottom) - Math.max(first.top, second.top);
+  return overlap >= Math.min(first.height, second.height) * 0.45;
 }
 
 interface ColumnSplit {
@@ -71,6 +89,10 @@ function bestColumnSplit(lines: OCRLine[]): ColumnSplit | null {
     const left = bounds.filter((item) => item.bounds.right < split);
     const right = bounds.filter((item) => item.bounds.left > split);
     if (left.length < 2 || right.length < 2) continue;
+    const alignmentLimit = Math.max(6, medianHeight * 0.65);
+    if (medianDeviation(left.map((item) => item.bounds.left)) > alignmentLimit
+        || medianDeviation(right.map((item) => item.bounds.left)) > alignmentLimit)
+      continue;
     const leftRight = Math.max(...left.map((item) => item.bounds.right));
     const rightLeft = Math.min(...right.map((item) => item.bounds.left));
     const gutter = rightLeft - leftRight;
@@ -81,6 +103,15 @@ function bestColumnSplit(lines: OCRLine[]): ColumnSplit | null {
     const rightBottom = Math.max(...right.map((item) => item.bounds.bottom));
     const overlap = Math.min(leftBottom, rightBottom) - Math.max(leftTop, rightTop);
     if (overlap <= medianHeight) continue;
+    const columnTop = Math.min(leftTop, rightTop);
+    const columnBottom = Math.max(leftBottom, rightBottom);
+    const columnLines = new Set([...left, ...right].map((item) => item.line));
+    const hasInterleavedSpanningLine = bounds.some((item) =>
+      !columnLines.has(item.line)
+      && (item.bounds.top + item.bounds.bottom) / 2 > columnTop
+      && (item.bounds.top + item.bounds.bottom) / 2 < columnBottom
+    );
+    if (hasInterleavedSpanningLine) continue;
     const score = gutter * Math.min(left.length, right.length);
     if (!best || score > best.score) {
       const leftLines = new Set(left.map((item) => item.line));
@@ -94,6 +125,43 @@ function bestColumnSplit(lines: OCRLine[]): ColumnSplit | null {
     }
   }
   return best;
+}
+
+const DOMAIN_CHARACTER_MAP: Record<string, string> = {
+  а: "a", А: "A", в: "b", В: "B", с: "c", С: "C",
+  е: "e", Е: "E", і: "i", І: "I", к: "k", К: "K",
+  м: "m", М: "M", п: "n", П: "N", о: "o", О: "O",
+  р: "p", Р: "P", т: "t", Т: "T", х: "x", Х: "X",
+  у: "y", У: "Y",
+};
+const TECHNICAL_ACRONYMS = new Set([
+  "API", "CPU", "DNS", "DPI", "GPU", "HTTP", "HTTPS", "IP", "LAN",
+  "OCR", "PWA", "RAM", "SSH", "TCP", "TLS", "UDP", "URL", "VPN", "WAN",
+]);
+const DOMAIN_TLDS = new Set([
+  "app", "biz", "com", "dev", "info", "io", "net", "online", "org", "ru",
+  "site", "tech", "рф",
+]);
+
+function latinizeDomainToken(token: string) {
+  if (!/[A-Za-z]/.test(token) || !/[А-Яа-яЁёІі]/.test(token)) return token;
+  const normalized = Array.from(token, (character) =>
+    DOMAIN_CHARACTER_MAP[character] ?? character
+  ).join("");
+  const tld = normalized.split(".").at(-1)?.toLowerCase() ?? "";
+  return DOMAIN_TLDS.has(tld) ? normalized : token;
+}
+
+export function normalizeOCRTechnicalText(value: string) {
+  return value
+    .replace(/[\p{L}\p{N}-]+(?:\.[\p{L}\p{N}-]+)+/gu, latinizeDomainToken)
+    .replace(/[A-ZА-ЯЁ№]{2,8}/g, (token) => {
+      if (!/[A-Z]/.test(token) || !/[А-ЯЁ№]/.test(token)) return token;
+      const normalized = Array.from(token, (character) =>
+        character === "№" ? "N" : DOMAIN_CHARACTER_MAP[character] ?? character
+      ).join("");
+      return TECHNICAL_ACRONYMS.has(normalized) ? normalized : token;
+    });
 }
 
 export function resolveReadingOrder(lines: OCRLine[]): OCRLine[] {
@@ -121,12 +189,19 @@ export function composeOCRText(lines: OCRLine[]) {
   let result = "";
   for (let index = 0; index < ordered.length; index++) {
     const current = ordered[index];
+    const currentText = normalizeOCRTechnicalText(current.text.trimEnd());
     if (index > 0) {
       const previous = ordered[index - 1];
-      const gap = ocrLineBounds(current).top - ocrLineBounds(previous).bottom;
-      result += medianHeight > 0 && gap > medianHeight * 1.15 ? "\n\n" : "\n";
+      const currentBounds = ocrLineBounds(current);
+      const previousBounds = ocrLineBounds(previous);
+      if (sameVisualRow(previousBounds, currentBounds)) {
+        if (!/\s$/.test(result) && !/^[,.;:!?)]/.test(currentText)) result += " ";
+      } else {
+        const gap = currentBounds.top - previousBounds.bottom;
+        result += medianHeight > 0 && gap > medianHeight * 1.15 ? "\n\n" : "\n";
+      }
     }
-    result += current.text.trimEnd();
+    result += currentText;
   }
   return result.trim();
 }

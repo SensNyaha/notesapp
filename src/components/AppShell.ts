@@ -97,9 +97,10 @@ export function AppShell({user,active,onNavigate,onHome,onBackGesture,syncing,co
     document.addEventListener('pointerdown',down,true);window.addEventListener('pointermove',move,{passive:false});window.addEventListener('pointerup',finish);window.addEventListener('pointercancel',finish);
     return()=>{document.removeEventListener('pointerdown',down,true);window.removeEventListener('pointermove',move);window.removeEventListener('pointerup',finish);window.removeEventListener('pointercancel',finish);};
   },[]);
-  const status=syncing?'Синхронизация…':connection==='checking'?'Проверяем связь…':connection==='offline'?'Офлайн':connection==='error'?'Ошибка связи':connection==='auth'?'Нужен вход':'Синхронизировано';
+  const status=connection==='checking'?'Попытка подключения…':connection==='offline'?'Нет подключения · работа офлайн':connection==='error'?'Не удалось подключиться':connection==='auth'?'Нужен вход':syncing?'Синхронизация…':'Подключено';
   const statusVisible=syncing||connection!=='online';
-  const tone=connection==='offline'?'warning':connection==='error'||connection==='auth'?'danger':syncing||connection==='checking'?'accent':'success';
+  const tone=connection==='offline'||connection==='checking'?'warning':connection==='error'||connection==='auth'?'danger':'success';
+  const connectionClass=connection==='checking'?' reconnecting':'';
   const rootNav=workspaceReady?nav:nav.filter(([id])=>id==='notes'||id==='settings');
   return e('div',{class:'app-shell'},
     e('aside',{class:'app-sidebar','aria-label':'Основная навигация'},
@@ -109,7 +110,7 @@ export function AppShell({user,active,onNavigate,onHome,onBackGesture,syncing,co
       e('nav',{class:'shell-nav'},rootNav.map(([id,label,icon])=>
         e('button',{key:id,class:active===id?'active':'','aria-current':active===id?'page':undefined,onClick:()=>onNavigate(id),title:label},
           e(UiIcon,{name:icon}),e('span',null,label)))),
-      e('div',{class:'sidebar-sync '+(syncing?'syncing':''),title:status,'aria-label':status},e(StatusDot,{tone}),statusVisible&&e('span',null,status)),
+      e('div',{class:'sidebar-sync'+connectionClass,title:status,'aria-label':status},e(StatusDot,{tone}),statusVisible&&e('span',null,status)),
       e('div',{class:'sidebar-account'},
         e('span',{class:'avatar','aria-hidden':'true'},user.login.slice(0,1).toUpperCase()),
         e('div',{class:'sidebar-account-copy'},e('strong',null,user.login),e('small',null,user.role==='admin'?'Администратор':'Пользователь')),
@@ -118,16 +119,13 @@ export function AppShell({user,active,onNavigate,onHome,onBackGesture,syncing,co
     e('div',{class:'shell-main'},
       e('header',{class:'mobile-shell-header'},
         e('button',{class:'mobile-brand',onClick:onHome,'aria-label':'Tasks'},
+          e('span',{class:'mobile-sync-indicator'+connectionClass,'aria-label':status,title:status,role:'status'},e(StatusDot,{tone})),
           e('img',{src:'/icon.svg',width:30,height:30,alt:''}),e('strong',null,'Tasks')),
         e('div',{class:'mobile-shell-context'},workspaceReady&&vaultContext&&
           e('label',{class:'mobile-vault-context'},
             e(UiIcon,{name:'database',size:16}),
             e('select',{value:vaultContext.value,'aria-label':'Текущее хранилище',onChange:(event:Event)=>vaultContext.onChange((event.target as HTMLSelectElement).value)},
-              !vaultContext.value&&e('option',{value:'',disabled:true},'Выберите хранилище'),vaultContext.options.map(option=>e('option',{key:option.value,value:option.value},option.label))))),
-        e('div',{class:'mobile-header-actions'},
-          e('span',{class:'mobile-sync-indicator '+(syncing?'syncing':''),'aria-label':status,title:status,role:'status'},e(StatusDot,{tone})))),
-      connection==='offline'&&e('div',{class:'offline-banner shell-offline',role:'status'},
-        e(UiIcon,{name:'wifi-off',size:18}),e('div',null,e('strong',null,'Работа без подключения'),e('span',null,'Изменения сохраняются локально и синхронизируются после восстановления сети.'))),
+              !vaultContext.value&&e('option',{value:'',disabled:true},'Выберите хранилище'),vaultContext.options.map(option=>e('option',{key:option.value,value:option.value},option.label)))))),
       error&&e('div',{class:'shell-message error',role:'alert'},error),
       notice&&e('div',{class:'shell-message auth-notice',role:'status'},notice),
       updateNotice,

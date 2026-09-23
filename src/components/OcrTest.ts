@@ -82,7 +82,6 @@ export function OcrTestScreen({
   const modelAbort = useRef<AbortController | null>(null);
   const modelManager = useRef(new OCRModelManager()).current;
   const fileInput = useRef<HTMLInputElement>(null);
-  const settingsMenu = useRef<HTMLDetailsElement>(null);
   const [title, setTitle] = useState("");
   const [html, setHtml] = useState("");
   const [text, setText] = useState("");
@@ -511,7 +510,7 @@ export function OcrTestScreen({
         ),
         e(
           "details",
-          { class: "ocr-settings-menu", ref: settingsMenu },
+          { class: "ocr-settings-menu" },
           e(
             "summary",
             {
@@ -524,26 +523,6 @@ export function OcrTestScreen({
           e(
             "div",
             { class: "ocr-settings-menu-panel" },
-            e(
-              "header",
-              { class: "ocr-settings-mobile-header" },
-              e(
-                "button",
-                {
-                  type: "button",
-                  class: "ocr-settings-back",
-                  onClick: () => {
-                    if (!settingsMenu.current) return;
-                    settingsMenu.current.open = false;
-                    settingsMenu.current.querySelector<HTMLElement>(":scope > summary")?.focus();
-                  },
-                  "aria-label": "Закрыть настройки OCR",
-                },
-                e(UiIcon, { name: "back", size: 20 }),
-                e("span", null, "Назад"),
-              ),
-              e("strong", null, "Настройки OCR"),
-            ),
             e(
               "p",
               {
@@ -832,6 +811,7 @@ export function OcrTestScreen({
             title: "Убрать изображение",
           }, e(UiIcon, { name: "trash", size: 16 })),
         ),
+      error && e("p", { class: "error", role: "alert" }, error),
       file && e(OCRRegionSelector, {
         file,
         value: selection,
@@ -845,7 +825,6 @@ export function OcrTestScreen({
           setOcrDraftHtml("");
         },
       }),
-      error && e("p", { class: "error", role: "alert" }, error),
       !capabilities.worker &&
         e("p", { class: "error" }, "Web Worker недоступен в этом браузере."),
       ),

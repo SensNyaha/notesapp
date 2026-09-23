@@ -30,7 +30,8 @@ for (const path of paths) {
   const rel = relative(root, path).replaceAll('\\', '/');
   const size = (await stat(path)).size;
   const deferredOcrModel =
-    rel.startsWith('ocr-models/') || rel.startsWith('ocr-runtime/');
+    (rel.startsWith('ocr-models/') && rel !== 'ocr-models/manifest.json') ||
+    rel.startsWith('ocr-runtime/');
   const deferredOcrBundle =
     /(?:htr\.worker-|worker-entry-|ort\.bundle\.min-)/.test(rel) ||
     (rel.startsWith('assets/dist-') && size > 5_000_000);
